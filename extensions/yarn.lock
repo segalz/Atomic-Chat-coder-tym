@@ -424,6 +424,18 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@janhq/core@file:../../core/package.tgz::locator=%40janhq%2Fturboquant-extension%40workspace%3Aturboquant-extension":
+  version: 0.1.10
+  resolution: "@janhq/core@file:../../core/package.tgz#../../core/package.tgz::hash=620650&locator=%40janhq%2Fturboquant-extension%40workspace%3Aturboquant-extension"
+  dependencies:
+    rxjs: "npm:^7.8.1"
+    ulidx: "npm:^2.3.0"
+  peerDependencies:
+    react: 19.0.0
+  checksum: 10c0/0acb7e100648a07236ee094477255d1d96fb30e298838600be2f4bde8c6a6e18d60dd109788b1036786c78a17bb84eeb860d7d3b8754c0c9eff2ebec3bd4f379
+  languageName: node
+  linkType: hard
+
 "@janhq/core@file:../../core/package.tgz::locator=%40janhq%2Fvector-db-extension%40workspace%3Avector-db-extension":
   version: 0.1.10
   resolution: "@janhq/core@file:../../core/package.tgz#../../core/package.tgz::hash=620650&locator=%40janhq%2Fvector-db-extension%40workspace%3Avector-db-extension"
@@ -545,9 +557,21 @@ __metadata:
   languageName: node
   linkType: soft
 
+"@janhq/tauri-plugin-llamacpp-api@link:../../src-tauri/plugins/tauri-plugin-llamacpp::locator=%40janhq%2Fturboquant-extension%40workspace%3Aturboquant-extension":
+  version: 0.0.0-use.local
+  resolution: "@janhq/tauri-plugin-llamacpp-api@link:../../src-tauri/plugins/tauri-plugin-llamacpp::locator=%40janhq%2Fturboquant-extension%40workspace%3Aturboquant-extension"
+  languageName: node
+  linkType: soft
+
 "@janhq/tauri-plugin-mlx-api@link:../../src-tauri/plugins/tauri-plugin-mlx::locator=%40janhq%2Fmlx-extension%40workspace%3Amlx-extension":
   version: 0.0.0-use.local
   resolution: "@janhq/tauri-plugin-mlx-api@link:../../src-tauri/plugins/tauri-plugin-mlx::locator=%40janhq%2Fmlx-extension%40workspace%3Amlx-extension"
+  languageName: node
+  linkType: soft
+
+"@janhq/tauri-plugin-mlx-api@link:../../src-tauri/plugins/tauri-plugin-mlx::locator=%40janhq%2Fturboquant-extension%40workspace%3Aturboquant-extension":
+  version: 0.0.0-use.local
+  resolution: "@janhq/tauri-plugin-mlx-api@link:../../src-tauri/plugins/tauri-plugin-mlx::locator=%40janhq%2Fturboquant-extension%40workspace%3Aturboquant-extension"
   languageName: node
   linkType: soft
 
@@ -573,6 +597,23 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@janhq/tauri-plugin-vector-db-api@link:../../src-tauri/plugins/tauri-plugin-vector-db::locator=%40janhq%2Fvector-db-extension%40workspace%3Avector-db-extension"
   languageName: node
+  linkType: soft
+
+"@janhq/turboquant-extension@workspace:turboquant-extension":
+  version: 0.0.0-use.local
+  resolution: "@janhq/turboquant-extension@workspace:turboquant-extension"
+  dependencies:
+    "@janhq/core": ../../core/package.tgz
+    "@janhq/tauri-plugin-llamacpp-api": "link:../../src-tauri/plugins/tauri-plugin-llamacpp"
+    "@janhq/tauri-plugin-mlx-api": "link:../../src-tauri/plugins/tauri-plugin-mlx"
+    "@tauri-apps/api": "npm:2.8.0"
+    "@tauri-apps/plugin-http": "npm:2.5.0"
+    "@tauri-apps/plugin-log": "npm:^2.6.0"
+    cpx: "npm:1.5.0"
+    rimraf: "npm:3.0.2"
+    rolldown: "npm:1.0.0-beta.1"
+    typescript: "npm:5.9.2"
+  languageName: unknown
   linkType: soft
 
 "@janhq/vector-db-extension@workspace:vector-db-extension":

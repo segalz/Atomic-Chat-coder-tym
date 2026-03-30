@@ -102,7 +102,8 @@ describe('Interface Settings Route', () => {
 
     expect(screen.getByTestId('theme-switcher')).toBeInTheDocument()
     expect(screen.getByTestId('font-size-switcher')).toBeInTheDocument()
-    expect(screen.getByTestId('accent-color-picker')).toBeInTheDocument()
+    // Accent color picker is intentionally hidden in the UI.
+    expect(screen.queryByTestId('accent-color-picker')).not.toBeInTheDocument()
   })
 
   it('should render reset interface button', () => {
@@ -152,19 +153,19 @@ describe('Interface Settings Route', () => {
     expect(cards.length).toBeGreaterThan(0)
   })
 
-  it('should have proper responsive layout classes', () => {
+  it('should have expected layout classes', () => {
     const Component = InterfaceRoute.component as React.ComponentType
-    render(<Component />)
+    const { container } = render(<Component />)
 
-    const cardItems = screen.getAllByTestId('card-item')
+    const root = container.firstElementChild as HTMLElement | null
+    expect(root).toBeInTheDocument()
+    expect(root?.className).toContain('flex')
+    expect(root?.className).toContain('flex-col')
 
-    // Check that some card items have responsive classes
-    const responsiveItems = cardItems.filter(item =>
-      item.className?.includes('flex-col') ||
-      item.className?.includes('sm:flex-row')
+    const hasMainLayoutRow = Array.from(container.querySelectorAll('div')).some((el) =>
+      (el as HTMLElement).className.includes('h-[calc(100%-60px)]')
     )
-
-    expect(responsiveItems.length).toBeGreaterThan(0)
+    expect(hasMainLayoutRow).toBe(true)
   })
 
   it('should render main layout structure', () => {

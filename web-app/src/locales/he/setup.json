@@ -1,0 +1,17 @@
+{
+  "welcome": "ברוכים הבאים ל-Atomic Bot",
+  "description": "כדי להתחיל, הפעל במהירות עם מודל Atomic Bot או בחר להגדיר ספק מקומי או מרוחק משלך",
+  "descriptionWeb": "כדי להתחיל, תצטרך להתחבר למודל ענן באמצעות מפתח API",
+  "quickStart": "התחלה מהירה עם מודל Atomic Bot",
+  "quickStartDescription": "ללא צורך בהגדרה",
+  "quickStartFailed": "משהו השתבש. אנא נסה שוב.",
+  "downloading": "מוריד…",
+  "downloadPreparing": "מתחיל הורדה…",
+  "downloadingDescription": "אנא המתן בזמן שאנחנו מורידים את המודל. זה עשוי לקחת מספר דקות.",
+  "orDivider": "או",
+  "localModel": "הגדר מודל מקומי",
+  "remoteProvider": "הגדר ספק מרוחק",
+  "turboQuantTagline": "מודלי AI מקומיים על המכשיר שלך עם TurboQuant של Google - מהיר במיוחד על חומרה ממוצעת.",
+  "skip": "דלג",
+  "modelUnavailable": "עדיין לא בקטלוג — פתח את ה-Hub לאחר ההתחברות."
+}

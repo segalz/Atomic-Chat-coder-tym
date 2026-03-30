@@ -1,0 +1,23 @@
+{
+  "sortNewest": "חדש ביותר",
+  "sortMostDownloaded": "הכי מורדים",
+  "newChat": "צ'אט חדש",
+  "download": "הורד",
+  "downloaded": "הורד",
+  "loadingModels": "טוען מודלים...",
+  "noModels": "לא נמצאו מודלים",
+  "by": "מאת",
+  "downloads": "הורדות",
+  "variants": "גרסאות",
+  "showVariants": "הצג גרסאות",
+  "useModel": "השתמש במודל זה",
+  "downloadModel": "הורד מודל",
+  "tools": "כלים",
+  "searchPlaceholder": "חפש מודלים ב-Hugging Face...",
+  "recTitle": "מומלצים",
+  "recEverydayUse": "שימוש יומיומי",
+  "recVisionKnowledge": "ראייה וידע",
+  "recFinetuningChat": "כוונון עדין וצ'אט",
+  "recMathReasoning": "מתמטיקה והסקה",
+  "backToModels": "חזרה למודלים"
+}

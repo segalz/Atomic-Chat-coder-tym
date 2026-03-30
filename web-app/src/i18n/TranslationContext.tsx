@@ -3,6 +3,9 @@ import i18next, { loadTranslations } from "./setup"
 import { useGeneralSetting } from "@/hooks/useGeneralSetting"
 import { TranslationContext } from "./context"
 
+// RTL languages
+const RTL_LANGUAGES = ['he', 'ar', 'fa', 'ur']
+
 // Translation provider component
 export const TranslationProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
 	// Get the current language from general settings
@@ -17,10 +20,13 @@ export const TranslationProvider: React.FC<{ children: ReactNode }> = ({ childre
 		}
 	}, [])
 
-	// Update language when currentLanguage changes
+	// Update language and document direction when currentLanguage changes
 	useEffect(() => {
 		if (currentLanguage) {
 			i18next.changeLanguage(currentLanguage)
+			const dir = RTL_LANGUAGES.includes(currentLanguage) ? 'rtl' : 'ltr'
+			document.documentElement.dir = dir
+			document.documentElement.lang = currentLanguage
 		}
 	}, [currentLanguage])
 

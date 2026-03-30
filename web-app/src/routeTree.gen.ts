@@ -12,6 +12,8 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as SystemMonitorRouteImport } from './routes/system-monitor'
 import { Route as LogsRouteImport } from './routes/logs'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as PromptLibraryIndexRouteImport } from './routes/prompt-library/index'
+import { Route as ProjectModeIndexRouteImport } from './routes/project-mode/index'
 import { Route as HubIndexRouteImport } from './routes/hub/index'
 import { Route as ThreadsThreadIdRouteImport } from './routes/threads/$threadId'
 import { Route as SettingsShortcutsRouteImport } from './routes/settings/shortcuts'
@@ -27,6 +29,9 @@ import { Route as SettingsClaudeCodeRouteImport } from './routes/settings/claude
 import { Route as SettingsAttachmentsRouteImport } from './routes/settings/attachments'
 import { Route as SettingsAssistantRouteImport } from './routes/settings/assistant'
 import { Route as ProjectProjectIdRouteImport } from './routes/project/$projectId'
+import { Route as ProjectModeVisionRouteImport } from './routes/project-mode/vision'
+import { Route as ProjectModeTranslationRouteImport } from './routes/project-mode/translation'
+import { Route as ProjectModePlanRouteImport } from './routes/project-mode/plan'
 import { Route as LocalApiServerLogsRouteImport } from './routes/local-api-server/logs'
 import { Route as HubModelIdRouteImport } from './routes/hub/$modelId'
 import { Route as SettingsProvidersIndexRouteImport } from './routes/settings/providers/index'
@@ -45,6 +50,16 @@ const LogsRoute = LogsRouteImport.update({
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PromptLibraryIndexRoute = PromptLibraryIndexRouteImport.update({
+  id: '/prompt-library/',
+  path: '/prompt-library/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ProjectModeIndexRoute = ProjectModeIndexRouteImport.update({
+  id: '/project-mode/',
+  path: '/project-mode/',
   getParentRoute: () => rootRouteImport,
 } as any)
 const HubIndexRoute = HubIndexRouteImport.update({
@@ -122,6 +137,21 @@ const ProjectProjectIdRoute = ProjectProjectIdRouteImport.update({
   path: '/project/$projectId',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ProjectModeVisionRoute = ProjectModeVisionRouteImport.update({
+  id: '/project-mode/vision',
+  path: '/project-mode/vision',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ProjectModeTranslationRoute = ProjectModeTranslationRouteImport.update({
+  id: '/project-mode/translation',
+  path: '/project-mode/translation',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ProjectModePlanRoute = ProjectModePlanRouteImport.update({
+  id: '/project-mode/plan',
+  path: '/project-mode/plan',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const LocalApiServerLogsRoute = LocalApiServerLogsRouteImport.update({
   id: '/local-api-server/logs',
   path: '/local-api-server/logs',
@@ -150,6 +180,9 @@ export interface FileRoutesByFullPath {
   '/system-monitor': typeof SystemMonitorRoute
   '/hub/$modelId': typeof HubModelIdRoute
   '/local-api-server/logs': typeof LocalApiServerLogsRoute
+  '/project-mode/plan': typeof ProjectModePlanRoute
+  '/project-mode/translation': typeof ProjectModeTranslationRoute
+  '/project-mode/vision': typeof ProjectModeVisionRoute
   '/project/$projectId': typeof ProjectProjectIdRoute
   '/settings/assistant': typeof SettingsAssistantRoute
   '/settings/attachments': typeof SettingsAttachmentsRoute
@@ -165,6 +198,8 @@ export interface FileRoutesByFullPath {
   '/settings/shortcuts': typeof SettingsShortcutsRoute
   '/threads/$threadId': typeof ThreadsThreadIdRoute
   '/hub/': typeof HubIndexRoute
+  '/project-mode/': typeof ProjectModeIndexRoute
+  '/prompt-library/': typeof PromptLibraryIndexRoute
   '/settings/providers/$providerName': typeof SettingsProvidersProviderNameRoute
   '/settings/providers/': typeof SettingsProvidersIndexRoute
 }
@@ -174,6 +209,9 @@ export interface FileRoutesByTo {
   '/system-monitor': typeof SystemMonitorRoute
   '/hub/$modelId': typeof HubModelIdRoute
   '/local-api-server/logs': typeof LocalApiServerLogsRoute
+  '/project-mode/plan': typeof ProjectModePlanRoute
+  '/project-mode/translation': typeof ProjectModeTranslationRoute
+  '/project-mode/vision': typeof ProjectModeVisionRoute
   '/project/$projectId': typeof ProjectProjectIdRoute
   '/settings/assistant': typeof SettingsAssistantRoute
   '/settings/attachments': typeof SettingsAttachmentsRoute
@@ -189,6 +227,8 @@ export interface FileRoutesByTo {
   '/settings/shortcuts': typeof SettingsShortcutsRoute
   '/threads/$threadId': typeof ThreadsThreadIdRoute
   '/hub': typeof HubIndexRoute
+  '/project-mode': typeof ProjectModeIndexRoute
+  '/prompt-library': typeof PromptLibraryIndexRoute
   '/settings/providers/$providerName': typeof SettingsProvidersProviderNameRoute
   '/settings/providers': typeof SettingsProvidersIndexRoute
 }
@@ -199,6 +239,9 @@ export interface FileRoutesById {
   '/system-monitor': typeof SystemMonitorRoute
   '/hub/$modelId': typeof HubModelIdRoute
   '/local-api-server/logs': typeof LocalApiServerLogsRoute
+  '/project-mode/plan': typeof ProjectModePlanRoute
+  '/project-mode/translation': typeof ProjectModeTranslationRoute
+  '/project-mode/vision': typeof ProjectModeVisionRoute
   '/project/$projectId': typeof ProjectProjectIdRoute
   '/settings/assistant': typeof SettingsAssistantRoute
   '/settings/attachments': typeof SettingsAttachmentsRoute
@@ -214,6 +257,8 @@ export interface FileRoutesById {
   '/settings/shortcuts': typeof SettingsShortcutsRoute
   '/threads/$threadId': typeof ThreadsThreadIdRoute
   '/hub/': typeof HubIndexRoute
+  '/project-mode/': typeof ProjectModeIndexRoute
+  '/prompt-library/': typeof PromptLibraryIndexRoute
   '/settings/providers/$providerName': typeof SettingsProvidersProviderNameRoute
   '/settings/providers/': typeof SettingsProvidersIndexRoute
 }
@@ -225,6 +270,9 @@ export interface FileRouteTypes {
     | '/system-monitor'
     | '/hub/$modelId'
     | '/local-api-server/logs'
+    | '/project-mode/plan'
+    | '/project-mode/translation'
+    | '/project-mode/vision'
     | '/project/$projectId'
     | '/settings/assistant'
     | '/settings/attachments'
@@ -240,6 +288,8 @@ export interface FileRouteTypes {
     | '/settings/shortcuts'
     | '/threads/$threadId'
     | '/hub/'
+    | '/project-mode/'
+    | '/prompt-library/'
     | '/settings/providers/$providerName'
     | '/settings/providers/'
   fileRoutesByTo: FileRoutesByTo
@@ -249,6 +299,9 @@ export interface FileRouteTypes {
     | '/system-monitor'
     | '/hub/$modelId'
     | '/local-api-server/logs'
+    | '/project-mode/plan'
+    | '/project-mode/translation'
+    | '/project-mode/vision'
     | '/project/$projectId'
     | '/settings/assistant'
     | '/settings/attachments'
@@ -264,6 +317,8 @@ export interface FileRouteTypes {
     | '/settings/shortcuts'
     | '/threads/$threadId'
     | '/hub'
+    | '/project-mode'
+    | '/prompt-library'
     | '/settings/providers/$providerName'
     | '/settings/providers'
   id:
@@ -273,6 +328,9 @@ export interface FileRouteTypes {
     | '/system-monitor'
     | '/hub/$modelId'
     | '/local-api-server/logs'
+    | '/project-mode/plan'
+    | '/project-mode/translation'
+    | '/project-mode/vision'
     | '/project/$projectId'
     | '/settings/assistant'
     | '/settings/attachments'
@@ -288,6 +346,8 @@ export interface FileRouteTypes {
     | '/settings/shortcuts'
     | '/threads/$threadId'
     | '/hub/'
+    | '/project-mode/'
+    | '/prompt-library/'
     | '/settings/providers/$providerName'
     | '/settings/providers/'
   fileRoutesById: FileRoutesById
@@ -298,6 +358,9 @@ export interface RootRouteChildren {
   SystemMonitorRoute: typeof SystemMonitorRoute
   HubModelIdRoute: typeof HubModelIdRoute
   LocalApiServerLogsRoute: typeof LocalApiServerLogsRoute
+  ProjectModePlanRoute: typeof ProjectModePlanRoute
+  ProjectModeTranslationRoute: typeof ProjectModeTranslationRoute
+  ProjectModeVisionRoute: typeof ProjectModeVisionRoute
   ProjectProjectIdRoute: typeof ProjectProjectIdRoute
   SettingsAssistantRoute: typeof SettingsAssistantRoute
   SettingsAttachmentsRoute: typeof SettingsAttachmentsRoute
@@ -313,6 +376,8 @@ export interface RootRouteChildren {
   SettingsShortcutsRoute: typeof SettingsShortcutsRoute
   ThreadsThreadIdRoute: typeof ThreadsThreadIdRoute
   HubIndexRoute: typeof HubIndexRoute
+  ProjectModeIndexRoute: typeof ProjectModeIndexRoute
+  PromptLibraryIndexRoute: typeof PromptLibraryIndexRoute
   SettingsProvidersProviderNameRoute: typeof SettingsProvidersProviderNameRoute
   SettingsProvidersIndexRoute: typeof SettingsProvidersIndexRoute
 }
@@ -338,6 +403,20 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/prompt-library/': {
+      id: '/prompt-library/'
+      path: '/prompt-library'
+      fullPath: '/prompt-library/'
+      preLoaderRoute: typeof PromptLibraryIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/project-mode/': {
+      id: '/project-mode/'
+      path: '/project-mode'
+      fullPath: '/project-mode/'
+      preLoaderRoute: typeof ProjectModeIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/hub/': {
@@ -445,6 +524,27 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ProjectProjectIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/project-mode/vision': {
+      id: '/project-mode/vision'
+      path: '/project-mode/vision'
+      fullPath: '/project-mode/vision'
+      preLoaderRoute: typeof ProjectModeVisionRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/project-mode/translation': {
+      id: '/project-mode/translation'
+      path: '/project-mode/translation'
+      fullPath: '/project-mode/translation'
+      preLoaderRoute: typeof ProjectModeTranslationRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/project-mode/plan': {
+      id: '/project-mode/plan'
+      path: '/project-mode/plan'
+      fullPath: '/project-mode/plan'
+      preLoaderRoute: typeof ProjectModePlanRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/local-api-server/logs': {
       id: '/local-api-server/logs'
       path: '/local-api-server/logs'
@@ -482,6 +582,9 @@ const rootRouteChildren: RootRouteChildren = {
   SystemMonitorRoute: SystemMonitorRoute,
   HubModelIdRoute: HubModelIdRoute,
   LocalApiServerLogsRoute: LocalApiServerLogsRoute,
+  ProjectModePlanRoute: ProjectModePlanRoute,
+  ProjectModeTranslationRoute: ProjectModeTranslationRoute,
+  ProjectModeVisionRoute: ProjectModeVisionRoute,
   ProjectProjectIdRoute: ProjectProjectIdRoute,
   SettingsAssistantRoute: SettingsAssistantRoute,
   SettingsAttachmentsRoute: SettingsAttachmentsRoute,
@@ -497,6 +600,8 @@ const rootRouteChildren: RootRouteChildren = {
   SettingsShortcutsRoute: SettingsShortcutsRoute,
   ThreadsThreadIdRoute: ThreadsThreadIdRoute,
   HubIndexRoute: HubIndexRoute,
+  ProjectModeIndexRoute: ProjectModeIndexRoute,
+  PromptLibraryIndexRoute: PromptLibraryIndexRoute,
   SettingsProvidersProviderNameRoute: SettingsProvidersProviderNameRoute,
   SettingsProvidersIndexRoute: SettingsProvidersIndexRoute,
 }

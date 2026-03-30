@@ -434,9 +434,9 @@ describe('General Settings Route', () => {
       render(<Component />)
     })
 
-    // Check for external links
-    const links = screen.getAllByRole('link')
-    expect(links.length).toBeGreaterThan(0)
+    // External links sections are intentionally hidden in the UI.
+    const links = screen.queryAllByRole('link')
+    expect(links.length).toBe(0)
   })
 
   it('should handle logs window opening', async () => {

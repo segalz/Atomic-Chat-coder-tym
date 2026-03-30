@@ -1,0 +1,63 @@
+{
+  "editServer": "ערוך שרת MCP",
+  "addServer": "הוסף שרת MCP",
+  "browserExtension": {
+    "connecting": {
+      "checking": "בודק מצב תוסף..."
+    },
+    "notInstalled": {
+      "title": "Atomic Bot משלים משימות בדפדפן שלך",
+      "description": "התקן את התוסף כדי לתת ל-Atomic Bot גישה לדפדפן",
+      "getExtension": "קבל תוסף"
+    }
+  },
+  "serverName": "שם שרת",
+  "enterServerName": "הזן שם שרת",
+  "command": "פקודה",
+  "enterCommand": "הזן פקודה (uvx או npx)",
+  "arguments": "ארגומנטים",
+  "argument": "ארגומנט {{index}}",
+  "envVars": "משתני סביבה",
+  "key": "מפתח",
+  "value": "ערך",
+  "save": "שמור",
+  "status": "סטטוס",
+  "connected": "מחובר",
+  "disconnected": "מנותק",
+  "deleteServer": {
+    "title": "מחק שרת MCP",
+    "description": "האם אתה בטוח שברצונך למחוק את שרת ה-MCP {{serverName}}? לא ניתן לבטל פעולה זו.",
+    "delete": "מחק",
+    "success": "שרת MCP {{serverName}} נמחק בהצלחה"
+  },
+  "editJson": {
+    "title": "ערוך JSON עבור שרת MCP: {{serverName}}",
+    "titleAll": "ערוך JSON של כל שרתי MCP",
+    "placeholder": "הזן הגדרות JSON",
+    "errorParse": "ניתוח הנתונים ההתחלתיים נכשל",
+    "errorPaste": "פורמט JSON לא תקין בתוכן שהודבק",
+    "errorFormat": "פורמט JSON לא תקין",
+    "errorServerName": "שם שרת הוא שדה חובה ואינו יכול להיות ריק",
+    "errorMissingServerNameKey": "JSON חייב להיות מובנה כ-{\"serverName\": {config}} - חסר מפתח שם שרת",
+    "errorInvalidType": "סוג לא תקין '{{type}}' עבור שרת '{{serverName}}'. הסוג חייב להיות 'stdio', 'http' או 'sse'",
+    "save": "שמור"
+  },
+  "checkParams": "אנא בדוק את הפרמטרים בהתאם למדריך.",
+  "title": "שרתי MCP",
+  "experimental": "ניסיוני",
+  "editAllJson": "ערוך JSON של כל השרתים",
+  "findMore": "מצא עוד שרתי MCP ב",
+  "allowPermissions": "אפשר את כל הרשאות כלי MCP",
+  "allowPermissionsDesc": "כאשר מופעל, כל קריאות כלי MCP יאושרו אוטומטית ללא הצגת חלונות הרשאה. הגדרה זו חלה באופן גלובלי על כל השיחות, כולל צ'אטים חדשים.",
+  "noServers": "לא נמצאו שרתי MCP",
+  "args": "ארגומנטים",
+  "env": "סביבה",
+  "serverStatusActive": "שרת {{serverKey}} הופעל בהצלחה",
+  "serverStatusInactive": "שרת {{serverKey}} הושבת בהצלחה",
+  "runtimeSettings": {
+    "title": "הגדרות ריצה",
+    "description": "הגדר כיצד Atomic Bot מנהל ומנסה מחדש שרתי MCP.",
+    "toolCallTimeout": "זמן קצוב לקריאת כלי (שניות)",
+    "toolCallTimeoutDesc": "זמן המתנה מקסימלי לתגובה מכלי MCP לפני תפוגה."
+  }
+}

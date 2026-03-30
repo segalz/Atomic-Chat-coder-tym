@@ -12,6 +12,7 @@ import { useTranslation } from '@/i18n/react-i18next-compat'
 import { Link, useNavigate } from '@tanstack/react-router'
 import { PlatformMetaKey } from '@/containers/PlatformMetaKey'
 import React, { useRef } from 'react'
+import { IconLibrary } from '@tabler/icons-react'
 import {
   SearchIcon,
   type SearchIconHandle,
@@ -30,6 +31,10 @@ import {
 } from '@/components/animated-icon/settings'
 import { BlocksIcon, type BlocksIconHandle } from '../animated-icon/blocks'
 import {
+  FolderOpenIcon,
+  type FolderOpenIconHandle,
+} from '@/components/animated-icon/folder-open'
+import {
   BotIcon,
   type BotIconHandle,
 } from '@/components/animated-icon/bot'
@@ -45,6 +50,7 @@ import { PlatformShortcuts, ShortcutAction } from '@/lib/shortcuts'
 type AnimatedIconHandle =
   | SearchIconHandle
   | FolderPlusIconHandle
+  | FolderOpenIconHandle
   | MessageCircleIconHandle
   | SettingsIconHandle
   | BlocksIconHandle
@@ -124,9 +130,19 @@ const getNavMainItems = (
     ),
   },
   {
+    title: 'common:projectMode',
+    url: route.projectMode.index,
+    animatedIcon: FolderOpenIcon,
+  },
+  {
     title: 'common:models',
     url: route.hub.index,
     animatedIcon: BlocksIcon,
+  },
+  {
+    title: 'Prompt Library',
+    url: route.promptLibrary,
+    icon: IconLibrary,
   },
   {
     title: 'common:settings',

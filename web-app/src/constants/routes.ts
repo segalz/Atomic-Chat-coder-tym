@@ -25,6 +25,13 @@ export const route = {
     index: '/hub/',
     model: '/hub/$modelId',
   },
+  projectMode: {
+    index: '/project-mode/',
+    plan: '/project-mode/plan',
+    vision: '/project-mode/vision',
+    translation: '/project-mode/translation',
+  },
+  promptLibrary: '/prompt-library',
   localApiServerlogs: '/local-api-server/logs',
   systemMonitor: '/system-monitor',
   threadsDetail: '/threads/$threadId',

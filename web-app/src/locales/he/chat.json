@@ -1,0 +1,12 @@
+{
+  "welcome": "היי, מה שלומך?",
+  "description": "איך אוכל לעזור לך היום?",
+  "temporaryChat": "צ'אט זמני",
+  "temporaryChatDescription": "התחל שיחה זמנית שלא תישמר בהיסטוריית הצ'אט שלך.",
+  "status": {
+    "empty": "לא נמצאו צ'אטים"
+  },
+  "sendMessage": "שלח הודעה",
+  "newConversation": "שיחה חדשה",
+  "clearHistory": "נקה היסטוריה"
+}

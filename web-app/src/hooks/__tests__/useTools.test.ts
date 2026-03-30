@@ -5,12 +5,19 @@ import { SystemEvent } from '@/types/events'
 // Mock functions
 const mockGetTools = vi.fn()
 const mockUpdateTools = vi.fn()
+const mockUpdateRagToolNames = vi.fn()
+const mockUpdateMcpToolNames = vi.fn()
 const mockListen = vi.fn()
 const mockUnsubscribe = vi.fn()
 
 // Mock useAppState
 vi.mock('../useAppState', () => ({
-  useAppState: (selector: any) => selector({ updateTools: mockUpdateTools }),
+  useAppState: (selector: any) =>
+    selector({
+      updateTools: mockUpdateTools,
+      updateRagToolNames: mockUpdateRagToolNames,
+      updateMcpToolNames: mockUpdateMcpToolNames,
+    }),
 }))
 
 // Mock the ServiceHub

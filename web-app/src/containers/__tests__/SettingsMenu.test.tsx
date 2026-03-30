@@ -97,7 +97,8 @@ describe('SettingsMenu', () => {
 
     expect(screen.getByText('common:general')).toBeInTheDocument()
     expect(screen.getByText('common:interface')).toBeInTheDocument()
-    expect(screen.getByText('common:privacy')).toBeInTheDocument()
+    // Privacy tab is intentionally hidden in the UI.
+    expect(screen.queryByText('common:privacy')).not.toBeInTheDocument()
   })
 
   it('renders keyboard shortcuts and other settings', () => {

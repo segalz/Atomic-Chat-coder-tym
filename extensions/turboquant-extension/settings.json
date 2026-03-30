@@ -1,0 +1,16 @@
+[
+  {
+    "key": "auto_unload",
+    "title": "Auto unload model",
+    "description": "Automatically unload other models when loading a new one",
+    "controllerType": "checkbox",
+    "controllerProps": { "value": true }
+  },
+  {
+    "key": "ctx_size",
+    "title": "Context Size",
+    "description": "Max Context Size (Tokens). Large sizes over 32k require significant RAM.",
+    "controllerType": "input",
+    "controllerProps": { "type": "number", "value": 300000 }
+  }
+]

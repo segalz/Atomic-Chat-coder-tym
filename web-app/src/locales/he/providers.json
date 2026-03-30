@@ -1,0 +1,62 @@
+{
+  "refreshModelsError": "לספק חייב להיות כתובת בסיס ומפתח API מוגדרים כדי לאחזר מודלים.",
+  "refreshModelsSuccess": "נוספו {{count}} מודלים חדשים מ-{{provider}}.",
+  "noNewModels": "לא נמצאו מודלים חדשים. כל המודלים הזמינים כבר נוספו.",
+  "refreshModelsFailed": "אחזור מודלים מ-{{provider}} נכשל. אנא בדוק את מפתח ה-API וכתובת הבסיס שלך.",
+  "models": "מודלים",
+  "refreshing": "מרענן...",
+  "refresh": "רענן",
+  "import": "ייבוא",
+  "importModelSuccess": "המודל {{provider}} יובא בהצלחה.",
+  "importModelError": "ייבוא המודל נכשל:",
+  "stop": "עצור",
+  "start": "הפעל",
+  "noModelFound": "לא נמצא מודל",
+  "noModelFoundDesc": "מודלים זמינים יופיעו כאן. אם עדיין אין לך מודלים, בקר ב-Hub להורדה.",
+  "configuration": "הגדרות",
+  "apiEndpoint": "נקודת קצה API",
+  "testConnection": "בדוק חיבור",
+  "addModel": {
+    "title": "הוסף מודל חדש",
+    "description": "הוסף מודל חדש לספק {{provider}}.",
+    "modelId": "מזהה מודל",
+    "enterModelId": "הזן מזהה מודל",
+    "exploreModels": "צפה ברשימת מודלים מ-{{provider}}",
+    "addModel": "הוסף מודל",
+    "modelExists": "המודל כבר קיים",
+    "modelExistsDesc": "אנא בחר מזהה מודל אחר."
+  },
+  "deleteModel": {
+    "title": "מחק מודל: {{modelId}}",
+    "description": "האם אתה בטוח שברצונך למחוק מודל זה? לא ניתן לבטל פעולה זו.",
+    "success": "המודל {{modelId}} נמחק לצמיתות.",
+    "cancel": "ביטול",
+    "delete": "מחק"
+  },
+  "deleteProvider": {
+    "title": "מחק ספק",
+    "description": "מחק ספק זה ואת כל המודלים שלו. לא ניתן לבטל פעולה זו.",
+    "success": "הספק {{provider}} נמחק לצמיתות.",
+    "confirmTitle": "מחק ספק: {{provider}}",
+    "confirmDescription": "האם אתה בטוח שברצונך למחוק ספק זה? לא ניתן לבטל פעולה זו.",
+    "cancel": "ביטול",
+    "delete": "מחק"
+  },
+  "editModel": {
+    "title": "ערוך מודל: {{modelId}}",
+    "description": "הגדר יכולות מודל על ידי החלפת האפשרויות למטה.",
+    "capabilities": "יכולות",
+    "tools": "כלים",
+    "vision": "ראייה",
+    "proactive": "פרואקטיבי (ניסיוני)",
+    "embeddings": "הטמעות",
+    "notAvailable": "עדיין לא זמין",
+    "warning": {
+      "title": "המשך בזהירות",
+      "description": "שינוי יכולות המודל עלול להשפיע על הביצועים והפונקציונליות. הגדרות שגויות עלולות לגרום להתנהגות בלתי צפויה או שגיאות."
+    }
+  },
+  "addProvider": "הוסף ספק",
+  "addOpenAIProvider": "הוסף ספק OpenAI",
+  "enterNameForProvider": "הזן שם לספק"
+}
