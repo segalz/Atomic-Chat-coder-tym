@@ -108,6 +108,10 @@ pub fn run() {
         core::system::commands::install_jan_cli,
         core::system::commands::uninstall_jan_cli,
         core::system::commands::clear_claude_code_env,
+        // Code Agent commands
+        core::code_agent::spawn_code_agent,
+        core::code_agent::stop_code_agent,
+        core::code_agent::check_claude_cli,
         // Server commands
         core::server::commands::start_server,
         core::server::commands::stop_server,
@@ -230,6 +234,9 @@ pub fn run() {
         core::downloads::commands::download_files,
         core::downloads::commands::cancel_download_task,
     ]);
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let app_builder = app_builder.manage(core::code_agent::CodeAgentState::default());
 
     let app = app_builder
         .manage(AppState {

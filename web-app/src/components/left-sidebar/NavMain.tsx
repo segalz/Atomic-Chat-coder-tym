@@ -31,10 +31,6 @@ import {
 } from '@/components/animated-icon/settings'
 import { BlocksIcon, type BlocksIconHandle } from '../animated-icon/blocks'
 import {
-  FolderOpenIcon,
-  type FolderOpenIconHandle,
-} from '@/components/animated-icon/folder-open'
-import {
   BotIcon,
   type BotIconHandle,
 } from '@/components/animated-icon/bot'
@@ -50,7 +46,6 @@ import { PlatformShortcuts, ShortcutAction } from '@/lib/shortcuts'
 type AnimatedIconHandle =
   | SearchIconHandle
   | FolderPlusIconHandle
-  | FolderOpenIconHandle
   | MessageCircleIconHandle
   | SettingsIconHandle
   | BlocksIconHandle
@@ -128,11 +123,6 @@ const getNavMainItems = (
         <Kbd className="bg-transparent size-3 uppercase">{PlatformShortcuts[ShortcutAction.SEARCH].key} </Kbd>
       </KbdGroup>
     ),
-  },
-  {
-    title: 'common:projectMode',
-    url: route.projectMode.index,
-    animatedIcon: FolderOpenIcon,
   },
   {
     title: 'common:models',

@@ -5,6 +5,8 @@
 export const NEW_JAN_MODEL_HF_REPO =
   'Jackrong/Qwen3.5-4B-Claude-4.6-Opus-Reasoning-Distilled-GGUF'
 export const JAN_CODE_HF_REPO = 'janhq/Jan-Code-4b-Gguf'
+export const CODE_MODE_DEFAULT_HF_REPO =
+  'unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF'
 export const DEFAULT_MODEL_QUANTIZATIONS = ['iq4_xs', 'q4_k_m']
 
 /**
@@ -18,6 +20,10 @@ export const HUB_RECOMMENDED_MODELS: ReadonlyArray<{
   modelName: string
   descriptionKey: string
 }> = [
+  {
+    modelName: 'unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF',
+    descriptionKey: 'hub:recCoding',
+  },
   {
     modelName:
       'Jackrong/Qwen3.5-4B-Claude-4.6-Opus-Reasoning-Distilled-GGUF',

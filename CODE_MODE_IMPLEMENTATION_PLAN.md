@@ -1,9 +1,13 @@
-# Atomic Chat + Claude Code CLI + Local Qwen — תוכנית מימוש
+# Atomic Chat + Cline CLI + Local Model — תוכנית מימוש
+
+> **עדכון ארכיטקטורה (2026-03-31):** אחרי בדיקות מעמיקות ואפיון טכני, עברנו מ-**Claude CLI** ל-**Cline CLI**.
+> הסיבה: Cline מדבר OpenAI API ישירות — ללא proxy, ללא אימות שמות מודלים, ללא תלות ב-Anthropic.
+> האפיון המלא נמצא ב-[`docs/code-mode-spec/code-mode-spec.md`](docs/code-mode-spec/code-mode-spec.md).
 
 ## חזון
 
-Atomic Chat הופך ל-**GUI של Claude Code CLI עם מודל מקומי**.
-המנוע של Anthropic (Claude Code CLI) — המוח מקומי (Qwen2.5-Coder-32B).
+Atomic Chat הופך ל-**GUI של Cline CLI עם מודל מקומי**.
+המנוע: Cline CLI — המוח מקומי (Qwen2.5-Coder / כל מודל OpenAI-compatible).
 **100% מקומי, 0 עלות, פרטיות מלאה.**
 
 ### מבנה Header חדש
@@ -17,24 +21,7 @@ Atomic Chat הופך ל-**GUI של Claude Code CLI עם מודל מקומי**.
 
 **2 מצבים:**
 - **Chat** — צ'אט רגיל עם מודל (כמו היום)
-- **Code** — Claude Code CLI עם מודל מקומי על פרויקט
-
-### מסך ראשי — Chat Mode (ברירת מחדל, כמו היום)
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│  Header: Model ▽  ⚙ ●   [ Chat | ▪Code ]                   │
-├─────────────────────────────────────────────────────────────┤
-│                                                              │
-│              How can I help you today?                        │
-│                                                              │
-│  ┌─ ChatInput ───────────────────────────────────────────┐  │
-│  │  Ask me anything...                                    │  │
-│  │  [+]  [🔗]                                     [→]    │  │
-│  └────────────────────────────────────────────────────────┘  │
-│                                                              │
-└──────────────────────────────────────────────────────────────┘
-```
+- **Code** — Cline CLI עם מודל מקומי על פרויקט
 
 ### מסך ראשי — Code Mode
 
@@ -42,39 +29,24 @@ Atomic Chat הופך ל-**GUI של Claude Code CLI עם מודל מקומי**.
 ┌─────────────────────────────────────────────────────────────┐
 │  Header: Model ▽  ⚙ ●   [ Chat | ▪Code ]                   │
 ├─────────────────────────────────────────────────────────────┤
+│  📁 /Users/zvi/projects/my-app                              │
+├─────────────────────────────────────────────────────────────┤
 │                                                              │
-│  ┌─ Project Bar ─────────────────────────────────────────┐  │
-│  │  📁 /Users/zvi/projects/my-app            [Browse]     │  │
-│  └────────────────────────────────────────────────────────┘  │
+│  (scrollable output — chat style)                            │
+│  📖 Reading src/components/Form.tsx...                       │
+│  ✏️  Editing line 87: fixed lastName setter...               │
+│  💻 Running: npm test...                                     │
+│  ✅ All tests passed. 1 file changed.                        │
 │                                                              │
-│  ┌─ Screenshot Drop Zone ────────────────────────────────┐  │
-│  │  📸 Drop screenshot to identify code file              │  │
-│  │  ┌──────────────────────────────────────────────────┐ │  │
-│  │  │ ✅ OwnerDataStep.tsx (High Confidence)            │ │  │
-│  │  │ 📊 Dependency Tree: 14 local, 8 external         │ │  │
-│  │  │ [Copy Context]                                    │ │  │
-│  │  └──────────────────────────────────────────────────┘ │  │
-│  └────────────────────────────────────────────────────────┘  │
-│                                                              │
-│  ┌─ Prompt ──────────────────────────────────────────────┐  │
-│  │  תקן את הבאג בטופס הדיווח — השם משפחה לא נשמר...      │  │
-│  │                                                        │  │
-│  │  [📎 OwnerDataStep.tsx + 14 deps]                      │  │
-│  │  [+]                                        [▶ Run]   │  │
-│  └────────────────────────────────────────────────────────┘  │
-│                                                              │
-│  ┌─ Claude Code Output (streaming) ──────────────────────┐  │
-│  │  📖 Reading OwnerDataStep.tsx...                       │  │
-│  │  ✏️  Editing line 87: fixed lastName setter...          │  │
-│  │  💻 Running: npm test...                               │  │
-│  │  ✅ All tests passed. 1 file changed.                  │  │
-│  │                                              [■ Stop]  │  │
-│  └────────────────────────────────────────────────────────┘  │
-│                                                              │
-└──────────────────────────────────────────────────────────────┘
+├─────────────────────────────────────────────────────────────┤
+│  [Ask permissions ▽]                                         │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │  תקן את הבאג בטופס הדיווח...              [→] / [■] │    │
+│  └─────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-### ארכיטקטורה
+### ארכיטקטורה (מעודכן — Cline CLI)
 
 ```
 ┌─ Atomic Chat (Tauri) ──────────────────────────────────────┐
@@ -82,511 +54,329 @@ Atomic Chat הופך ל-**GUI של Claude Code CLI עם מודל מקומי**.
 │  React Frontend                                             │
 │  ├─ Header: Model selector + [Chat | Code] toggle          │
 │  ├─ Chat Mode: ChatInput → existing chat flow              │
-│  └─ Code Mode: ProjectBar + DropZone + Prompt + Output     │
+│  └─ Code Mode: ProjectBar + PermissionSelector + Output    │
 │         │                                                   │
-│         │ invoke('spawn_code_agent', { projectDir, prompt })│
+│         │ invoke('spawn_code_agent', {                      │
+│         │   projectDir, prompt, modelId,                    │
+│         │   permissionMode, serverUrl })                    │
 │         ▼                                                   │
-│  Rust Backend (Tauri)                                       │
-│  ├─ spawn_code_agent() → spawns Claude CLI subprocess      │
-│  ├─ stop_code_agent()  → kills subprocess                  │
+│  Rust Backend (Tauri) — code_agent.rs                       │
+│  ├─ spawn_code_agent() → spawns Cline CLI subprocess        │
+│  ├─ stop_code_agent()  → kills subprocess                   │
 │  └─ streams stdout JSON → emits Tauri events to frontend   │
 │         │                                                   │
-│         │ ANTHROPIC_BASE_URL=http://127.0.0.1:1234         │
+│         │  cline --base-url http://127.0.0.1:{port}/v1     │
+│         │         --model {modelId}                         │
+│         │         --json [--yolo if auto_accept]            │
 │         ▼                                                   │
-│  Claude Code CLI (installed globally)                       │
-│  ├─ --output-format stream-json                            │
-│  ├─ --cwd /path/to/project                                 │
+│  Cline CLI (installed globally: npm i -g @cline/cline)      │
+│  ├─ OpenAI API native (no proxy needed!)                    │
 │  ├─ Reads, edits, runs commands on the project             │
-│  └─ Talks to local model via Anthropic Messages API        │
+│  └─ 5 permission modes (Phase 1: 2 modes)                  │
 │         │                                                   │
+│         │ OpenAI /v1/chat/completions                       │
 │         ▼                                                   │
-│  Local Model Server (already running)                       │
-│  ├─ LM Studio / MLX Server at 127.0.0.1:1234              │
-│  ├─ Qwen2.5-Coder-32B-Instruct                            │
-│  └─ Future: TurboQuant for 300K context                    │
+│  llama-server (TurboQuant — כבר קיים!)                      │
+│  ├─ tauri-plugin-mlx → port דינמי per model                │
+│  ├─ OpenAI-compatible API                                   │
+│  └─ Qwen2.5-Coder-32B / כל מודל                            │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
 
----
+### מציאת פורט llama-server
 
-## שלב 1: וידוא תקשורת — Claude CLI ↔ מודל מקומי
-
-**מטרה:** לוודא ש-Claude Code CLI מצליח לדבר עם Qwen דרך LM Studio.
-
-### דרישות מקדימות
-- [ ] Claude Code CLI מותקן: `npm install -g @anthropic-ai/claude-code`
-- [ ] LM Studio רץ עם Qwen2.5-Coder-32B על `127.0.0.1:1234`
-
-### משימות
-
-- [ ] **1.1** בדוק האם LM Studio תומך ב-Anthropic Messages API:
-  ```bash
-  curl http://127.0.0.1:1234/v1/messages \
-    -H "Content-Type: application/json" \
-    -H "x-api-key: lm-studio" \
-    -d '{"model":"qwen2.5-coder-32b-instruct","max_tokens":50,"messages":[{"role":"user","content":"Say hello"}]}'
-  ```
-  - אם מחזיר תשובה בפורמט Anthropic → עבור ל-1.3
-  - אם 404/error → צריך proxy (1.2)
-
-- [ ] **1.2** (רק אם צריך) בנה Anthropic proxy:
-  - צור `tools/anthropic-proxy.py` — FastAPI server ~150 שורות
-  - מתרגם `/v1/messages` (Anthropic) → `/v1/chat/completions` (OpenAI)
-  - מתרגם streaming SSE בחזרה
-  - ירוץ על port 1235, מפנה ל-1234
-
-- [ ] **1.3** בדוק Claude CLI עם המודל המקומי:
-  ```bash
-  ANTHROPIC_BASE_URL=http://127.0.0.1:1234 \
-  ANTHROPIC_AUTH_TOKEN=lm-studio \
-  CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 \
-  claude -p "What is 2+2?" --model qwen2.5-coder-32b-instruct
-  ```
-
-- [ ] **1.4** בדוק streaming:
-  ```bash
-  ANTHROPIC_BASE_URL=http://127.0.0.1:1234 \
-  ANTHROPIC_AUTH_TOKEN=lm-studio \
-  CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 \
-  claude -p "Write a hello world in Python" \
-    --model qwen2.5-coder-32b-instruct \
-    --output-format stream-json
-  ```
-  - וודא שהפלט הוא JSON-lines שזורמות
-
-- [ ] **1.5** בדוק עבודה על פרויקט:
-  ```bash
-  cd /tmp && mkdir test-project && cd test-project
-  echo 'console.log("hello")' > index.js
-  ANTHROPIC_BASE_URL=http://127.0.0.1:1234 \
-  ANTHROPIC_AUTH_TOKEN=lm-studio \
-  CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 \
-  claude -p "Read index.js and add a function that adds two numbers" \
-    --model qwen2.5-coder-32b-instruct \
-    --output-format stream-json \
-    --dangerously-skip-permissions
-  ```
-  - וודא שהקובץ נערך בפועל
-
-### בדיקת הצלחה
-- [ ] Claude CLI מקבל תשובה מ-Qwen המקומי
-- [ ] Streaming JSON עובד
-- [ ] Claude CLI מצליח לקרוא ולערוך קבצים בפרויקט
-- [ ] תעד את הפורמט המדויק של ה-env vars וה-flags שעובדים
+```
+Frontend queries:
+  plugin:mlx|find_mlx_session_by_model(modelId)
+    → { port, api_key } or null
+  fallback: plugin:llamacpp|find_session_by_model(modelId)
+    → { port, api_key } or null
+  → serverUrl = http://127.0.0.1:{port}/v1
+```
 
 ---
 
-## שלב 2: Tauri Backend — Claude Code Spawner
+## ✅ שלב 1: וידוא תקשורת — CLI ↔ מודל מקומי
 
-**מטרה:** פקודות Rust ב-Tauri שמפעילות/עוצרות Claude CLI ומזרימות פלט ל-React.
+> **סטטוס: בוצע** (בוצע עם Claude CLI + proxy. עם Cline נדרש אימות נפרד — ראה שלב 2.)
 
-### משימות
+**מה בוצע:** אומתה תקשורת בין CLI ל-proxy פנימי ול-llama-server. streaming JSON עובד.
 
-- [ ] **2.1** קרא את הפקודה הקיימת `launch_claude_code_with_config` ב-`src-tauri/src/`:
-  - הבן מה היא עושה
-  - האם אפשר להרחיב אותה או צריך חדשה
+---
 
-- [ ] **2.2** צור module חדש `src-tauri/src/core/code_agent.rs`:
-  ```rust
-  use std::process::Stdio;
-  use tokio::process::Command;
-  use tokio::io::{AsyncBufReadExt, BufReader};
+## ✅ שלב 2: Tauri Backend — Code Agent Spawner
 
-  // State: track running process
-  struct CodeAgentState {
-      child: Option<tokio::process::Child>,
-  }
+> **סטטוס: בוצע (בסיס)** — `code_agent.rs` נוצר ועובד עם Claude CLI.
+> **נדרש עדכון:** להחליף Claude CLI ב-Cline CLI (ראה שלב 2 עדכון).
 
-  #[tauri::command]
-  async fn spawn_code_agent(
-      app: AppHandle,
-      project_dir: String,
-      prompt: String,
-      model_id: String,
-      context: Option<String>,
-      server_url: Option<String>,  // default: http://127.0.0.1:1234
-  ) -> Result<(), String>
+### מה קיים
+- `src-tauri/src/core/code_agent.rs` — spawn, stop, stream stdout → Tauri events
+- Events: `code-agent-output`, `code-agent-done`, `code-agent-error`
+- רשום ב-`lib.rs`: `spawn_code_agent`, `stop_code_agent`, `check_claude_cli`
 
-  #[tauri::command]
-  async fn stop_code_agent(
-      state: State<CodeAgentState>
-  ) -> Result<(), String>
+### שלב 2-עדכון: החלפת Claude CLI → Cline CLI (עדיין נדרש)
 
-  #[tauri::command]
-  async fn check_claude_cli() -> Result<String, String>
-  // Returns version string or error
-  ```
-
-- [ ] **2.3** ב-`spawn_code_agent`:
-  - הרכב prompt מלא: `{user_prompt}\n\n{context}` (אם יש context)
-  - הגדר env vars:
-    ```
-    ANTHROPIC_BASE_URL = server_url || "http://127.0.0.1:1234"
-    ANTHROPIC_AUTH_TOKEN = "lm-studio"
-    CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS = "1"
-    ```
-  - הרץ:
-    ```
-    claude -p "{full_prompt}" \
-      --output-format stream-json \
+- [ ] **2-U.1** עדכן `spawn_code_agent` ב-`code_agent.rs`:
+  - **הסר:** `--output-format stream-json`, `--verbose`, `--dangerously-skip-permissions`
+  - **הסר:** env vars של Anthropic (`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_DEFAULT_*_MODEL`)
+  - **הוסף פרמטר:** `permission_mode: String` — `"ask"` או `"auto_accept"`
+  - **הרץ:**
+    ```bash
+    cline \
+      --base-url http://127.0.0.1:{port}/v1 \
       --model {model_id} \
-      --dangerously-skip-permissions
+      --json \
+      [--yolo]     # רק אם permission_mode == "auto_accept"
+      -p "{prompt}"
     ```
-  - `cwd` = `project_dir`
-  - קרא stdout שורה-שורה, שלח כל שורה כ-event:
+  - **לוגיקת permission_mode:**
     ```rust
-    app.emit("code-agent-output", &json_line)?;
+    if permission_mode == "auto_accept" {
+        cmd.arg("--yolo");
+    }
+    // "ask" mode: no --yolo → Cline asks before each action
     ```
-  - בסיום, שלח event:
-    ```rust
-    app.emit("code-agent-done", &exit_code)?;
-    ```
 
-- [ ] **2.4** ב-`stop_code_agent`:
-  - `child.kill()` ← עוצר את ה-process
-  - שלח event `code-agent-stopped`
+- [ ] **2-U.2** שנה `find_claude_binary` → `find_cline_binary`:
+  - חפש `cline` ב-PATH ובנתיבים ידועים
+  - שגיאה: `"Cline CLI not found. Install: npm install -g @cline/cline"`
 
-- [ ] **2.5** ב-`check_claude_cli`:
-  - הרץ `claude --version`
-  - החזר version string או error
+- [ ] **2-U.3** שנה `check_claude_cli` → `check_cline_cli`:
+  - הרץ `cline --version`
 
-- [ ] **2.6** רשום את ה-commands ב-`main.rs`:
-  ```rust
-  .invoke_handler(tauri::generate_handler![
-      // ... existing commands ...
-      code_agent::spawn_code_agent,
-      code_agent::stop_code_agent,
-      code_agent::check_claude_cli,
-  ])
-  ```
+- [ ] **2-U.4** עדכן `lib.rs` — שנה `check_claude_cli` → `check_cline_cli`
 
-- [ ] **2.7** עדכן capabilities (`src-tauri/capabilities/default.json`):
-  - הוסף הרשאות shell spawn אם חסרות
+- [ ] **2-U.5** עדכן signature ב-`spawn_code_agent` (TypeScript side) בכל מקום שקורא לו:
+  - הוסף `permissionMode: string` לפרמטרים
+  - הוסף `serverUrl: string` (חובה — מגיע מ-port discovery)
 
 ### בדיקת הצלחה
-- [ ] `check_claude_cli` → מחזיר version
-- [ ] `spawn_code_agent` → מפעיל Claude CLI, events זורמים ל-frontend
+- [ ] `check_cline_cli` → מחזיר version
+- [ ] `spawn_code_agent` עם `auto_accept` → Cline רץ עם `--yolo`, events זורמים
+- [ ] `spawn_code_agent` עם `ask` → Cline רץ ללא `--yolo`
 - [ ] `stop_code_agent` → עוצר את ה-process
-- [ ] בדוק עם frontend console: `listen('code-agent-output', console.log)`
 
 ---
 
-## שלב 3: Code Mode Toggle בHeader
+## ✅ שלב 3: Code Mode Toggle בHeader + Store
 
-**מטרה:** כפתור [Chat | Code] ליד בורר המודל ב-Header.
+> **סטטוס: בוצע (בסיס)** — Toggle קיים, store קיים, NavMain נוקה.
+> **נדרש הוספה:** שדה `permissionMode` ב-store.
 
-### משימות
+### מה קיים
+- `web-app/src/stores/code-mode-store.ts` — Zustand + persist
+- ModeToggle ב-`routes/index.tsx` (כפתורי Chat/Code, z-50)
+- `NavMain.tsx` — הוסר `common:projectMode` link
 
-- [ ] **3.1** צור store `web-app/src/stores/code-mode-store.ts`:
+### שלב 3-עדכון: הוספת permissionMode לstore (עדיין נדרש)
+
+- [ ] **3-U.1** הוסף ל-`code-mode-store.ts`:
   ```typescript
-  import { create } from 'zustand'
-  import { persist } from 'zustand/middleware'
-
-  type AppMode = 'chat' | 'code'
-
-  interface CodeModeState {
-    mode: AppMode
-    projectDir: string
-    isAgentRunning: boolean
-    agentOutput: AgentOutputLine[]
-
-    setMode: (mode: AppMode) => void
-    setProjectDir: (dir: string) => void
-    setAgentRunning: (running: boolean) => void
-    appendOutput: (line: AgentOutputLine) => void
-    clearOutput: () => void
-  }
-
-  interface AgentOutputLine {
-    type: 'system' | 'assistant' | 'tool_use' | 'tool_result' | 'error' | 'done'
-    content: string
-    toolName?: string
-    timestamp: number
-  }
+  permissionMode: 'ask' | 'auto_accept'
+  setPermissionMode: (mode: 'ask' | 'auto_accept') => void
   ```
-  - `persist` → שומר mode + projectDir ב-localStorage
-
-- [ ] **3.2** הוסף 3-tab switcher ל-Header (`HeaderPage.tsx` או `DropdownModelProvider.tsx`):
-  - ליד בורר המודל, מימין
-  - 2 tabs כמו בצילום: `[ Chat     Code ]`
-  - Tab פעיל מודגש (רקע כהה, כמו בתמונה)
-  - עיצוב: rounded-full, dark background for active tab
-
-  ```tsx
-  const modes: { key: AppMode; label: string }[] = [
-    { key: 'chat', label: 'Chat' },
-    { key: 'code', label: 'Code' },
-  ]
-
-  <div className="flex items-center gap-1 rounded-full bg-muted p-1">
-    {modes.map(({ key, label }) => (
-      <button
-        key={key}
-        className={cn(
-          'rounded-full px-4 py-1.5 text-sm transition-colors',
-          mode === key
-            ? 'bg-background text-foreground shadow-sm'
-            : 'text-muted-foreground hover:text-foreground'
-        )}
-        onClick={() => setMode(key)}
-      >
-        {label}
-      </button>
-    ))}
-  </div>
-  ```
-
-- [ ] **3.3** עדכן `web-app/src/routes/index.tsx`:
-  - `mode === 'chat'` → המסך הנוכחי (ללא שינוי)
-  - `mode === 'code'` → הצג `CodeModePanel` + modified `ChatInput`
-
-- [ ] **3.4** הסר `common:projectMode` מהתפריט הצדדי (`NavMain.tsx`)
+  - ברירת מחדל: `'auto_accept'`
+  - **persist: כן** (נשמר בין sessions)
 
 ### בדיקת הצלחה
-- [ ] Toggle מופיע ליד המודל ב-Header
-- [ ] לחיצה על Code → מסך ראשי משתנה
-- [ ] לחיצה על Chat → חזרה למסך רגיל
-- [ ] הבחירה נשמרת (refresh → אותו mode)
+- [ ] Store מכיל `permissionMode` עם persist
 
 ---
 
-## שלב 4: Code Mode UI — Project Bar + Drop Zone
+## שלב 4: PermissionModeSelector + CodeModePanel שיפורים
 
-**מטרה:** ב-Code Mode, מסך ראשי מציג בורר תיקיה, drop zone לצילומי מסך, ותצוגת context.
+> **סטטוס CodeModePanel: בוצע (בסיס)** — Project Bar, Output, Input קיימים.
+> **נדרש הוספה:** PermissionModeSelector + חיבור permissionMode לrun.
+
+### מה קיים
+- `web-app/src/containers/CodeModePanel.tsx` — chat-like layout עובד
+- Project folder picker, auto-scroll, Stop button, event listeners
+- Port discovery (MLX → llamacpp fallback) קיים
 
 ### משימות
 
-- [ ] **4.1** צור `web-app/src/containers/CodeModePanel.tsx`:
-  - **Project Bar:**
-    - שדה תיקיה + כפתור Browse
-    - `invoke('open_dialog', { directory: true })` → `setProjectDir()`
-    - מציג שם התיקיה בלבד (לא path מלא) + tooltip עם path מלא
+- [ ] **4.1** צור `web-app/src/components/PermissionModeSelector.tsx`:
 
-  - **Screenshot Drop Zone:**
-    - אזור גרירה מתקפל (collapsible)
-    - משתמש ב-`extractVisibleText()` מ-`vision-analyzer.ts` הקיים
-    - משתמש ב-`scoreFilesByContent()` מ-`file-matcher.ts` הקיים
-    - High confidence → auto-analyze (ניתוח עץ תלויות אוטומטי)
-    - Low confidence → הצג candidates לבחירה
-    - אחרי זיהוי → הצג:
-      - שם הקובץ שנמצא
-      - מספר תלויות
-      - כפתור "Copy Context"
+  ```
+  [Ask permissions ▽]    ← trigger button (icon + label + chevron)
 
-  - **Context Badge (מתחת ל-drop zone):**
-    - מופיע אחרי זיהוי מוצלח
-    - לדוגמה: `📎 OwnerDataStep.tsx + 14 deps (~2,400 tokens)`
-    - לחיצה → מציג/מסתיר preview של הקונטקסט
+  Dropdown popup (מראה כמו screenshot של Cline):
+  ┌──────────────────────────────────────────┐
+  │ 🤚  Ask permissions               ✓ (אם נבחר) │
+  │     Always ask before making changes     │
+  ├──────────────────────────────────────────┤
+  │ </>  Auto accept edits            ✓ (אם נבחר) │
+  │      Automatically accept all file edits │
+  └──────────────────────────────────────────┘
+  ```
 
-- [ ] **4.2** חבר ל-ChatInput:
-  - ב-Code Mode, ה-ChatInput הקיים עדיין עובד לכתיבת prompt
-  - אבל כפתור Send → הופך ל- **"▶ Run"**
-  - לחיצה על Run → `invoke('spawn_code_agent', { projectDir, prompt, model, context })`
-  - ה-context הוא ה-bundledContext מה-Vision (אם יש)
+  - מקבל: `value: 'ask' | 'auto_accept'`, `onChange`, `disabled`
+  - `disabled={isAgentRunning}` — לא ניתן לשנות בזמן ריצה
+  - checkmark ליד האפשרות הנבחרת
+  - כל אפשרות: אייקון + title (bold) + subtitle (muted)
 
-- [ ] **4.3** השתמש ב-services הקיימים:
-  - `vision-analyzer.ts` → חילוץ טקסט מצילום מסך
-  - `file-matcher.ts` → TF-IDF scoring
-  - `project-analyzer.ts` → עץ תלויות
-  - `context-bundler.ts` → בניית markdown context
-  - `project-dna.ts` → זיהוי tech stack
+- [ ] **4.2** הטמע ב-`CodeModePanel.tsx`:
+  - הוסף `PermissionModeSelector` מעל ה-textarea (בתוך אזור הקלט)
+  - חבר ל-`permissionMode` / `setPermissionMode` מה-store
+  - העבר `permissionMode` ל-`spawn_code_agent` invoke
+
+- [ ] **4.3** עדכן `handleSend` ב-`CodeModePanel.tsx`:
+  - הוסף `permissionMode` לפרמטרים של `invoke('spawn_code_agent', { ..., permissionMode })`
 
 ### בדיקת הצלחה
-- [ ] בורר תיקיה עובד
-- [ ] גרירת צילום מסך → זיהוי קובץ
-- [ ] עץ תלויות נבנה
-- [ ] Context badge מופיע
-- [ ] כפתור Run שולח prompt + context ל-`spawn_code_agent`
+- [ ] PermissionModeSelector מופיע מעל textarea
+- [ ] בחירה משתנה ונשמרת ב-store
+- [ ] מושבת בזמן ריצה
+- [ ] המראה קרוב לscreenshot של Cline (icon + title + subtitle + checkmark)
+- [ ] permissionMode עובר ל-Rust backend
 
 ---
 
-## שלב 5: Streaming Output Panel
+## שלב 5: שיפור Output Panel
 
-**מטרה:** תצוגת פלט חי מ-Claude CLI — רואים מה הוא עושה בזמן אמת.
+> **סטטוס: בוצע (בסיס)** — OutputLine renderer קיים עם פורמט Claude CLI.
+> **נדרש:** עדכון לפורמט Cline + approve/deny buttons למצב `ask`.
 
 ### משימות
 
-- [ ] **5.1** צור `web-app/src/containers/CodeOutputPanel.tsx`:
-  - מאזין ל-Tauri events: `code-agent-output`, `code-agent-done`, `code-agent-stopped`
-  - מפרסר כל שורת JSON מ-Claude CLI:
-    ```typescript
-    // Claude CLI stream-json format:
-    { type: "system", subtype: "init", cwd: "...", model: "..." }
-    { type: "assistant", message: { content: [{ type: "text", text: "..." }] } }
-    { type: "tool_use", name: "Read", input: { file_path: "..." } }
-    { type: "tool_result", content: "..." }
-    { type: "result", subtype: "success" }
+- [ ] **5.1** עדכן `OutputLine` ב-`CodeModePanel.tsx` לפורמט Cline JSON:
+  - **חקור** את פורמט ה-JSON stream של Cline (`cline --json`) לפני מימוש
+  - עדכן parsers לפי הפורמט האמיתי
+  - שמור פונקציונליות קיימת לפורמטים אחרים (fallback לraw text)
+
+- [ ] **5.2** Approve/Deny buttons (מצב `ask`):
+  - כאשר `permissionMode == 'ask'` ו-Cline שולח permission request:
     ```
+    ┌─────────────────────────────────────────┐
+    │ Cline wants to write: src/Form.tsx      │
+    │              [Approve]  [Deny]          │
+    └─────────────────────────────────────────┘
+    ```
+  - לחיצה → שלח `y\n` / `n\n` ל-stdin של ה-process
+  - **הערה:** מחייב stdin pipe פתוח ב-Rust — להוסיף ל-`spawn_code_agent`
 
-  - תצוגה לכל סוג:
-    | Type | תצוגה |
-    |---|---|
-    | `system/init` | `🚀 Working on /path/to/project with qwen2.5-coder...` |
-    | `assistant` | Markdown rendered text |
-    | `tool_use: Read` | `📖 Reading src/components/Form.tsx` |
-    | `tool_use: Edit` | `✏️ Editing src/components/Form.tsx` |
-    | `tool_use: Bash` | `💻 Running: npm test` |
-    | `tool_use: Write` | `📝 Creating src/utils/helper.ts` |
-    | `tool_use: Glob` | `🔍 Searching for *.tsx files` |
-    | `tool_use: Grep` | `🔍 Searching for "onChange" in code` |
-    | `tool_result` | Collapsible output block |
-    | `error` | Red error message |
-    | `result/success` | `✅ Done` |
-
-- [ ] **5.2** כפתור Stop:
-  - `invoke('stop_code_agent')` → עוצר ה-process
-  - מופיע רק כש-`isAgentRunning === true`
-
-- [ ] **5.3** UX:
-  - Auto-scroll לתחתית
-  - כפתור "Copy All" — מעתיק כל הפלט
+- [ ] **5.3** UX שיפורים:
+  - כפתור "Copy All" — מעתיק את כל הפלט
   - כפתור "Clear" — מנקה פלט קודם
   - Collapsible tool results (ברירת מחדל: מקופל)
-  - גלילה חלקה, פונט mono
-
-- [ ] **5.4** חבר את הפאנל למסך הראשי:
-  - ב-Code Mode, הפאנל מופיע מתחת ל-prompt
-  - כש-agent רץ, הוא תופס את רוב המסך
-  - כשלא רץ, הוא מוסתר או מציג פלט אחרון
 
 ### בדיקת הצלחה
-- [ ] פלט streaming מוצג בזמן אמת
-- [ ] כל סוג הודעה מוצג נכון
-- [ ] Stop עוצר את ה-agent
-- [ ] Auto-scroll עובד
-- [ ] Copy All עובד
-- [ ] UX חלק — לא קופץ, לא איטי
+- [ ] פלט Cline מוצג נכון (tool calls, results, text)
+- [ ] Approve/Deny עובד במצב `ask`
+- [ ] Copy All + Clear עובדים
 
 ---
 
 ## שלב 6: ניקוי, i18n, ובדיקות
 
-**מטרה:** הסרת Project Mode הישן, עברית, בדיקות end-to-end.
-
 ### משימות
 
-- [ ] **6.1** הסר routes ישנים:
+- [ ] **6.1** הסר routes ישנים (Project Mode):
   - מחק `web-app/src/routes/project-mode/` (כולל vision, plan, translation)
-  - עדכן `web-app/src/constants/routes.ts` — הסר project-mode routes
+  - עדכן `web-app/src/constants/routes.ts`
   - עדכן `web-app/src/routeTree.gen.ts` — רגנרציה
 
 - [ ] **6.2** העבר services שצריך לשמור:
   - `web-app/src/services/pm/` → ישאר (Vision, file-matcher, analyzer, bundler)
-  - `web-app/src/containers/pm/` → ישאר מה שנדרש ל-CodeModePanel
   - מחק containers שלא בשימוש (PlanComposer, PlanResultView, TranslationSearchPanel)
 
-- [ ] **6.3** הסר מתפריט צד:
-  - `NavMain.tsx` → הסר `common:projectMode` link
-
-- [ ] **6.4** i18n — הוסף מפתחות:
+- [ ] **6.3** i18n — עדכן מפתחות:
   ```json
   {
     "codeMode": "Code Mode",
     "chatMode": "Chat",
     "projectFolder": "Project Folder",
-    "browseFolder": "Browse",
-    "dropScreenshot": "Drop screenshot to identify code",
-    "runAgent": "Run",
+    "runAgent": "Send",
     "stopAgent": "Stop",
-    "agentRunning": "Agent is working...",
-    "agentDone": "Done",
-    "installClaudeCli": "Install Claude Code CLI",
+    "askPermissions": "Ask permissions",
+    "autoAcceptEdits": "Auto accept edits",
+    "installClineCli": "Install Cline CLI",
     "noModelServer": "No model server detected"
   }
   ```
-  - הוסף תרגום עברית ב-`web-app/src/locales/he/`
 
-- [ ] **6.5** עדכן tests שנשברו:
+- [ ] **6.4** עדכן tests:
   - `SettingsMenu.test.tsx`
   - `useTools.test.ts`
   - `general.test.tsx`, `interface.test.tsx`
-  - הוסף test ל-code-mode-store
+  - הוסף test ל-code-mode-store (כולל permissionMode)
 
-- [ ] **6.6** בדיקות end-to-end:
-  - [ ] Chat Mode → עובד כמו קודם (אין regression)
+- [ ] **6.5** בדיקות end-to-end:
+  - [ ] Chat Mode → עובד ללא regression
   - [ ] Toggle Chat ↔ Code → חלק
   - [ ] Code Mode: Browse folder → תיקיה נבחרת
-  - [ ] Code Mode: Drop screenshot → קובץ מזוהה
-  - [ ] Code Mode: Write prompt → Run → output streaming
+  - [ ] Code Mode: Auto accept edits → Cline רץ עם --yolo
+  - [ ] Code Mode: Ask permissions → Cline מבקש אישור
   - [ ] Code Mode: Stop → agent נעצר
   - [ ] Code Mode: בלי תיקיה → הודעת שגיאה
-  - [ ] Code Mode: בלי Claude CLI → הודעת התקנה
-
-### בדיקת הצלחה
-- [ ] אין references ל-project-mode routes (grep)
-- [ ] Chat Mode עובד ללא שינוי
-- [ ] Code Mode עובד end-to-end
-- [ ] טסטים עוברים
-- [ ] עברית תקינה
+  - [ ] Code Mode: בלי Cline CLI → הודעת התקנה
 
 ---
 
-## שלב 7: Setup & Auto-Install
+## שלב 7: Setup & Onboarding
 
-**מטרה:** חוויית onboarding חלקה — אם חסר משהו, להנחות את המשתמש.
+**מטרה:** חוויית onboarding חלקה — אם Cline לא מותקן, להנחות.
 
 ### משימות
 
 - [ ] **7.1** בכניסה ל-Code Mode, בדוק:
   ```typescript
-  const cliVersion = await invoke('check_claude_cli')
-  const serverOk = await fetch('http://127.0.0.1:1234/v1/models').then(r => r.ok).catch(() => false)
+  const cliVersion = await invoke('check_cline_cli')
+  // sessionPort מ-port discovery
   ```
 
-- [ ] **7.2** אם Claude CLI לא מותקן:
+- [ ] **7.2** אם Cline CLI לא מותקן:
   ```
   ┌─────────────────────────────────────────┐
-  │  ⚠️ Claude Code CLI Required             │
+  │  ⚠️ Cline CLI Required                   │
   │                                          │
-  │  Code Mode uses Claude Code CLI engine   │
-  │  with your local Qwen model.             │
+  │  Code Mode uses Cline CLI engine         │
+  │  with your local model.                  │
   │                                          │
-  │  [Install: npm i -g @anthropic-ai/claude-code]  │
+  │  [Install: npm i -g @cline/cline]        │
   │  [Check Again]                           │
   └──────────────────────────────────────────┘
   ```
 
-- [ ] **7.3** אם model server לא רץ:
+- [ ] **7.3** אם model session לא נמצא:
   ```
   ┌─────────────────────────────────────────┐
-  │  ⚠️ No Model Server Detected             │
+  │  ⚠️ No Running Model Session             │
   │                                          │
-  │  Start a model in the Models tab or      │
-  │  run LM Studio on port 1234.             │
+  │  Load a model in the Models tab first.   │
   │                                          │
   │  [Go to Models]  [Check Again]           │
   └──────────────────────────────────────────┘
   ```
 
-- [ ] **7.4** אם הכל תקין — הצג status bar:
+- [ ] **7.4** אם הכל תקין — status bar:
   ```
-  ✅ Claude CLI v1.x  |  ✅ Qwen2.5-Coder-32B @ 127.0.0.1:1234
+  ✅ Cline CLI v0.x  |  ✅ Qwen2.5-Coder-32B @ 127.0.0.1:{port}
   ```
-
-### בדיקת הצלחה
-- [ ] משתמש חדש בלי Claude CLI → מקבל הנחיה
-- [ ] משתמש בלי model server → מקבל הנחיה
-- [ ] הכל תקין → status ירוק
 
 ---
 
-## סדר ביצוע
+## סדר ביצוע (מעודכן)
 
 ```
-שלב 1: Claude CLI ↔ Qwen (ידני, בטרמינל)
+✅ שלב 1: וידוא תקשורת (Claude CLI + proxy — בוצע)
+✅ שלב 2: Tauri spawner (code_agent.rs — בוצע בסיס)
+✅ שלב 3: Header toggle + store (בוצע בסיס)
+✅ שלב 4: CodeModePanel UI (בוצע בסיס)
+✅ אפיון טכני: docs/code-mode-spec/code-mode-spec.md (בוצע)
   ↓
-שלב 2: Tauri spawner (Rust backend)
+⬜ שלב 2-עדכון: החלפת Claude CLI → Cline CLI ב-code_agent.rs
   ↓
-שלב 3: Header toggle [Chat | Code]
+⬜ שלב 3-עדכון: הוספת permissionMode לstore
   ↓
-שלב 4: Code Mode UI (folder + drop zone + prompt)
+⬜ שלב 4: PermissionModeSelector component + חיבור לrun
   ↓
-שלב 5: Streaming output panel
+⬜ שלב 5: עדכון Output Panel לפורמט Cline + Approve/Deny
   ↓
-שלב 6: ניקוי + tests
+⬜ שלב 6: ניקוי + tests
   ↓
-שלב 7: Auto-install + onboarding
+⬜ שלב 7: Onboarding (Cline CLI check)
 ```
 
 **כל שלב נבדק לפני שממשיכים הלאה.**
@@ -595,49 +385,55 @@ Atomic Chat הופך ל-**GUI של Claude Code CLI עם מודל מקומי**.
 
 ## הערות טכניות
 
-### Environment Variables ל-Claude CLI
+### Cline CLI Flags
 ```bash
-ANTHROPIC_BASE_URL=http://127.0.0.1:1234
-ANTHROPIC_AUTH_TOKEN=lm-studio
-CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1
+cline \
+  --base-url http://127.0.0.1:{port}/v1 \  # OpenAI endpoint של llama-server
+  --model {model_id} \                       # שם המודל כפי שמוכר ל-llama-server
+  --json \                                   # structured JSON stream output
+  [--yolo] \                                 # auto_accept mode בלבד
+  -p "{prompt}"                              # non-interactive prompt
 ```
 
-### Claude CLI Flags
-```bash
-claude -p "{prompt}"              # Non-interactive mode
-  --output-format stream-json     # JSON-lines streaming
-  --model {model_id}              # Model to use
-  --dangerously-skip-permissions  # No TTY = no permission prompts
-  --allowedTools "Read Edit Bash Write Glob Grep"  # Optional: restrict tools
-```
+> **אימות נדרש:** יש לאמת את שמות ה-flags המדויקים של Cline לפני מימוש שלב 2-עדכון.
 
-### JSON Streaming Format
-```jsonl
-{"type":"system","subtype":"init","cwd":"/path","model":"qwen2.5-coder-32b-instruct"}
-{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Let me look at..."}]}}
-{"type":"tool_use","name":"Read","input":{"file_path":"src/Form.tsx"}}
-{"type":"tool_result","content":"import React from 'react'..."}
-{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I see the bug..."}]}}
-{"type":"tool_use","name":"Edit","input":{"file_path":"src/Form.tsx","old_string":"...","new_string":"..."}}
-{"type":"tool_result","content":"File edited successfully"}
-{"type":"result","subtype":"success","cost_usd":0}
-```
+### Permission Mode → Flags
 
-### אבטחה
-- `--dangerously-skip-permissions` נדרש כי אין TTY
-- Claude CLI **יכול** לערוך/למחוק קבצים ולהריץ כל פקודה
-- מיטיגציה: Output Panel מציג הכל בזמן אמת + כפתור Stop
-- אופציונלי: `--allowedTools` להגבלת הכלים הזמינים
+| permissionMode | flag | התנהגות |
+|---|---|---|
+| `ask` | ללא `--yolo` | Cline עוצר לפני כל פעולה |
+| `auto_accept` | `--yolo` | Cline פועל אוטומטית |
 
-### תשתית קיימת שנשתמש בה
-| רכיב | מיקום |
-|---|---|
-| TurboQuant extension (MLX + KV cache) | `extensions/turboquant-extension/` |
-| MLX server binary | bundled in Tauri (`mlx-server`) |
-| `launch_claude_code_with_config` | `src-tauri/src/` |
-| `tauri-plugin-shell` (spawn) | Cargo.toml |
-| Vision analyzer (text extraction) | `web-app/src/services/pm/vision-analyzer.ts` |
-| File matcher (TF-IDF scoring) | `web-app/src/services/pm/file-matcher.ts` |
-| Project analyzer (dependency tree) | `web-app/src/services/pm/project-analyzer.ts` |
-| Context bundler (markdown builder) | `web-app/src/services/pm/context-bundler.ts` |
-| Project DNA (tech stack detection) | `web-app/src/services/pm/project-dna.ts` |
+### מצבי הרשאות — שלב 1 (Phase 1)
+
+| # | שם | icon | ערך | מימוש |
+|---|---|---|---|---|
+| 1 | Ask permissions | 🤚 | `ask` | **שלב 1** |
+| 2 | Auto accept edits | `</>` | `auto_accept` | **שלב 1** |
+| 3 | Plan mode | 📋 | `plan` | עתידי |
+| 4 | Bypass permissions | ⚠️ | `bypass` | עתידי |
+| 5 | Auto mode | ⚡ | `auto` | עתידי |
+
+### תשתית קיימת
+
+| רכיב | מיקום | סטטוס |
+|---|---|---|
+| **CodeModePanel** | `web-app/src/containers/CodeModePanel.tsx` | **קיים — בסיס** |
+| **code-mode-store** | `web-app/src/stores/code-mode-store.ts` | **קיים — צריך permissionMode** |
+| **code_agent.rs** | `src-tauri/src/core/code_agent.rs` | **קיים — צריך Cline** |
+| **ModeToggle** | `web-app/src/routes/index.tsx` | **קיים** |
+| MLX Plugin (session registry) | `src-tauri/plugins/tauri-plugin-mlx/` | קיים |
+| llamacpp Plugin | `src-tauri/plugins/tauri-plugin-llamacpp/` | קיים |
+| Vision analyzer | `web-app/src/services/pm/vision-analyzer.ts` | קיים |
+| File matcher (TF-IDF) | `web-app/src/services/pm/file-matcher.ts` | קיים |
+| Project analyzer | `web-app/src/services/pm/project-analyzer.ts` | קיים |
+| Context bundler | `web-app/src/services/pm/context-bundler.ts` | קיים |
+
+### שאלות פתוחות לפני מימוש שלב 2-עדכון
+
+| # | שאלה | עדיפות |
+|---|---|---|
+| 1 | מהם ה-flags המדויקים של Cline? (`--base-url`, `--model`, `--json`, `--yolo`) | גבוהה |
+| 2 | מהו פורמט ה-JSON stream של Cline? | גבוהה |
+| 3 | כיצד שולחים approve/deny ל-stdin של Cline? | גבוהה |
+| 4 | האם `cline` הוא שם ה-binary או שם שונה? | גבוהה |

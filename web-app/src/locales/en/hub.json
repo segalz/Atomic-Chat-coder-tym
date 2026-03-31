@@ -19,5 +19,6 @@
   "recVisionKnowledge": "Vision & knowledge",
   "recFinetuningChat": "Fine-tuning & chat",
   "recMathReasoning": "Math & reasoning",
+  "recCoding": "Coding & Code Mode",
   "backToModels": "Back to models"
 }

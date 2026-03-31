@@ -23,6 +23,8 @@ type SearchParams = {
 import { useEffect, useState } from 'react'
 import { useThreads } from '@/hooks/useThreads'
 import DropdownModelProvider from '@/containers/DropdownModelProvider'
+import { useCodeModeStore, type AppMode } from '@/stores/code-mode-store'
+import { CodeModePanel } from '@/containers/CodeModePanel'
 
 export const Route = createFileRoute(route.home as any)({
   component: Index,
@@ -35,12 +37,43 @@ export const Route = createFileRoute(route.home as any)({
   },
 })
 
+const modes: { key: AppMode; label: string }[] = [
+  { key: 'chat', label: 'Chat' },
+  { key: 'code', label: 'Code' },
+]
+
+function ModeToggle() {
+  const mode = useCodeModeStore((s) => s.mode)
+  const setMode = useCodeModeStore((s) => s.setMode)
+
+  return (
+    <div className="relative z-50 flex items-center gap-0.5 rounded-full bg-muted p-0.5 shrink-0">
+      {modes.map(({ key, label }) => (
+        <button
+          type="button"
+          key={key}
+          className={cn(
+            'rounded-full px-3.5 py-1 text-xs font-medium transition-colors cursor-pointer',
+            mode === key
+              ? 'bg-background text-foreground shadow-sm'
+              : 'text-muted-foreground hover:text-foreground'
+          )}
+          onClick={() => setMode(key)}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  )
+}
+
 function Index() {
   const { t } = useTranslation()
   const { providers } = useModelProvider()
   const search = useSearch({ from: route.home as any })
   const threadModel = search.threadModel
   const { setCurrentThreadId } = useThreads()
+  const mode = useCodeModeStore((s) => s.mode)
   useTools()
 
   //* После Skip без перемонтирования роутера — поднимаем флаг, иначе ре-рендер не гарантирован
@@ -85,40 +118,45 @@ function Index() {
   }
 
   return (
-    <div className="flex h-full flex-col justify-center">
+    <div className={cn('flex h-full flex-col', mode === 'chat' && 'justify-center')}>
       <HeaderPage>
-        <div className="flex items-center gap-2 w-full">
+        <div className="flex items-center gap-2">
           <DropdownModelProvider model={threadModel} />
+          <ModeToggle />
         </div>
       </HeaderPage>
-      <div
-        className={cn(
-          'h-full overflow-y-auto inline-flex flex-col gap-2 justify-center px-3'
-        )}
-      >
+      {mode === 'chat' ? (
         <div
           className={cn(
-            'mx-auto w-full md:w-4/5 xl:w-4/6 -mt-20',
+            'h-full overflow-y-auto inline-flex flex-col gap-2 justify-center px-3'
           )}
         >
-          <div className={cn('text-center mb-4')}>
-            <h1
-              className={cn(
-                'text-2xl mt-2 font-studio font-medium',
-              )}
-            >
-              {t('chat:description')}
-            </h1>
-          </div>
-          <div className="flex-1 shrink-0">
-            <ChatInput
-              showSpeedToken={false}
-              model={threadModel}
-              initialMessage={true}
-            />
+          <div
+            className={cn(
+              'mx-auto w-full md:w-4/5 xl:w-4/6 -mt-20',
+            )}
+          >
+            <div className={cn('text-center mb-4')}>
+              <h1
+                className={cn(
+                  'text-2xl mt-2 font-studio font-medium',
+                )}
+              >
+                {t('chat:description')}
+              </h1>
+            </div>
+            <div className="flex-1 shrink-0">
+              <ChatInput
+                showSpeedToken={false}
+                model={threadModel}
+                initialMessage={true}
+              />
+            </div>
           </div>
         </div>
-      </div>
+      ) : (
+        <CodeModePanel />
+      )}
     </div>
   )
 }
