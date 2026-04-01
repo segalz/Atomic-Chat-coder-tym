@@ -25,6 +25,7 @@ import { useThreads } from '@/hooks/useThreads'
 import DropdownModelProvider from '@/containers/DropdownModelProvider'
 import { useCodeModeStore, type AppMode } from '@/stores/code-mode-store'
 import { CodeModePanel } from '@/containers/CodeModePanel'
+import { invoke } from '@tauri-apps/api/core'
 
 export const Route = createFileRoute(route.home as any)({
   component: Index,
@@ -45,6 +46,22 @@ const modes: { key: AppMode; label: string }[] = [
 function ModeToggle() {
   const mode = useCodeModeStore((s) => s.mode)
   const setMode = useCodeModeStore((s) => s.setMode)
+  const setAgentRunning = useCodeModeStore((s) => s.setAgentRunning)
+  const clearOutput = useCodeModeStore((s) => s.clearOutput)
+
+  const handleModeChange = async (newMode: AppMode) => {
+    // If switching from Code to Chat, stop the agent
+    if (mode === 'code' && newMode === 'chat') {
+      try {
+        await invoke('stop_code_agent')
+      } catch (err) {
+        console.log('No agent to stop or error stopping:', err)
+      }
+      setAgentRunning(false)
+      clearOutput()
+    }
+    setMode(newMode)
+  }
 
   return (
     <div className="relative z-50 flex items-center gap-0.5 rounded-full bg-muted p-0.5 shrink-0">
@@ -58,7 +75,7 @@ function ModeToggle() {
               ? 'bg-background text-foreground shadow-sm'
               : 'text-muted-foreground hover:text-foreground'
           )}
-          onClick={() => setMode(key)}
+          onClick={() => handleModeChange(key)}
         >
           {label}
         </button>

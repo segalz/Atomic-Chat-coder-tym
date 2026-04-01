@@ -42,6 +42,8 @@ import { useProjectDialog } from '@/hooks/useProjectDialog'
 import { useAgentMode } from '@/hooks/useAgentMode'
 import { TEMPORARY_CHAT_ID } from '@/constants/chat'
 import { PlatformShortcuts, ShortcutAction } from '@/lib/shortcuts'
+import { useCodeModeStore } from '@/stores/code-mode-store'
+import { invoke } from '@tauri-apps/api/core'
 
 type AnimatedIconHandle =
   | SearchIconHandle
@@ -181,13 +183,28 @@ export function NavMain() {
   const { open: searchOpen, setOpen: setSearchOpen } = useSearchDialog()
   const { open: projectDialogOpen, setOpen: setProjectDialogOpen } =
     useProjectDialog()
+  
+  const handleNewChat = async () => {
+    try {
+      // Stop code agent if running
+      await invoke('stop_code_agent')
+    } catch (err) {
+      console.log('No agent to stop or error stopping:', err)
+    }
+    
+    useAgentMode.getState().removeThread(TEMPORARY_CHAT_ID)
+    // Switch back to Chat Mode when creating new chat
+    const { setMode, setAgentRunning, clearOutput } = useCodeModeStore.getState()
+    setMode('chat')
+    setAgentRunning(false)
+    clearOutput()
+    navigate({ to: route.home })
+  }
+  
   const navMainItems = getNavMainItems(
     () => setProjectDialogOpen(true),
     () => setSearchOpen(true),
-    () => {
-      useAgentMode.getState().removeThread(TEMPORARY_CHAT_ID)
-      navigate({ to: route.home })
-    },
+    handleNewChat,
     () => {
       useAgentMode.getState().setAgentMode(TEMPORARY_CHAT_ID, true)
       navigate({ to: route.home })

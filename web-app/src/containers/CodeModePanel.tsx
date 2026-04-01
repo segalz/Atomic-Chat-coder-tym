@@ -13,6 +13,8 @@ import {
   IconPlayerStop,
   IconArrowUp,
 } from '@tabler/icons-react'
+import { PermissionModeSelector } from './PermissionModeSelector'
+import { StickToBottom, useStickToBottomContext } from 'use-stick-to-bottom'
 
 // ── Event types from Rust backend ────────────────────────────
 interface CodeAgentOutputEvent {
@@ -32,6 +34,7 @@ export function CodeModePanel() {
     setProjectDir,
     draftPrompt,
     setDraftPrompt,
+    permissionMode,
     isAgentRunning,
     setAgentRunning,
     agentOutput,
@@ -93,13 +96,6 @@ export function CodeModePanel() {
     return () => { cancelled = true }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Auto-scroll output ───────────────────────────────────
-  useEffect(() => {
-    if (outputRef.current) {
-      outputRef.current.scrollTop = outputRef.current.scrollHeight
-    }
-  }, [agentOutput])
-
   // ── Listen to Tauri events ───────────────────────────────
   useEffect(() => {
     let cancelled = false
@@ -108,11 +104,25 @@ export function CodeModePanel() {
     const setup = async () => {
       const u1 = await listen<CodeAgentOutputEvent>('code-agent-output', (event) => {
         if (!cancelled) {
-          appendOutput({
-            type: 'assistant',
-            content: event.payload.line,
-            timestamp: Date.now(),
-          })
+          // Try to parse as JSON first
+          const parsed = tryParseJson(event.payload.line)
+          
+          if (parsed) {
+            // It's JSON - determine the type and add accordingly
+            const outputType = (parsed.type as string) || 'assistant'
+            appendOutput({
+              type: outputType as any,
+              content: event.payload.line, // Store raw JSON for processing
+              timestamp: Date.now(),
+            })
+          } else {
+            // Raw text, treat as assistant output
+            appendOutput({
+              type: 'assistant',
+              content: event.payload.line,
+              timestamp: Date.now(),
+            })
+          }
         }
       })
       const u2 = await listen<CodeAgentDoneEvent>('code-agent-done', (event) => {
@@ -121,8 +131,8 @@ export function CodeModePanel() {
           appendOutput({
             type: 'done',
             content: event.payload.success
-              ? 'Done'
-              : `Exited with code ${event.payload.exit_code ?? 'unknown'}`,
+              ? '✓ Done'
+              : `✗ Exited with code ${event.payload.exit_code ?? 'unknown'}`,
             timestamp: Date.now(),
           })
         }
@@ -220,9 +230,10 @@ export function CodeModePanel() {
         projectDir,
         prompt: draftPrompt,
         modelId,
-        context: null,
+        permissionMode,
         serverUrl,
         apiKey: sessionApiKey || 'no-key',
+        context: null,
       })
     } catch (err) {
       setError(String(err))
@@ -253,7 +264,7 @@ export function CodeModePanel() {
   return (
     <div className="flex h-full flex-col overflow-hidden">
       {/* ── Project Bar (compact) ─────────────────────────── */}
-      <div className="flex items-center gap-2 px-4 py-2 border-b shrink-0">
+      <div className="flex items-center gap-3 px-4 py-2 border-b shrink-0">
         <Button
           variant="ghost"
           size="sm"
@@ -268,13 +279,16 @@ export function CodeModePanel() {
             {projectDir}
           </span>
         )}
-        {serverStatus === 'pending' && (
-          <span className="text-xs text-muted-foreground ml-auto">Starting server...</span>
-        )}
+        <div className="ml-auto flex items-center gap-2">
+          <PermissionModeSelector />
+          {serverStatus === 'pending' && (
+            <span className="text-xs text-muted-foreground">Starting server...</span>
+          )}
+        </div>
       </div>
 
       {/* ── Output area (chat-like, scrollable) ───────────── */}
-      <div ref={outputRef} className="flex-1 overflow-y-auto px-4 py-4">
+      <StickToBottom className="flex-1 overflow-y-hidden" initial="smooth" resize="smooth">
         {agentOutput.length === 0 && !isAgentRunning && (
           <div className="flex h-full items-center justify-center">
             <div className="text-center text-muted-foreground">
@@ -288,14 +302,16 @@ export function CodeModePanel() {
           </div>
         )}
 
-        {agentOutput.length > 0 && (
-          <div className="mx-auto w-full md:w-4/5 xl:w-4/6 space-y-1">
-            {agentOutput.map((line, i) => (
-              <OutputLine key={i} line={line} />
-            ))}
-          </div>
-        )}
-      </div>
+        <StickToBottom.Content className="flex flex-col gap-2 px-4 py-4">
+          {agentOutput.length > 0 && (
+            <div className="mx-auto w-full md:w-4/5 xl:w-4/6 space-y-1">
+              {agentOutput.map((line, i) => (
+                <OutputLine key={i} line={line} />
+              ))}
+            </div>
+          )}
+        </StickToBottom.Content>
+      </StickToBottom>
 
       {error && (
         <div className="mx-4 mb-2 rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
@@ -379,12 +395,13 @@ function OutputLine({ line }: { line: { type: string; content: string } }) {
     )
   }
 
-  const { type, subtype, name, message } = parsed as Record<string, any>
-
+  const parsedData = parsed as any
+  const { type, subtype, name, message } = parsedData
+  
   if (type === 'system' && subtype === 'init') {
     return (
       <div className="py-1 text-xs text-muted-foreground">
-        Working on {parsed.cwd} with {parsed.model}
+        Working on {parsedData.cwd} with {parsedData.model}
       </div>
     )
   }
@@ -430,7 +447,44 @@ function OutputLine({ line }: { line: { type: string; content: string } }) {
         'py-1 text-sm font-medium',
         subtype === 'success' ? 'text-green-500' : 'text-destructive'
       )}>
-        {subtype === 'success' ? 'Done' : `Error: ${subtype}`}
+        {subtype === 'success' ? '✓ Done' : `✗ Error: ${subtype}`}
+      </div>
+    )
+  }
+
+  // Permission request (ask mode)
+  if (type === 'permission_request') {
+    const request = parsed as any
+    return (
+      <div className="py-2 rounded-md bg-muted p-3 border border-muted-foreground/20">
+        <div className="text-sm mb-3">
+          <span className="font-medium">Permission Request:</span>
+          <p className="text-xs text-muted-foreground mt-1">{request.message || request.action || 'Requires approval'}</p>
+        </div>
+        <div className="flex gap-2">
+          <Button
+            size="sm"
+            variant="default"
+            className="h-7 text-xs"
+            onClick={() => {
+              console.log('[CodeMode] Approved:', request)
+              // TODO: Send 'y' to Cline stdin
+            }}
+          >
+            Approve
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 text-xs"
+            onClick={() => {
+              console.log('[CodeMode] Denied:', request)
+              // TODO: Send 'n' to Cline stdin
+            }}
+          >
+            Deny
+          </Button>
+        </div>
       </div>
     )
   }
