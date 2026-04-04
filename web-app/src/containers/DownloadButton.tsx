@@ -1,5 +1,13 @@
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { useDownloadStore } from '@/hooks/useDownloadStore'
 import { useGeneralSetting } from '@/hooks/useGeneralSetting'
 import { useModelProvider } from '@/hooks/useModelProvider'
@@ -9,9 +17,11 @@ import { extractModelName } from '@/lib/models'
 import { cn, sanitizeModelId } from '@/lib/utils'
 import { CatalogModel } from '@/services/models/types'
 import { DownloadEvent, DownloadState, events } from '@janhq/core'
+import { IconTrash } from '@tabler/icons-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useShallow } from 'zustand/shallow'
 import { DEFAULT_MODEL_QUANTIZATIONS } from '@/constants/models'
+import { toast } from 'sonner'
 
 type ModelProps = {
   model: CatalogModel
@@ -37,6 +47,8 @@ export function DownloadButtonPlaceholder({
   const serviceHub = useServiceHub()
   const huggingfaceToken = useGeneralSetting((state) => state.huggingfaceToken)
   const [isDownloaded, setDownloaded] = useState<boolean>(false)
+  const [showDeleteDialog, setShowDeleteDialog] = useState(false)
+  const [isDeleting, setIsDeleting] = useState(false)
 
   const quant =
     model.quants?.find((e) =>
@@ -129,6 +141,25 @@ export function DownloadButtonPlaceholder({
       .pullModelWithMetadata(modelId, modelUrl, mmprojPath, huggingfaceToken)
   }
 
+  const handleDeleteModel = useCallback(async () => {
+    setIsDeleting(true)
+    try {
+      await serviceHub.models().deleteModel(downloadedModelId, 'llamacpp')
+      setShowDeleteDialog(false)
+      setDownloaded(false)
+      toast.success(t('hub:modelDeletedSuccess'), {
+        description: downloadedModelId,
+      })
+    } catch (error) {
+      console.error('Error deleting model:', error)
+      toast.error(t('hub:modelDeletedError'), {
+        description: error instanceof Error ? error.message : 'Unknown error',
+      })
+    } finally {
+      setIsDeleting(false)
+    }
+  }, [serviceHub, downloadedModelId, t])
+
   return (
     <div
       className={cn(
@@ -145,14 +176,55 @@ export function DownloadButtonPlaceholder({
         </div>
       )}
       {isDownloaded ? (
-        <Button
-          variant="default"
-          size="sm"
-          onClick={() => handleUseModel(downloadedModelId)}
-          data-test-id={`hub-model-${modelId}`}
-        >
-          {t('hub:newChat')}
-        </Button>
+        <>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="default"
+              size="sm"
+              onClick={() => handleUseModel(downloadedModelId)}
+              data-test-id={`hub-model-${modelId}`}
+            >
+              {t('hub:newChat')}
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setShowDeleteDialog(true)}
+              title={t('hub:deleteModel')}
+              className="text-destructive hover:text-destructive"
+            >
+              <IconTrash size={16} />
+            </Button>
+          </div>
+          <Dialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>{t('hub:deleteModelTitle')}</DialogTitle>
+                <DialogDescription>
+                  {t('hub:deleteModelDescription', {
+                    modelId: downloadedModelId,
+                  })}
+                </DialogDescription>
+              </DialogHeader>
+              <DialogFooter>
+                <Button
+                  variant="outline"
+                  onClick={() => setShowDeleteDialog(false)}
+                  disabled={isDeleting}
+                >
+                  {t('common:cancel')}
+                </Button>
+                <Button
+                  variant="destructive"
+                  onClick={handleDeleteModel}
+                  disabled={isDeleting}
+                >
+                  {isDeleting ? t('hub:deleting') : t('hub:delete')}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+        </>
       ) : (
         <Button
           data-test-id={`hub-model-${modelId}`}

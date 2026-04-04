@@ -18,6 +18,18 @@ Open-source ChatGPT alternative. Run local LLMs or connect cloud models — with
 
 ---
 
+## Status (April 2026)
+
+- **Chat Mode** is the primary, stable experience (local + cloud models).
+- **Code Mode (agentic coding)** is **actively being built** in this repo. Expect rough edges and breaking changes.
+- Code Mode design + progress docs live in:
+  - `CODE_MODE_IMPLEMENTATION_PLAN.md`
+  - `CODE_MODE_PHASE1_REPORT.md`
+  - `CODE_MODE_PHASE6_TESTING_GUIDE.md`
+  - `CODE_MODE_PHASE6_VERIFICATION.md`
+
+---
+
 ### Download
 
 |                       |                                                                          |
@@ -39,6 +51,32 @@ Download from [atomic.chat](https://atomic.chat/) or [GitHub Releases](https://g
 
 ---
 
+## Project Structure
+
+Atomic Chat is a **Tauri** desktop app with a React UI and a native Rust backend. Local models are served through dedicated runtimes and exposed via a local OpenAI-compatible API.
+
+| Path | What it contains |
+| --- | --- |
+| `web-app/` | React + TypeScript UI (Vite) |
+| `src-tauri/` | Tauri (Rust) backend: local API server/proxy, native integrations, app orchestration |
+| `core/` | Shared TypeScript logic used across the app |
+| `extensions/` | Integrations and extensions (providers, tools, MCP-related code) |
+| `mlx-server/` | Local inference server based on MLX (Apple Silicon) |
+| `foundation-models-server/` | Local server/integration for Apple Foundation Models (macOS) |
+| `docs/` | Specs and documentation |
+| `tests/`, `autoqa/` | Automated tests and QA tooling |
+
+### Modes
+
+- **Chat Mode**: standard chat UX backed by the selected provider/model (local or cloud).
+- **Code Mode (WIP)**: a coding agent UX that aims to match CLI agent capabilities (plan → act → tool-use → code changes → tests) while being driven from the UI.
+
+### Local API
+
+- The app exposes an **OpenAI-compatible** local API (commonly `http://localhost:1337/v1`) so other tools can talk to the currently running models through a stable endpoint.
+
+---
+
 ### Build from Source
 
 #### Prerequisites
@@ -53,11 +91,19 @@ Download from [atomic.chat](https://atomic.chat/) or [GitHub Releases](https://g
 
 ```bash
 git clone https://github.com/AtomicBot-ai/Atomic-Chat-HQ
-cd Atomic-Chat
+cd Atomic-Chat-HQ
 make dev
 ```
 
 This handles everything: installs dependencies, builds core components, and launches the app.
+
+#### Day-to-day Dev Loop
+
+After a successful first build, day-to-day development usually only needs:
+
+```bash
+yarn dev
+```
 
 **Available make targets:**
 

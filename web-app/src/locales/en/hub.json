@@ -20,5 +20,12 @@
   "recFinetuningChat": "Fine-tuning & chat",
   "recMathReasoning": "Math & reasoning",
   "recCoding": "Coding & Code Mode",
-  "backToModels": "Back to models"
+  "backToModels": "Back to models",
+  "deleteModel": "Delete model",
+  "deleteModelTitle": "Delete Model",
+  "deleteModelDescription": "Are you sure you want to delete {{modelId}}? This action cannot be undone.",
+  "delete": "Delete",
+  "deleting": "Deleting...",
+  "modelDeletedSuccess": "Model deleted successfully",
+  "modelDeletedError": "Failed to delete model"
 }

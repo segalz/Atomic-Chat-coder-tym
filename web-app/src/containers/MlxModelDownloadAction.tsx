@@ -1,5 +1,13 @@
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { route } from '@/constants/routes'
 import { useDownloadStore } from '@/hooks/useDownloadStore'
 import { useGeneralSetting } from '@/hooks/useGeneralSetting'
@@ -9,6 +17,7 @@ import { useTranslation } from '@/i18n'
 import { CatalogModel } from '@/services/models/types'
 import { cn } from '@/lib/utils'
 import { DownloadEvent, EngineManager, events } from '@janhq/core'
+import { IconTrash } from '@tabler/icons-react'
 import { memo, useCallback, useEffect, useMemo, useState } from 'react'
 import { toast } from 'sonner'
 import { useNavigate } from '@tanstack/react-router'
@@ -21,6 +30,8 @@ export const MlxModelDownloadAction = memo(({ model }: { model: CatalogModel }) 
   const navigate = useNavigate()
 
   const [isDownloaded, setDownloaded] = useState(false)
+  const [showDeleteDialog, setShowDeleteDialog] = useState(false)
+  const [isDeleting, setIsDeleting] = useState(false)
 
   const {
     downloads,
@@ -170,6 +181,25 @@ export const MlxModelDownloadAction = memo(({ model }: { model: CatalogModel }) 
     }
   }, [serviceHub, model, huggingfaceToken, addLocalDownloadingModel, removeLocalDownloadingModel, modelId, modelName])
 
+  const handleDeleteModel = useCallback(async () => {
+    setIsDeleting(true)
+    try {
+      await serviceHub.models().deleteModel(downloadedModelId, 'mlx')
+      setShowDeleteDialog(false)
+      setDownloaded(false)
+      toast.success(t('hub:modelDeletedSuccess'), {
+        description: downloadedModelId,
+      })
+    } catch (error) {
+      console.error('Error deleting model:', error)
+      toast.error(t('hub:modelDeletedError'), {
+        description: error instanceof Error ? error.message : 'Unknown error',
+      })
+    } finally {
+      setIsDeleting(false)
+    }
+  }, [serviceHub, downloadedModelId, t])
+
   return (
     <div className="flex items-center">
       {isDownloading && !isDownloaded && (
@@ -181,14 +211,55 @@ export const MlxModelDownloadAction = memo(({ model }: { model: CatalogModel }) 
         </div>
       )}
       {isDownloaded ? (
-        <Button
-          variant="default"
-          size="sm"
-          onClick={handleUseModel}
-          data-test-id={`hub-model-${modelId}`}
-        >
-          {t('hub:newChat')}
-        </Button>
+        <>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="default"
+              size="sm"
+              onClick={handleUseModel}
+              data-test-id={`hub-model-${modelId}`}
+            >
+              {t('hub:newChat')}
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setShowDeleteDialog(true)}
+              title={t('hub:deleteModel')}
+              className="text-destructive hover:text-destructive"
+            >
+              <IconTrash size={16} />
+            </Button>
+          </div>
+          <Dialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>{t('hub:deleteModelTitle')}</DialogTitle>
+                <DialogDescription>
+                  {t('hub:deleteModelDescription', {
+                    modelId: downloadedModelId,
+                  })}
+                </DialogDescription>
+              </DialogHeader>
+              <DialogFooter>
+                <Button
+                  variant="outline"
+                  onClick={() => setShowDeleteDialog(false)}
+                  disabled={isDeleting}
+                >
+                  {t('common:cancel')}
+                </Button>
+                <Button
+                  variant="destructive"
+                  onClick={handleDeleteModel}
+                  disabled={isDeleting}
+                >
+                  {isDeleting ? t('hub:deleting') : t('hub:delete')}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+        </>
       ) : (
         <Button
           data-test-id={`hub-model-${modelId}`}

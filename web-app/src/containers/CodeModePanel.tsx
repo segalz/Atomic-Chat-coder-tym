@@ -14,6 +14,7 @@ import {
   IconArrowUp,
 } from '@tabler/icons-react'
 import { PermissionModeSelector } from './PermissionModeSelector'
+import { RenderMarkdown } from './RenderMarkdown'
 import { StickToBottom, useStickToBottomContext } from 'use-stick-to-bottom'
 
 // ── Event types from Rust backend ────────────────────────────
@@ -182,17 +183,46 @@ export function CodeModePanel() {
     const modelId = selectedModel.id
 
     try {
-      // Find the actual port of the running model session
+      // Step 0: Verify the model is actually available for the selected provider
+      const provider = useModelProvider.getState().getProviderByName(selectedModel.provider)
+      if (!provider) {
+        setError(`Provider '${selectedModel.provider}' not found`)
+        setAgentRunning(false)
+        return
+      }
+
+      // Check if model exists in the provider's available models
+      const modelExists = provider.models.some((m) => m.id === modelId)
+      if (!modelExists) {
+        setError(
+          `Model '${modelId}' is not available in the '${selectedModel.provider}' provider. ` +
+          `Please download it first from the Models hub.`
+        )
+        setAgentRunning(false)
+        return
+      }
+
+      // Step 1: START the model (like ModelFactory and ChatInput do)
+      // This ensures the model is loaded and running before we try to use it
+      console.log('[CodeMode] Starting model:', modelId)
+      try {
+        await serviceHub.models().startModel(provider, modelId)
+        console.log('[CodeMode] Model started successfully')
+      } catch (error) {
+        console.error('[CodeMode] Failed to start model:', error)
+        setError(
+          `Failed to start model '${modelId}': ${error instanceof Error ? error.message : String(error)}`
+        )
+        setAgentRunning(false)
+        return
+      }
+
+      // Step 2: Find the actual port of the running model session
       // TurboQuant loads models via the MLX plugin, so try MLX first
       let sessionPort: number | null = null
       let sessionApiKey = ''
 
-      // Debug: log loaded models
-      const mlxModels = await invoke<string[]>('plugin:mlx|get_mlx_loaded_models').catch(() => [])
-      const llamaModels = await invoke<string[]>('plugin:llamacpp|get_loaded_models').catch(() => [])
-      console.log('[CodeMode] Looking for model:', modelId)
-      console.log('[CodeMode] MLX loaded models:', mlxModels)
-      console.log('[CodeMode] LlamaCpp loaded models:', llamaModels)
+      console.log('[CodeMode] Looking for model session:', modelId)
 
       // Try MLX first (TurboQuant uses MLX plugin)
       const mlxSession = await invoke<{ port: number; api_key: string } | null>(
@@ -219,7 +249,9 @@ export function CodeModePanel() {
       }
 
       if (!sessionPort) {
-        setError(`No running session for: ${modelId}. Loaded: MLX=[${mlxModels.join(', ')}] LlamaCpp=[${llamaModels.join(', ')}]`)
+        setError(
+          `Failed to find running session for model '${modelId}'. The model provider may not support this model type.`
+        )
         setAgentRunning(false)
         return
       }
@@ -384,6 +416,24 @@ function OutputLine({ line }: { line: { type: string; content: string } }) {
     )
   }
 
+  if (line.type === 'error') {
+    // Try to parse error message
+    try {
+      const errorData = JSON.parse(line.content)
+      return (
+        <div className="py-1 text-sm text-destructive">
+          ✗ {errorData.message || line.content}
+        </div>
+      )
+    } catch {
+      return (
+        <div className="py-1 text-sm text-destructive">
+          ✗ {line.content}
+        </div>
+      )
+    }
+  }
+
   if (!parsed) {
     return (
       <div className={cn(
@@ -406,13 +456,26 @@ function OutputLine({ line }: { line: { type: string; content: string } }) {
     )
   }
 
+  // Task started event
+  if (type === 'task_started') {
+    return (
+      <div className="py-1 text-xs text-muted-foreground">
+        ▶ Task started
+      </div>
+    )
+  }
+
   if (type === 'assistant' && message?.content) {
     const texts = message.content
       .filter((c: any) => c.type === 'text')
       .map((c: any) => c.text)
       .join('')
     if (texts) {
-      return <div className="py-1 text-sm whitespace-pre-wrap">{texts}</div>
+      return (
+        <div className="py-1 text-sm">
+          <RenderMarkdown content={texts} />
+        </div>
+      )
     }
   }
 
@@ -450,6 +513,105 @@ function OutputLine({ line }: { line: { type: string; content: string } }) {
         {subtype === 'success' ? '✓ Done' : `✗ Error: ${subtype}`}
       </div>
     )
+  }
+
+  // Handle 'say' events from the agent
+  if (type === 'say') {
+    const sayType = parsedData.say
+    const text = parsedData.text
+
+    // Task display
+    if (sayType === 'task' && text) {
+      return (
+        <div className="py-1 text-sm">
+          <RenderMarkdown content={text} />
+        </div>
+      )
+    }
+
+    // Text/response display
+    if (sayType === 'text' && text) {
+      return (
+        <div className="py-1 text-sm">
+          <RenderMarkdown content={text} />
+        </div>
+      )
+    }
+
+    // Error/retry - show as error message
+    if (sayType === 'error_retry') {
+      try {
+        const errorData = typeof text === 'string' ? JSON.parse(text) : text
+        return (
+          <div className="py-1 text-xs text-yellow-600 dark:text-yellow-400">
+            ⚠ Retry {errorData.attempt}/{errorData.maxAttempts}: {errorData.errorMessage}
+          </div>
+        )
+      } catch {
+        return (
+          <div className="py-1 text-xs text-yellow-600 dark:text-yellow-400">
+            ⚠ {text}
+          </div>
+        )
+      }
+    }
+
+    // API request started - show compact indicator
+    if (sayType === 'api_req_started') {
+      return null // Skip these, they're just noise
+    }
+
+    // API request retried
+    if (sayType === 'api_req_retried') {
+      return null // Skip these, handled by error_retry
+    }
+
+    // API request finished
+    if (sayType === 'api_req_finished') {
+      return null // Skip these, they're just noise
+    }
+
+    // Generic say handler
+    if (text) {
+      return (
+        <div className="py-1 text-sm">
+          <RenderMarkdown content={typeof text === 'string' ? text : JSON.stringify(text)} />
+        </div>
+      )
+    }
+  }
+
+  // Handle 'ask' events from the agent (questions to user)
+  if (type === 'ask') {
+    const askType = parsedData.ask
+    const text = parsedData.text
+
+    // API request failed
+    if (askType === 'api_req_failed' && text) {
+      try {
+        const errorData = typeof text === 'string' ? JSON.parse(text) : text
+        return (
+          <div className="py-1 text-sm text-destructive">
+            ✗ API Error: {errorData.message || text}
+          </div>
+        )
+      } catch {
+        return (
+          <div className="py-1 text-sm text-destructive">
+            ✗ {text}
+          </div>
+        )
+      }
+    }
+
+    // Generic ask handler
+    if (text) {
+      return (
+        <div className="py-1 text-sm">
+          <RenderMarkdown content={typeof text === 'string' ? text : JSON.stringify(text)} />
+        </div>
+      )
+    }
   }
 
   // Permission request (ask mode)

@@ -1,5 +1,13 @@
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { route } from '@/constants/routes'
 import { useDownloadStore } from '@/hooks/useDownloadStore'
 import { useGeneralSetting } from '@/hooks/useGeneralSetting'
@@ -7,9 +15,10 @@ import { useModelProvider } from '@/hooks/useModelProvider'
 import { useServiceHub } from '@/hooks/useServiceHub'
 import { useTranslation } from '@/i18n'
 import { CatalogModel } from '@/services/models/types'
-import { IconDownload } from '@tabler/icons-react'
+import { IconDownload, IconTrash } from '@tabler/icons-react'
 import { useNavigate } from '@tanstack/react-router'
-import { useCallback, useMemo } from 'react'
+import { useCallback, useMemo, useState } from 'react'
+import { toast } from 'sonner'
 
 export const ModelDownloadAction = ({
   variant,
@@ -19,6 +28,8 @@ export const ModelDownloadAction = ({
   model: CatalogModel
 }) => {
   const serviceHub = useServiceHub()
+  const [showDeleteDialog, setShowDeleteDialog] = useState(false)
+  const [isDeleting, setIsDeleting] = useState(false)
 
   const { t } = useTranslation()
   const huggingfaceToken = useGeneralSetting((state) => state.huggingfaceToken)
@@ -77,6 +88,24 @@ export const ModelDownloadAction = ({
     addLocalDownloadingModel,
   ])
 
+  const handleDeleteModel = useCallback(async () => {
+    setIsDeleting(true)
+    try {
+      await serviceHub.models().deleteModel(variant.model_id, 'llamacpp')
+      setShowDeleteDialog(false)
+      toast.success(t('hub:modelDeletedSuccess'), {
+        description: variant.model_id,
+      })
+    } catch (error) {
+      console.error('Error deleting model:', error)
+      toast.error(t('hub:modelDeletedError'), {
+        description: error instanceof Error ? error.message : 'Unknown error',
+      })
+    } finally {
+      setIsDeleting(false)
+    }
+  }, [serviceHub, variant.model_id, t])
+
   const isDownloading =
     localDownloadingModels.has(variant.model_id) ||
     downloadProcesses.some((e) => e.id === variant.model_id)
@@ -102,14 +131,55 @@ export const ModelDownloadAction = ({
 
   if (isDownloaded) {
     return (
-      <Button
-        variant="default"
-        size="sm"
-        onClick={() => handleUseModel(variant.model_id)}
-        title={t('hub:useModel')}
-      >
-        {t('hub:newChat')}
-      </Button>
+      <>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="default"
+            size="sm"
+            onClick={() => handleUseModel(variant.model_id)}
+            title={t('hub:useModel')}
+          >
+            {t('hub:newChat')}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setShowDeleteDialog(true)}
+            title={t('hub:deleteModel')}
+            className="text-destructive hover:text-destructive"
+          >
+            <IconTrash size={16} />
+          </Button>
+        </div>
+        <Dialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>{t('hub:deleteModelTitle')}</DialogTitle>
+              <DialogDescription>
+                {t('hub:deleteModelDescription', {
+                  modelId: variant.model_id,
+                })}
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button
+                variant="outline"
+                onClick={() => setShowDeleteDialog(false)}
+                disabled={isDeleting}
+              >
+                {t('common:cancel')}
+              </Button>
+              <Button
+                variant="destructive"
+                onClick={handleDeleteModel}
+                disabled={isDeleting}
+              >
+                {isDeleting ? t('hub:deleting') : t('hub:delete')}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      </>
     )
   }
 
