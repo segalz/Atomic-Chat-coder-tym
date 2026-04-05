@@ -1,0 +1,855 @@
+# Code Mode Development Process (claw-code engine)
+
+This document describes the development process for **Code Mode** in Atomic Chat using a **claw-code**-based agent engine (see `/Users/zvisegal/devlope/Claw-Code-Local-IOS`) and an **event-driven** UI contract.
+
+## Goals
+
+- Deliver a UI experience similar to Claude Desktop / Codex Desktop: **plan → act → tool-use → code changes → run tests**.
+- Keep the UI **engine-agnostic** by relying on a stable **event contract**, not terminal text parsing.
+- Run **local-first** via a stable OpenAI-compatible base URL (commonly `http://localhost:1337/v1`).
+- Enforce safety: **workspace boundaries + explicit permissions + deny-by-default**.
+- Avoid regressions: Chat Mode stays stable and provider/model serving remains unchanged.
+
+## Repository touchpoints
+
+- UI panel: `/Users/zvisegal/devlope/Atomic-Chat-coder-tym/web-app/src/containers/CodeModePanel.tsx`
+- UI state: `/Users/zvisegal/devlope/Atomic-Chat-coder-tym/web-app/src/stores/code-mode-store.ts`
+- Backend (Tauri/Rust): `/Users/zvisegal/devlope/Atomic-Chat-coder-tym/src-tauri/`
+- Local API/proxy (stable endpoint): `/Users/zvisegal/devlope/Atomic-Chat-coder-tym/src-tauri/src/core/server/proxy.rs`
+- Agent engine source: `/Users/zvisegal/devlope/Claw-Code-Local-IOS`
+
+## Architecture (target)
+
+The recommended approach is an **internal agent service** inside Tauri that communicates with the UI via Tauri commands + events.
+
+```mermaid
+flowchart LR
+  UI["React UI (Code Mode)"] -->|Tauri invoke| AS["Agent Service (Rust)"]
+  AS -->|events stream| UI
+  AS -->|HTTP (OpenAI-compatible)| API["Local API Proxy<br/>127.0.0.1:1337/v1"]
+  API --> MS["Local model servers<br/>(MLX / llama.cpp / optional Ollama)"]
+  AS --> ENG["Engine (claw-code)<br/>Sidecar → Embedded"]
+  ENG -->|tool calls + model requests| AS
+```
+
+### Integration strategy
+
+We recommend a two-step engine integration:
+
+1. **MVP**: run `claw` as a **sidecar** process and consume a **structured event stream** (NDJSON preferred).
+2. **Upgrade**: embed `claw-code-local` crates **in-process** inside `src-tauri` once the event contract is stable.
+
+This keeps early progress fast while preserving a clean path to deterministic permission handling and stronger safety.
+
+## Agent service contract (must remain stable)
+
+### Commands (UI → backend)
+
+- `start(runConfig)` → returns `run_id`
+- `sendInput(run_id, text)`
+- `respondPermission(run_id, request_id, decision)` where `decision ∈ {allow, deny}`
+- `cancel(run_id)`
+
+### Events (backend → UI)
+
+Minimum set (engine-agnostic):
+
+- `run_started` `{ run_id, workspace_root, model_id, timestamp }`
+- `assistant_delta` `{ run_id, text_delta }`
+- `tool_start` `{ run_id, tool_name, input, tool_call_id }`
+- `tool_result` `{ run_id, tool_name, tool_call_id, output, is_error }`
+- `permission_request` `{ run_id, request_id, tool_name, required_mode, input, reason_code?, reason?, tool_call_id?, test_id?, paths?, command?, argv? }`
+- `permission_resolved` `{ run_id, request_id, decision, reason_code?, reason?, tool_call_id?, test_id? }`
+- `run_error` `{ run_id, message, details? }`
+- `run_finished` `{ run_id, usage?, summary? }`
+
+Rules:
+
+- UI must never parse terminal formatting; it only renders events.
+- Backward compatibility matters: once shipped, extend events by adding fields rather than renaming.
+
+## “Reality gates” (must be proven early)
+
+These are small spikes that prevent building a large UI on assumptions:
+
+1. **Streaming gate**
+   - Prove the engine can produce a structured stream suitable for UI (NDJSON/SSE/WS).
+   - Confirm we can represent partial assistant output as `assistant_delta`.
+2. **Permissions gate**
+   - Prove permissions are structured as `permission_request` and can be answered programmatically (no TTY-only prompt loops).
+3. **Workspace safety gate**
+   - Prove we can enforce workspace boundaries even in edge cases:
+     - `..` traversal
+     - symlink escape
+     - new-file writes (parent canonicalization)
+
+If any gate fails, pause and adjust the engine adapter before adding more UI features.
+
+---
+
+## Stage 0 — Architecture + contract spike
+
+**Code tasks**
+
+- Lock the command + event schema (above).
+- Implement a fake in-memory engine that emits a deterministic scripted stream (for UI work).
+- Decide the MVP engine transport:
+  - Preferred: **NDJSON** (one JSON object per line) with explicit event types.
+
+**Testing tasks**
+
+- Contract test: replay a recorded event stream into the UI reducer/renderer.
+- Backend parser test: handles partial lines, invalid JSON, stderr noise.
+
+**Exit criteria**
+
+- Event schema is versioned and used end-to-end with the fake engine.
+- “Reality gates” are executable and repeatable.
+
+**Do / Don’t**
+
+- Do: treat the event schema as a product API.
+- Don’t: ship UI behavior that depends on terminal output formatting.
+
+---
+
+## Stage 1 — Backend: Agent service + sidecar engine (MVP)
+
+### Stage 1 deliverables (what must exist after this stage)
+
+- A **Tauri-backed agent service** that can run exactly one Code Mode run end-to-end (including permissions) using a sidecar engine.
+- A **sidecar engine adapter** (`ClawSidecarEngine`) that speaks a **structured IO protocol** (NDJSON events out + structured control messages in).
+- A reliable **cancel** implementation that does not leave zombie processes.
+
+### Tauri API surface (make this explicit in code)
+
+Define a stable command + event surface early (names can change, behavior must not):
+
+- Commands (UI → backend):
+  - `start_code_agent(run_config) -> run_id`
+  - `send_code_agent_input(run_id, text)`
+  - `respond_code_agent_permission(run_id, request_id, decision)`
+  - `cancel_code_agent(run_id)`
+- Events (backend → UI):
+  - `code_agent_event` with payload matching the event schema in this doc (minimum set).
+
+The backend must be the only place that:
+
+- Parses engine output
+- Decides whether to pause/resume the run
+- Enforces workspace boundary rules (deny-by-default on ambiguity)
+
+### Run state model (backend-owned)
+
+Implement a per-run state machine in Rust (in-memory is fine for MVP):
+
+- Identifiers: `run_id`, `workspace_root`, `model_id`
+- Status: `starting | running | awaiting_permission | cancelling | finished | error`
+- Engine handles: child process handle, stdout/stderr reader tasks, and an optional pending permission request `{ request_id, ... }`
+
+This state machine is what prevents “stdin hacks” and UI race conditions.
+
+**Code tasks**
+
+- Implement an agent service in `src-tauri` that:
+  - spawns the engine process
+  - streams parsed events to the UI
+  - supports cancel (kill + cleanup)
+  - stores `run_id` + status state
+- Implement `ClawSidecarEngine`:
+  - configure `OPENAI_BASE_URL=http://localhost:1337/v1` and a non-empty `OPENAI_API_KEY`
+  - pass through selected model id
+  - emit NDJSON events (patch `claw-code-local` if needed to add an event-emitter mode)
+- Implement a structured permission handshake:
+  - engine emits `permission_request`
+  - backend pauses run execution
+  - UI replies allow/deny
+  - backend forwards the decision
+
+### Engine IO protocol (NDJSON) — do not depend on terminal formatting
+
+For UI compatibility, the sidecar engine must support a mode that:
+
+- Writes **one JSON object per line** on stdout (NDJSON).
+- Accepts structured control messages on stdin (also NDJSON, or a clearly documented single-line protocol).
+
+Example (engine → backend):
+
+```json
+{"type":"assistant_delta","run_id":"...","text_delta":"Hello"}
+```
+
+Example (backend → engine):
+
+```json
+{"type":"user_message","text":"Continue, but do not edit files yet."}
+```
+
+**Important:** do not ship Stage 1 relying on “pretty terminal output” + parsing. The UI must render events, not terminal text.
+
+### Permissions: structured handshake (no PTY/TTY prompts)
+
+The engine must surface permission requests as explicit events and wait for a decision:
+
+1. Engine emits:
+   - `permission_request { request_id, tool_name, required_mode, input, reason_code?, reason?, tool_call_id?, test_id?, paths?, command?, argv? }`
+2. Backend transitions run state to `awaiting_permission` and forwards the event to UI.
+3. UI responds with allow/deny.
+4. Backend sends a structured decision back to the engine:
+   - `permission_decision { request_id, decision, reason_code?, reason?, tool_call_id?, test_id? }`
+5. Engine continues and emits `permission_resolved`.
+
+**Known gap to address:** the current `claw-code-local` CLI uses a human prompt (`Approve this tool call? [y/N]:`) and reads from stdin. That is not sufficient for a robust UI integration. Stage 1 includes adding a dedicated **UI/NDJSON mode** (or equivalent) so permission requests/decisions are machine-readable and deterministic.
+
+### Cancellation & cleanup (define behavior precisely)
+
+Cancel must:
+
+- Transition state to `cancelling`
+- Terminate the engine process (prefer killing the process group on Unix)
+- Stop stdout/stderr reader tasks
+- Emit `run_finished` (or `run_error` with a clear “cancelled” reason)
+- Guarantee no zombies (wait/reap the child)
+
+Define timeouts:
+
+- Grace period for clean shutdown
+- Escalation to forced kill if needed
+
+**Testing tasks**
+
+- Unit: base URL builder and model mapping.
+- Unit: event parsing (partial chunks, ordering, stderr).
+- Integration: mock-engine binary that emits NDJSON + accepts permission decisions.
+  - Include a cancel test: start mock engine, cancel mid-stream, assert the process is gone and the run reaches a terminal state.
+
+**Exit criteria**
+
+- Start → stream → permission request → allow/deny → continue → finish works end-to-end.
+- Cancel is reliable and does not leave zombie processes.
+
+**Do / Don’t**
+
+- Do: build around structured events only.
+- Don’t: rely on PTY/TTY prompt flows for permissions in the UI path.
+
+---
+
+## Stage 2 — Frontend: UI wiring (MVP UX)
+
+### Stage 2 deliverables (what must exist after this stage)
+
+- A Code Mode UI that can run one session end-to-end: **start → stream → permission allow/deny → finish**.
+- Deterministic rendering driven purely by `code_agent_event` (no terminal parsing).
+- A minimal, stable frontend run state model (`run_id`, `status`, `transcript`, `last_error`).
+- A safe listener lifecycle (no duplicate listeners, no leaks).
+- All new Code Mode styling lives in a **separate CSS file**.
+
+### Primary files to touch
+
+- UI panel: `/Users/zvisegal/devlope/Atomic-Chat-coder-tym/web-app/src/containers/CodeModePanel.tsx`
+- UI state/store: `/Users/zvisegal/devlope/Atomic-Chat-coder-tym/web-app/src/stores/code-mode-store.ts`
+- (Recommended) Event types/guards: `/Users/zvisegal/devlope/Atomic-Chat-coder-tym/web-app/src/lib/code-agent/events.ts`
+- (CSS) Code Mode styles: `/Users/zvisegal/devlope/Atomic-Chat-coder-tym/web-app/src/containers/CodeModePanel.css`
+
+### UI → backend wiring (commands + event subscription)
+
+- Start:
+  - call `start_code_agent(run_config)` and store the returned `run_id`
+  - set frontend status to `starting`
+- Subscribe to events:
+  - listen once to `code_agent_event`
+  - route each event into the store keyed by `run_id`
+- Send user input:
+  - call `send_code_agent_input(run_id, text)`
+  - allow this whenever the run is in `running` (do not treat it as “only after permissions”)
+- Permissions:
+  - render `permission_request` with Allow/Deny buttons
+  - call `respond_code_agent_permission(run_id, request_id, decision)` on click
+- Cancel:
+  - call `cancel_code_agent(run_id)`
+  - immediately set frontend status to `cancelling` (then confirm terminal state via events)
+
+### Frontend run state machine (store-owned)
+
+Use the same statuses as the backend:
+
+- `starting | running | awaiting_permission | cancelling | finished | error`
+
+Define transitions based on user actions + events:
+
+- Start button → `starting`
+- `run_started` (for the active `run_id`) → `running`
+- `permission_request` → `awaiting_permission`
+- after the UI calls `respond_code_agent_permission(...)` → `running` (until next event)
+- Cancel button → `cancelling`
+- `run_finished` → `finished`
+- `run_error` → `error`
+
+Rules:
+
+- Ignore events for unknown run ids or non-active runs (unless multi-run support is explicitly added).
+- Be idempotent: duplicated/out-of-order events must not double-append transcript entries.
+
+### Transcript & rendering rules (deterministic)
+
+The UI is a pure projection of events:
+
+- `assistant_delta`: append to the currently streaming assistant message (create one if none exists yet for this turn).
+- `tool_start`: add a tool-call entry keyed by `tool_call_id`.
+- `tool_result`: attach to the tool-call entry and mark it complete (`is_error` affects UI display only).
+- `permission_request`: show a UI prompt card (do not auto-resolve).
+- `permission_resolved`: mark that prompt as resolved and record the decision.
+
+### Listener lifecycle (avoid regressions)
+
+- Register the Tauri event listener **once** per component mount.
+- Always `unlisten()` on unmount.
+- Do not register new listeners per run; use `run_id` routing inside the store.
+
+### Type safety (do not use `any`)
+
+- Define a discriminated union type for events (e.g. `type CodeAgentEvent = { type: 'run_started', ... } | ...`).
+- Validate/guard incoming event payloads before updating state (fail closed → set `run_error`).
+
+### Testing tasks
+
+- Component/store tests:
+  - event ordering and `assistant_delta` accumulation
+  - tool start/result pairing by `tool_call_id`
+  - permission allow/deny flow and status transitions
+  - cancel flow (UI enters `cancelling` and ends in a terminal state)
+- E2E minimal:
+  - fake engine → start → stream → permission → allow/deny → finish
+  - repeat using the real sidecar engine once Stage 1 is ready
+
+### Exit criteria
+
+- UI reliably renders a full run using both the fake engine and the sidecar engine.
+- UI never parses engine stdout; it renders only structured events.
+
+### Do / Don’t
+
+- Do: keep styling in a separate CSS file.
+- Do: keep parsing and policy decisions in the backend.
+- Don’t: parse terminal text or infer tool boundaries from plain strings.
+- Don’t: keep global event listeners without cleanup.
+
+---
+
+## Stage 3 — Safety: workspace boundaries + destructive command guardrails
+
+### Stage 3 deliverables (what must exist after this stage)
+
+- **Defense-in-depth**: the backend is the final authority for workspace boundaries and dangerous commands, even if the engine also enforces them.
+- A deterministic permission decision policy that is:
+  - **deny-by-default** on ambiguity
+  - consistent across file tools and shell tools
+- A test suite that proves:
+  - path traversal + symlink escapes are blocked
+  - destructive shell commands are blocked or require explicit approval
+
+### Primary backend files to touch (recommended)
+
+- Agent service (permission decision point): `/Users/zvisegal/devlope/Atomic-Chat-coder-tym/src-tauri/src/core/code_agent.rs`
+- (Recommended) Policy module: `/Users/zvisegal/devlope/Atomic-Chat-coder-tym/src-tauri/src/core/code_agent/policy.rs`
+
+### Where enforcement happens (important)
+
+In sidecar mode, the backend cannot “intercept” filesystem writes directly. The enforcement point is:
+
+- Every `permission_request` event coming from the engine → backend evaluates → backend replies allow/deny.
+
+Therefore:
+
+- The `permission_request` payload must be machine-readable. Do **not** rely on parsing human prompt text.
+- Minimum required structured fields (recommended to include as top-level fields on the event):
+  - File tools: `paths: string[]` (all target paths the tool intends to read/write/edit)
+  - Shell tools: `argv: string[]` (preferred) or `command: string` (fallback)
+- Correlation fields (recommended):
+  - Tool calls: `tool_call_id` (so the UI can associate the permission prompt with a specific tool call)
+  - Test runs: `test_id` (so the UI can associate the permission prompt with the correct test run)
+- If these fields are missing or cannot be extracted confidently, the backend must **deny** (fail closed) with a clear reason (e.g. `AMBIGUOUS_PERMISSION_REQUEST`).
+
+If the engine currently emits only a human-oriented prompt or an unstructured blob, Stage 1 must include a patch to the engine’s “UI/NDJSON mode” to emit structured permission events suitable for backend enforcement.
+
+If the backend cannot confidently evaluate the request, it must deny (fail closed).
+
+### Permission decision scoping (one request only)
+
+For safety and predictability, treat approvals/denials as **single-request decisions**:
+
+- A decision applies only to one `request_id` (never “approve forever”).
+- Do not cache “allow” across multiple requests unless you intentionally ship a separate feature (and document it).
+- For high-risk cases (out-of-workspace or destructive commands), require explicit user approval every time.
+
+To enable correct UI warnings, use reason codes consistently:
+
+- `OUT_OF_WORKSPACE`
+- `DESTRUCTIVE_COMMAND`
+- `RUN_TESTS`
+- `AMBIGUOUS_PERMISSION_REQUEST`
+- `READ_ONLY_MODE_VIOLATION`
+
+### Workspace boundary algorithm (backend)
+
+Precompute once per run:
+
+- `workspace_root_canon = canonicalize(workspace_root)`
+
+For every path-like target extracted from the permission request:
+
+1. Convert to an absolute candidate path:
+   - if `target` is absolute → use it
+   - if `target` is relative → `candidate = workspace_root.join(target)`
+2. Canonicalize in a way that handles **new files** safely:
+   - If `candidate` exists → `target_canon = canonicalize(candidate)`
+   - If `candidate` does not exist:
+     - `parent = candidate.parent()` must exist
+     - `parent_canon = canonicalize(parent)`
+     - `target_canon = parent_canon.join(candidate.file_name())`
+3. Enforce boundary:
+   - allow only if `target_canon.starts_with(workspace_root_canon)`
+4. On any error (missing parent, canonicalize failure, missing filename) → **deny**
+
+Notes:
+
+- Canonicalization resolves symlinks, so a symlink escape inside the workspace will resolve outside and fail the `starts_with` check.
+- Do not use string-prefix checks; use path-aware `starts_with`.
+- On Windows, prefer `dunce::canonicalize`-style behavior to avoid path normalization pitfalls.
+
+### Out-of-workspace actions (override semantics)
+
+Default policy (recommended):
+
+- **Always deny** any request that targets outside `workspace_root`.
+
+Optional advanced override (if you later support it):
+
+- Only enabled when `run_config.allow_out_of_workspace == true`.
+- Requires a “strong warning” UX and a one-time confirmation.
+- Approval should be scoped to **one request only** (never “forever”).
+
+### Destructive shell command guardrails (backend)
+
+Treat shell permissions as a classification problem:
+
+- **deny**: commands that are obviously destructive or system-level (examples: `rm -rf`, `mkfs`, `dd`, `shutdown`, `reboot`).
+- **prompt**: commands that write to disk, mutate git state, or involve redirection (examples: `>`, `>>`, `git commit`, `git reset`, `sed -i`).
+- **auto-allow** (optional): clearly read-only commands (examples: `rg`, `ls`, `cat`, `git status`, `git diff`) in non-read-only mode.
+
+Implementation guidance:
+
+- Prefer structured data:
+  - if the engine provides `argv`, evaluate based on tokens rather than substring matching.
+  - if only a raw command string is available, be conservative (prompt or deny).
+- If the command contains redirection (`>`, `>>`) or here-doc patterns → treat as write (prompt).
+- If the command contains shell control operators (`;`, `&&`, `||`, `|`) → treat as at least prompt (often deny if combined with risky programs).
+- If the command contains `sudo` → treat as deny by default.
+- If the command looks like “download and execute” (examples: `curl ... | sh`, `wget ... | bash`) → treat as deny by default.
+- In `read-only` mode: deny any shell command that is not clearly read-only.
+
+### Never allow bypass / auto-approve modes
+
+- Do not run the engine in modes that skip permission checks.
+- The UI path must always route tool execution through explicit permission logic.
+
+### Testing tasks
+
+- Unit tests (policy):
+  - `../` traversal attempts are denied
+  - symlink escape attempts are denied
+  - out-of-root writes are denied
+  - new-file write: parent canonicalization works and still enforces boundary
+- Unit tests (permission request parsing):
+  - missing `paths/argv/command` → denied with `AMBIGUOUS_PERMISSION_REQUEST`
+- Unit tests (shell classification):
+  - deny-list examples (`rm -rf`, `mkfs`, `dd`) are denied
+  - prompt examples (`git commit`, redirections) require approval
+  - allowlist examples (`rg`, `git status`) can be auto-allowed (if you enable that policy)
+- Integration tests:
+  - engine emits permission request → backend denies → engine continues and reports denial cleanly
+
+### Exit criteria
+
+- Out-of-workspace modifications are blocked regardless of engine behavior.
+- Dangerous shell commands are denied or gated behind explicit approval (based on policy).
+
+### Do / Don’t
+
+- Do: fail closed on ambiguity.
+- Do: enforce in backend and engine (defense in depth).
+- Don’t: trust the engine as the only enforcement layer.
+
+---
+
+## Stage 4 — CLI-parity UX: diffs + test runner
+
+### Stage 4 deliverables (what must exist after this stage)
+
+- A “Diffs” UX that reliably shows what changed after file-modifying tool calls.
+- A “Run tests” UX that:
+  - runs a workspace-configured command
+  - requires explicit approval
+  - streams stdout/stderr to the transcript
+  - surfaces duration + exit code (when available)
+- Diffs and test runs appear in the **same transcript** as the rest of Code Mode, using consistent, collapsible “sections”.
+- No parsing of terminal formatting in the UI (diffs and test output are structured events).
+
+### Primary files to touch (likely)
+
+- UI panel: `/Users/zvisegal/devlope/Atomic-Chat-coder-tym/web-app/src/containers/CodeModePanel.tsx`
+- UI state/store: `/Users/zvisegal/devlope/Atomic-Chat-coder-tym/web-app/src/stores/code-mode-store.ts`
+- Backend agent service: `/Users/zvisegal/devlope/Atomic-Chat-coder-tym/src-tauri/src/core/code_agent.rs`
+- Backend policy (tests are gated like shell): `/Users/zvisegal/devlope/Atomic-Chat-coder-tym/src-tauri/src/core/code_agent/policy.rs`
+
+### Stage 4 event additions (backend → UI)
+
+Add new event types (in addition to the Stage 1–3 minimum set):
+
+- `diff_snapshot` `{ run_id, diff_id, tool_call_id, paths?, patch?, is_truncated, note? }`
+- `test_started` `{ run_id, test_id, command?, argv?, timestamp }`
+- `test_output_delta` `{ run_id, test_id, stream: "stdout" | "stderr", text_delta, timestamp? }`
+- `test_finished` `{ run_id, test_id, exit_code?, duration_ms, was_cancelled, output_is_truncated?, output_truncation_note? }`
+
+ID + field semantics:
+
+- `diff_id` and `test_id` are generated by the backend (recommend **UUIDv4** to avoid collisions and ensure uniqueness across runs).
+- **`diff_snapshot.tool_call_id` is required (not optional) and must match the `tool_call_id` from the triggering `tool_result`** (this allows the UI to link the diff to the original tool call in the transcript; without it, the diff becomes orphaned).
+- `paths` should be workspace-relative path strings when possible (more readable than absolute paths).
+- `patch` is UTF-8 unified diff text (use `\n` newlines, do not include the trailing newline after the last line if not in original).
+- `test_finished.exit_code` may be absent (for example when a process is terminated by signal); use `was_cancelled` to drive the primary status.
+- `test_output_delta.timestamp` (optional) should be included if backend tracks stream interleaving precisely; helps UI order concurrent stdout/stderr correctly.
+
+Rules:
+
+- Diffs/tests must be emitted as events; the UI should never “scrape” output from raw stdout/stderr blobs.
+- Diff patches: enforce a max size and signal truncation via `diff_snapshot.is_truncated=true` + `note`.
+- Test output: enforce a max size (backend recommended; UI must also have a max buffer). If backend truncates, signal it via `test_finished.output_is_truncated=true` + `output_truncation_note`.
+
+### UI transcript rendering (required)
+
+The UI must treat these Stage 4 features as transcript entries so users can scroll a single timeline.
+
+#### Rendering `diff_snapshot`
+
+- Create one transcript entry per `diff_snapshot` event.
+- Suggested UI shape:
+  - Title: `Diff`
+  - Optional subtitle: affected `paths` (if present) and/or the triggering `tool_call_id`
+  - Body:
+    - If `patch` is present: show it in a diff-like code block (no extra parsing required).
+    - If `patch` is missing: show `note` and the `paths` list.
+  - Badges:
+    - `is_truncated=true` → show “Truncated” and display `note`.
+    - Binary note → show “Binary changed”.
+- The UI must not attempt to “recompute” diffs; it renders the patch produced by the backend.
+
+#### Rendering test runs (`test_*`)
+
+- `test_started`: ensure a transcript entry exists for `test_id`:
+  - If the UI already created an “Awaiting approval” entry (from `request_test_run`), update it.
+  - Otherwise create it at this point.
+  - Set:
+    - Title: `Tests`
+    - Command display (prefer `argv` if provided)
+    - Status badge: “Running”
+- `test_output_delta`: append to the existing `test_id` entry:
+  - Keep stdout/stderr separated (two buffers) or tag lines by stream.
+  - If backend provides `timestamp`, use it to order events correctly when stdout/stderr interleave (UI should display in chronological order, not grouped by stream).
+  - Use a max buffer size per transcript entry; if exceeded, truncate and append a "Truncated output" note (or set `output_is_truncated=true` in `test_finished`).
+- `test_finished`: mark the transcript entry terminal:
+  - Status: “Cancelled” if `was_cancelled==true`; otherwise “Passed” if `exit_code == 0`; otherwise “Failed”
+  - Show `duration_ms` and `exit_code` (if present)
+  - If `output_is_truncated==true`, show `output_truncation_note` (or a default “Output truncated” message)
+- `permission_resolved` (with `test_id`, denied): mark the transcript entry terminal as “Denied” and show the reason.
+- The UI should default to a collapsed view for long outputs with an explicit “Expand” toggle.
+**UI edge case: cancellation during approval**
+- If the user closes the permission prompt or navigates away **before approving**, the UI should **not** call `cancel_test_run` (the process has not yet started).
+- Simply dismiss or collapse the "Awaiting approval" transcript entry visually.
+- Backend will naturally clean up the pending test state when the run finishes or is cancelled via `cancel(run_id)`.
+### Diffs (git-first, deterministic triggers)
+
+#### When to generate a diff
+
+Generate diffs after tool calls that are known to modify files. For the claw-code tool surface this usually includes:
+
+- `write_file`
+- `edit_file`
+- `delete_file` (if supported)
+- `rename_file` (if supported)
+
+Trigger point:
+
+- On `tool_result` for the above tools (after the filesystem mutation has completed).
+- **Important**: emit `diff_snapshot` **immediately after** `tool_result`, before any subsequent `assistant_delta` or other event.
+- Only generate diff if `is_error == false` (failed tool calls do not generate diffs).
+- If the same file is modified multiple times in a run:
+  - emit a new `diff_snapshot` per tool call
+  - each snapshot shows the **current** state of the workspace (cumulative diffs), not incremental changes
+  - each snapshot has a unique `diff_id` and the same `tool_call_id` pointing to the tool that changed it
+
+#### What the diff represents (MVP semantics)
+
+- `diff_snapshot.patch` is a **unified diff** representing the current workspace changes for the affected `paths`.
+- For git repos, the MVP uses `git diff` (working tree vs index) scoped to the provided paths.
+- This is not guaranteed to be “incremental per tool call” if the same file is modified multiple times in a run; it shows the **current** diff for that file at the time the snapshot is taken.
+
+#### How to generate the diff (git repo)
+
+1. Detect git workspace:
+   - `git rev-parse --is-inside-work-tree` (run with `cwd=workspace_root`)
+   - If this fails (e.g., corrupt repo), **fall back to non-git mode** (emit `diff_snapshot` with `paths` only, no `run_error`)
+2. Classify the affected paths (recommended):
+   - `git status --porcelain -- <paths...>` to detect untracked (`??`) files
+3. Prefer path-scoped diffs for readability (tracked paths):
+   - `git diff --no-ext-diff -M -- <paths...>`
+   - Note: `git diff` may exit with code `1` when differences exist; treat that as success.
+4. Handle **untracked new files** (git diff shows nothing for these):
+   - For each untracked file path, generate a diff via:
+     - `git diff --no-index -- /dev/null <path>`
+   - Treat exit code `1` as success here as well.
+   - Cross-platform note: on Windows, don't rely on `/dev/null`. Use an empty temp file instead (or a platform-appropriate null file).
+5. If rename detection or path scoping fails (rare), fall back to:
+   - `git diff --no-ext-diff -M`
+6. Error recovery:
+   - If any git command fails unexpectedly, emit a `diff_snapshot` with `paths` populated + `note` explaining the git error (e.g., "Failed to generate diff: {error}. Showing changed files only."). Do **not** emit a `run_error`.
+
+Diff size controls:
+
+- Apply a max bytes limit for `patch` (example: 500KB total per snapshot). If exceeded:
+  - set `is_truncated=true`
+  - truncate at the **last complete diff hunk** before the limit (do not split a hunk mid-line)
+  - include `note` telling the user to open the file/diff externally (e.g. "Diff truncated. Use `git diff` to view the full change.")
+  - if `patch` is empty after truncation, include `paths` so the user knows which files were affected
+
+Binary files:
+
+- Detect and emit `note: "Binary file changed"` instead of a patch.
+  - For **tracked files**: use `git diff --numstat -- <paths...>` and check for `-/-` column pattern
+  - For **new (untracked) files**: apply a heuristic check:
+    - Read first 8KB of file
+    - If more than 30% non-UTF8 or null bytes detected, treat as binary
+    - Emit note: "Binary file (new)" and omit `patch`
+  - If detection is uncertain, include the `note` and omit `patch` (fail safe)
+
+#### Fallback when not a git repo
+
+If the workspace is not a git repository:
+
+- Emit `diff_snapshot` with:
+  - `patch` omitted (cannot generate without git)
+  - `paths` populated from the tool call input
+  - `note` explaining that git is unavailable (e.g. "Git not available. Changed files: [list]")
+  - (Optional) include file sizes or line counts if the tool provides them, for user context
+  - If you have access to a file's previous version (e.g. cached from earlier in the run), you may compute a diff and include it; otherwise omit `patch`
+
+### Test runner (workspace-configured, explicit approval, streaming)
+
+#### Configuration source (MVP choice)
+
+Store test command configuration in the app's persisted settings keyed by `workspace_root`. 
+
+**Storage location:** Tauri app config file (persisted across sessions, user-configurable via app UI or settings dialog).
+
+Config schema:
+
+```json
+{
+  "workspace_root_path": {
+    "test_command": "yarn test",
+    "test_argv": ["yarn", "test"],
+    "timeout_seconds": 60,
+    "allow_shell_metacharacters": false
+  }
+}
+```
+
+Field notes:
+- `test_command` (required): shell command string (e.g., `"yarn test"`)
+- `test_argv` (optional, preferred): array of strings for safe tokenization without shell metacharacters (e.g., `["yarn", "test", "--watch"]`)
+- `timeout_seconds` (optional): kill test if exceeds this duration
+- `allow_shell_metacharacters` (optional, default `false`): if `true`, allows pipes/redirects in test_command (use with caution)
+
+Preferred behavior:
+- If `test_argv` is provided, use it directly (array of strings, no shell parsing needed).
+- If only `test_command` is provided, tokenize by whitespace and apply shell guardrails (reject metacharacters unless explicitly configured).
+- **Error codes:**
+  - `WORKSPACE_NOT_CONFIGURED`: if no `test_command` or `test_argv` is configured for this `workspace_root`
+  - `TEST_ALREADY_RUNNING`: if another test is still pending/running (MVP constraint: only 1 per run_id)
+- If neither is configured, `request_test_run` returns error `WORKSPACE_NOT_CONFIGURED`.
+
+#### UX flow
+
+1. UI calls `request_test_run(run_id) -> test_id`.
+   - UI should immediately create a transcript section keyed by `test_id` with status “Awaiting approval”.
+2. Backend emits `permission_request` with:
+   - `tool_name: "run_tests"`
+   - `reason_code: "RUN_TESTS"`
+   - `test_id` (required for correlation)
+   - `argv` (preferred) or `command` (fallback)
+3. UI shows Allow/Deny (same permission UI as other tool calls).
+4. If allowed:
+   - backend starts the test process in `cwd=workspace_root`
+   - backend emits `test_started`
+   - backend streams output via `test_output_delta`
+   - backend emits `test_finished` with duration + exit code (when available)
+5. If denied:
+   - backend emits `permission_resolved` (denied, includes `test_id` + reason) and no process is started
+   - UI marks the transcript section as terminal (“Denied”) and shows the denial reason.
+
+#### Safety constraints
+
+- Always require explicit approval (even if the command is “usually safe”).
+- Never run tests outside `workspace_root`.
+- **Shell guardrails** (when a raw command string is used instead of `argv`):
+  - If only a `command: string` is available (no `argv`), parse it defensively:
+    - tokenize by whitespace (do not use shell metacharacters like `|`, `&&`, `;`, `>`, `<` as instruction separators)
+    - reject the request if unescaped pipes (`|`), redirects (`>`, `<`, `>>`), command chains (`&&`, `||`, `;`), or subshells (`` ` ` ``, `$()`) are detected in the command
+    - (Exception: if workspace config explicitly sets `allow_shell_metacharacters: true`, allow them; otherwise deny by default.)
+    - Note: metacharacters within quoted arguments are acceptable (e.g., `"jest --testMatch='**/*.spec.js'"` is safe because the `'**/*.spec.js'` is quoted)
+  - Preferred: always use `argv` (array of strings) to avoid shell parsing entirely; tokens within the array do not need escaping
+- Validate that the test process inherits (or explicitly sets) `cwd` to `workspace_root`; do not allow the command to `cd` to a parent directory (e.g., reject `"cd .. && npm test"`)
+
+#### Cancellation (recommended)
+
+Add a separate cancel path for tests so you do not have to kill the agent run:
+
+- Command (UI → backend): `cancel_test_run(run_id, test_id)`
+- Backend kills the test process and emits `test_finished` with `was_cancelled=true` (include `duration_ms`; note: `exit_code` may be absent on some platforms when a process is terminated by signal).
+
+#### Test output truncation (recommended)
+
+To keep the UI responsive and prevent unbounded memory growth:
+
+- Enforce a maximum total bytes limit per `test_id` **(stdout + stderr combined, recommended: 2–10 MB depending on device constraints)**.
+  - As a reference: Claude's conversations typically display ~50KB comfortably; consider 2 MB a safe default for a single transcript entry.
+- When the limit is reached:
+  - keep reading stdout/stderr to avoid deadlocks (but discard further output after limit)
+  - stop emitting further `test_output_delta` events for that `test_id`
+  - emit `test_finished` with `output_is_truncated=true` and an explicit `output_truncation_note` (e.g. "Output truncated after 10 MB. Use terminal to see full output.")
+- If the test duration exceeds a `timeout_seconds` (if configured), kill the process and emit `test_finished` with `was_cancelled=true` + reason in the note
+
+#### Commands (explicit)
+
+- `request_test_run(run_id) -> test_id`
+  - allocates a new `test_id` (UUIDv4)
+  - triggers the permission prompt flow (does not start the process until allowed)
+  - must emit a `permission_request` event that includes `test_id` and `reason_code: "RUN_TESTS"`
+  - **MVP constraint**: allow only one pending/running test per `run_id`
+    - If another test is still running/pending (not yet in terminal state), reject with error code **`TEST_ALREADY_RUNNING`**
+    - Frontend should disable the "Run Tests" button while a test is pending/running
+  - **Error handling:**
+    - Return error **`WORKSPACE_NOT_CONFIGURED`** if workspace root is not configured with a test command
+    - Return error **`TEST_ALREADY_RUNNING`** if another test is pending/running
+- `cancel_test_run(run_id, test_id)`
+  - only applicable once the test process has started (after `test_started` event)
+  - **Error handling:**
+    - If test is in "Awaiting approval" state (not yet started), reject with error code **`TEST_NOT_STARTED`**
+    - If test is not found or already in terminal state, return a no-op success (idempotent)
+  - **Success case:** if test is running, kill the process immediately and emit `test_finished` with `was_cancelled=true` + current `duration_ms`
+
+**UI edge case handling for cancellation during approval:**
+- If user closes the permission prompt or navigates away before approving, the UI should **not** call `cancel_test_run` (there is no process).
+- Simply dismiss the "Awaiting approval" transcript entry or mark it as cancelled visually.
+- Backend will naturally clean up the pending test state when the run finishes or is cancelled.
+
+### Test lifecycle state machine (backend + UI must align)
+
+```
+             [CREATED]
+                 |
+        request_test_run
+                 |
+                 v
+    [AWAITING_APPROVAL] <------ permission_request
+       /     |     \
+      /      |      \
+   allow   dismiss  deny
+     |        |       |
+     v        v       v
+ [RUNNING] [DISMISSED] [DENIED] (terminal)
+     |        (UI dismissed)   |
+   cancel                (emit permission_resolved)
+     |                       |
+     v                       v
+[CANCELLED]          (mark denied in UI)
+     |
+     +-----> [ERROR] (process exit with failure)
+     |
+     +-----> [PASSED] (exit code 0)
+     |
+     v
+  (all → FINISHED, terminal state)
+```
+
+Key transitions:
+- `AWAITING_APPROVAL → DENIED`: when backend rejects permission, no process starts.
+- `AWAITING_APPROVAL → DISMISSED`: when UI dismisses the permission prompt without user action (backend cleans up naturally).
+- `AWAITING_APPROVAL → RUNNING`: only after user approves and backend starts process.
+- `RUNNING → CANCELLED`: only when `cancel_test_run` is called.
+- `RUNNING → ERROR | PASSED`: when process exits.
+- All terminal states: emit final `test_finished` event.
+
+### Testing tasks
+
+- Diff rendering:
+  - large diffs (truncate at last complete hunk, verify `is_truncated=true` + `note`)
+  - renames (ensure `-M` behavior is acceptable and `tool_call_id` is present)
+  - binary files (emit placeholder note, no `patch`)
+  - untracked new files (ensure `git diff --no-index` path works, truncation applies)
+  - non-git workspaces (verify `paths` are populated + explanatory `note`)
+  - git errors (corrupt repo, etc.) − fallback to `paths` only, no `run_error`
+  - multiple modifications to same file (verify each snapshot shows cumulative diff, unique `diff_id` but matching `tool_call_id`)
+- Test runner:
+  - stdout/stderr streaming order is stable (test case: alternating writes to both streams with timestamps)
+  - non-zero exit surfaced clearly (exit code must appear in `test_finished`)
+  - long-running tests do not freeze the UI (output buffering works; test should not hang if buffer is full)
+  - cancel test run stops the process cleanly and emits `was_cancelled=true`
+  - permission denied marks the transcript entry terminal as "Denied" (no process starts)
+  - `request_test_run` rejects when another test is pending/running (check error code `TEST_ALREADY_RUNNING`)
+  - `request_test_run` returns error if workspace not configured (`WORKSPACE_NOT_CONFIGURED`)
+  - timeout (if configured) kills process and sets `was_cancelled=true` with note
+  - `cancel_test_run` on an "Awaiting approval" test returns error `TEST_NOT_STARTED`
+  - UI closes permission prompt without approving: test state cleaned up naturally when run finishes
+  - argv vs command string: test with both; verify cmd string guardrails block pipes/redirects
+- Diff + test integration:
+  - diffs appear immediately after file-modifying tool calls and before any subsequent `assistant_delta` (verify event order)
+  - diffs and tests can appear in same run without interfering (verify IDs are unique and events are routed correctly)
+  - permission request for test run includes all required fields (`test_id`, `reason_code = "RUN_TESTS"`)
+  - user can dismiss "Awaiting approval" entry for test without calling `cancel_test_run` (backend cleans up naturally)
+
+### Exit criteria
+
+- Users can review changes (diffs) and validate with tests inside Code Mode.
+- UX is event-driven and does not parse terminal formatting.
+
+### Do / Don’t
+
+- Do: keep test commands workspace-configured (app settings keyed by workspace root).
+- Do: stream output via events (`test_output_delta`).
+- Don’t: hardcode `npm test`/`cargo test` globally.
+- Don’t: scrape diffs/tests from plain terminal text.
+
+---
+
+## Stage 5 — Upgrade: embed claw-code-local in-process
+
+**Code tasks**
+
+- Add `claw-code-local` crates as dependencies (or vendor/submodule) and execute the agent runtime in-process.
+- Replace sidecar parsing with direct event emission.
+- Keep the exact same UI contract so the frontend does not change.
+
+**Testing tasks**
+
+- Run the same contract + security suite used for sidecar mode.
+
+**Exit criteria**
+
+- No stdout parsing; permissions + workspace enforcement are deterministic and testable.
+
+**Do / Don’t**
+
+- Do: preserve the contract so migration is “engine swap”.
+- Don’t: fork UI logic per engine.
