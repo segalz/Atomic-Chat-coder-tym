@@ -1,0 +1,6 @@
+{"created_at_ms":1775522028854,"session_id":"session-1775522028854-0","type":"session_meta","updated_at_ms":1775522119863,"version":1}
+{"message":{"blocks":[{"text":"hi","type":"text"}],"role":"user"},"type":"message"}
+{"message":{"blocks":[{"text":"Hello! How can I help you today?","type":"text"}],"role":"assistant","usage":{"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"input_tokens":16384,"output_tokens":10}},"type":"message"}
+{"message":{"blocks":[{"text":"exit","type":"text"}],"role":"user"},"type":"message"}
+{"message":{"blocks":[{"text":"I'll exit the current session for you.","type":"text"},{"id":"call_353xu2aw","input":"{\"message\":\"Session ended.\",\"status\":\"normal\"}","name":"SendUserMessage","type":"tool_use"}],"role":"assistant","usage":{"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"input_tokens":16384,"output_tokens":42}},"type":"message"}
+{"message":{"blocks":[{"is_error":false,"output":"{\n  \"message\": \"Session ended.\",\n  \"attachments\": null,\n  \"sentAt\": \"2026-04-07T00:36:36Z\"\n}","tool_name":"SendUserMessage","tool_use_id":"call_353xu2aw","type":"tool_result"}],"role":"tool"},"type":"message"}
