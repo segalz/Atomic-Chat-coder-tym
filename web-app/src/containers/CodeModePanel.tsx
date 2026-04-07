@@ -2,10 +2,6 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { useCodeModeStore } from '@/stores/code-mode-store'
-import { useLocalApiServer } from '@/hooks/useLocalApiServer'
-import { useModelProvider } from '@/hooks/useModelProvider'
-import { useAppState } from '@/hooks/useAppState'
-import { useServiceHub } from '@/hooks/useServiceHub'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import {
@@ -13,9 +9,10 @@ import {
   IconPlayerStop,
   IconArrowUp,
 } from '@tabler/icons-react'
+import { CodeModelSelector } from '@/components/CodeModelSelector'
 import { PermissionModeSelector } from './PermissionModeSelector'
 import { RenderMarkdown } from './RenderMarkdown'
-import { StickToBottom, useStickToBottomContext } from 'use-stick-to-bottom'
+import { StickToBottom } from 'use-stick-to-bottom'
 
 // ── Event types from Rust backend ────────────────────────────
 interface CodeAgentOutputEvent {
@@ -36,6 +33,8 @@ export function CodeModePanel() {
     draftPrompt,
     setDraftPrompt,
     permissionMode,
+    selectedOllamaModel,
+    setSelectedOllamaModel,
     isAgentRunning,
     setAgentRunning,
     agentOutput,
@@ -43,59 +42,9 @@ export function CodeModePanel() {
     clearOutput,
   } = useCodeModeStore()
 
-  const {
-    serverPort,
-    serverHost,
-    apiKey,
-    apiPrefix,
-    corsEnabled,
-    verboseLogs,
-    proxyTimeout,
-    trustedHosts,
-  } = useLocalApiServer()
-  const { selectedModel } = useModelProvider()
-  const serverStatus = useAppState((s) => s.serverStatus)
-  const setServerStatus = useAppState((s) => s.setServerStatus)
-  const serviceHub = useServiceHub()
-
-  const outputRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const [error, setError] = useState<string | null>(null)
 
-  // ── Auto-start server when entering Code mode ────────────
-  useEffect(() => {
-    if (serverStatus !== 'stopped') return
-
-    let cancelled = false
-    const autoStart = async () => {
-      try {
-        const isRunning = await serviceHub.app().getServerStatus()
-        if (isRunning || cancelled) {
-          if (isRunning) setServerStatus('running')
-          return
-        }
-        setServerStatus('pending')
-        const actualPort = await window.core?.api?.startServer({
-          host: serverHost,
-          port: serverPort,
-          prefix: apiPrefix,
-          apiKey,
-          trustedHosts,
-          isCorsEnabled: corsEnabled,
-          isVerboseEnabled: verboseLogs,
-          proxyTimeout,
-        })
-        if (!cancelled && actualPort) {
-          setServerStatus('running')
-        }
-      } catch (err) {
-        console.error('Failed to auto-start server for Code mode:', err)
-        if (!cancelled) setServerStatus('stopped')
-      }
-    }
-    autoStart()
-    return () => { cancelled = true }
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Listen to Tauri events ───────────────────────────────
   useEffect(() => {
@@ -174,104 +123,32 @@ export function CodeModePanel() {
   }, [setProjectDir])
 
   const handleSend = useCallback(async () => {
-    if (!projectDir || !draftPrompt.trim() || !selectedModel || isAgentRunning) return
+    if (!projectDir || !draftPrompt.trim() || !selectedOllamaModel || isAgentRunning) return
 
     setError(null)
     setAgentRunning(true)
     clearOutput()
 
-    const modelId = selectedModel.id
-
     try {
-      // Step 0: Verify the model is actually available for the selected provider
-      const provider = useModelProvider.getState().getProviderByName(selectedModel.provider)
-      if (!provider) {
-        setError(`Provider '${selectedModel.provider}' not found`)
-        setAgentRunning(false)
-        return
-      }
-
-      // Check if model exists in the provider's available models
-      const modelExists = provider.models.some((m) => m.id === modelId)
-      if (!modelExists) {
-        setError(
-          `Model '${modelId}' is not available in the '${selectedModel.provider}' provider. ` +
-          `Please download it first from the Models hub.`
-        )
-        setAgentRunning(false)
-        return
-      }
-
-      // Step 1: START the model (like ModelFactory and ChatInput do)
-      // This ensures the model is loaded and running before we try to use it
-      console.log('[CodeMode] Starting model:', modelId)
-      try {
-        await serviceHub.models().startModel(provider, modelId)
-        console.log('[CodeMode] Model started successfully')
-      } catch (error) {
-        console.error('[CodeMode] Failed to start model:', error)
-        setError(
-          `Failed to start model '${modelId}': ${error instanceof Error ? error.message : String(error)}`
-        )
-        setAgentRunning(false)
-        return
-      }
-
-      // Step 2: Find the actual port of the running model session
-      // TurboQuant loads models via the MLX plugin, so try MLX first
-      let sessionPort: number | null = null
-      let sessionApiKey = ''
-
-      console.log('[CodeMode] Looking for model session:', modelId)
-
-      // Try MLX first (TurboQuant uses MLX plugin)
-      const mlxSession = await invoke<{ port: number; api_key: string } | null>(
-        'plugin:mlx|find_mlx_session_by_model',
-        { modelId }
-      ).catch((e) => { console.log('[CodeMode] MLX find error:', e); return null })
-
-      if (mlxSession) {
-        sessionPort = mlxSession.port
-        sessionApiKey = mlxSession.api_key
-        console.log('[CodeMode] Found MLX session on port:', sessionPort)
-      } else {
-        // Try llamacpp
-        const llamaSession = await invoke<{ port: number; api_key: string } | null>(
-          'plugin:llamacpp|find_session_by_model',
-          { modelId }
-        ).catch((e) => { console.log('[CodeMode] LlamaCpp find error:', e); return null })
-
-        if (llamaSession) {
-          sessionPort = llamaSession.port
-          sessionApiKey = llamaSession.api_key
-          console.log('[CodeMode] Found LlamaCpp session on port:', sessionPort)
-        }
-      }
-
-      if (!sessionPort) {
-        setError(
-          `Failed to find running session for model '${modelId}'. The model provider may not support this model type.`
-        )
-        setAgentRunning(false)
-        return
-      }
-
-      const serverUrl = `http://127.0.0.1:${sessionPort}/v1`
+      console.log('[CodeMode] Spawning ollama agent', {
+        projectDir,
+        ollamaModel: selectedOllamaModel,
+        permissionMode,
+      })
 
       await invoke('spawn_code_agent', {
         projectDir,
         prompt: draftPrompt,
-        modelId,
+        ollamaModel: selectedOllamaModel,
         permissionMode,
-        serverUrl,
-        apiKey: sessionApiKey || 'no-key',
-        context: null,
       })
     } catch (err) {
-      setError(String(err))
+      const message = err instanceof Error ? err.message : String(err)
+      setError(message)
+      console.error('[CodeMode] Failed to spawn agent:', err)
       setAgentRunning(false)
     }
-  }, [projectDir, draftPrompt, selectedModel, isAgentRunning, setAgentRunning, clearOutput])
+  }, [projectDir, draftPrompt, selectedOllamaModel, isAgentRunning, setAgentRunning, clearOutput, permissionMode])
 
   const handleStop = useCallback(async () => {
     try {
@@ -312,10 +189,12 @@ export function CodeModePanel() {
           </span>
         )}
         <div className="ml-auto flex items-center gap-2">
+          <CodeModelSelector
+            value={selectedOllamaModel}
+            onChange={setSelectedOllamaModel}
+            disabled={isAgentRunning}
+          />
           <PermissionModeSelector />
-          {serverStatus === 'pending' && (
-            <span className="text-xs text-muted-foreground">Starting server...</span>
-          )}
         </div>
       </div>
 
@@ -365,7 +244,7 @@ export function CodeModePanel() {
                   ? 'Ask me anything...'
                   : 'Select a project folder first'
               }
-              disabled={!projectDir || (isAgentRunning && false)}
+              disabled={!projectDir || isAgentRunning}
               className="flex-1 resize-none bg-transparent px-4 py-3 text-sm outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50"
               rows={1}
               style={{ maxHeight: '150px', fieldSizing: 'content' } as React.CSSProperties}
@@ -386,7 +265,7 @@ export function CodeModePanel() {
                   size="icon-sm"
                   className="rounded-full"
                   onClick={handleSend}
-                  disabled={!projectDir || !draftPrompt.trim() || !selectedModel}
+                  disabled={!projectDir || !draftPrompt.trim() || !selectedOllamaModel}
                   title="Send"
                 >
                   <IconArrowUp size={16} />

@@ -25,6 +25,7 @@ interface CodeModeState {
   projectDir: string
   draftPrompt: string
   permissionMode: 'ask' | 'auto_accept'
+  selectedOllamaModel: string | null
   lastVisionResult: {
     bestFile: string
     extractedWords: string[]
@@ -40,6 +41,7 @@ interface CodeModeState {
   setProjectDir: (dir: string) => void
   setDraftPrompt: (text: string) => void
   setPermissionMode: (mode: 'ask' | 'auto_accept') => void
+  setSelectedOllamaModel: (model: string | null) => void
   setVisionResult: (r: CodeModeState['lastVisionResult']) => void
   setAgentRunning: (running: boolean) => void
   appendOutput: (line: AgentOutputLine) => void
@@ -54,6 +56,7 @@ export const useCodeModeStore = create<CodeModeState>()(
       projectDir: '',
       draftPrompt: '',
       permissionMode: 'ask',
+      selectedOllamaModel: null,
       lastVisionResult: null,
 
       // Runtime
@@ -65,6 +68,7 @@ export const useCodeModeStore = create<CodeModeState>()(
       setProjectDir: (dir) => set({ projectDir: dir }),
       setDraftPrompt: (text) => set({ draftPrompt: text }),
       setPermissionMode: (mode) => set({ permissionMode: mode }),
+      setSelectedOllamaModel: (model) => set({ selectedOllamaModel: model }),
       setVisionResult: (r) => set({ lastVisionResult: r }),
       setAgentRunning: (running) => set({ isAgentRunning: running }),
       appendOutput: (line) =>
@@ -78,6 +82,7 @@ export const useCodeModeStore = create<CodeModeState>()(
         projectDir: state.projectDir,
         draftPrompt: state.draftPrompt,
         permissionMode: state.permissionMode,
+        selectedOllamaModel: state.selectedOllamaModel,
         lastVisionResult: state.lastVisionResult,
       }),
     }

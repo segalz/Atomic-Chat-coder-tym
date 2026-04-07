@@ -1,221 +1,291 @@
-## Stage 1 — Backend: Agent service + sidecar engine (MVP)
+# Stage 1 — Backend: Ollama Agent Spawner
 
-### Stage 1 deliverables (what must exist after this stage)
-
-- A **Tauri-backed agent service** that can run exactly one Code Mode run end-to-end (including permissions) using a sidecar engine.
-- A **sidecar engine adapter** (`ClawSidecarEngine`) that speaks a **structured IO protocol** (NDJSON events out + structured control messages in).
-- A reliable **cancel** implementation that does not leave zombie processes.
-
-### Tauri API surface (make this explicit in code)
-
-Define a stable command + event surface early (names can change, behavior must not):
-
-- Commands (UI → backend):
-  - `start_code_agent(run_config) -> run_id`
-  - `send_code_agent_input(run_id, text)`
-  - `respond_code_agent_permission(run_id, request_id, decision)`
-  - `cancel_code_agent(run_id)`
-- Events (backend → UI):
-  - `code_agent_event` with payload matching the event schema in this doc (minimum set).
-
-The backend must be the only place that:
-
-- Parses engine output
-- Decides whether to pause/resume the run
-- Enforces workspace boundary rules (deny-by-default on ambiguity)
-
-### Run state model (backend-owned)
-
-Implement a per-run state machine in Rust (in-memory is fine for MVP):
-
-- Identifiers: `run_id`, `workspace_root`, `model_id`
-- Status: `starting | running | awaiting_permission | cancelling | finished | error`
-- Engine handles: child process handle, stdout/stderr reader tasks, and an optional pending permission request `{ request_id, ... }`
-
-This state machine is what prevents “stdin hacks” and UI race conditions.
-
-**Code tasks**
-
-- Implement an agent service in `src-tauri` that:
-  - spawns the engine process
-  - streams parsed events to the UI
-  - supports cancel (kill + cleanup)
-  - stores `run_id` + status state
-- Implement `ClawSidecarEngine`:
-  - configure `OPENAI_BASE_URL=http://localhost:1337/v1` and a non-empty `OPENAI_API_KEY`
-  - pass through selected model id
-  - emit NDJSON events (patch `claw-code-local` if needed to add an event-emitter mode)
-- Implement a structured permission handshake:
-  - engine emits `permission_request`
-  - backend pauses run execution
-  - UI replies allow/deny
-  - backend forwards the decision
-
-### Engine IO protocol (NDJSON) — do not depend on terminal formatting
-
-For UI compatibility, the sidecar engine must support a mode that:
-
-- Writes **one JSON object per line** on stdout (NDJSON).
-- Accepts structured control messages on stdin (also NDJSON, or a clearly documented single-line protocol).
-
-Example (engine → backend):
-
-```json
-{"type":"assistant_delta","run_id":"...","text_delta":"Hello"}
-```
-
-Example (backend → engine):
-
-```json
-{"type":"user_message","text":"Continue, but do not edit files yet."}
-```
-
-**Important:** do not ship Stage 1 relying on “pretty terminal output” + parsing. The UI must render events, not terminal text.
- 
-Robustness & implementation notes
-
-- Partial JSON frames: NDJSON is stream-oriented; implement reading that tolerates partial writes (engine may write chunks). Use a buffered line reader and treat each newline-terminated line as one JSON object. If the engine may emit very long events, guard with a max-line length and drop/emit an error event on overflow.
-- Stderr noise: do not treat stderr as events. Capture stderr to logs and surface `run_error` events for fatal stderr messages only. Prefer engine-side sinks for structured diagnostics.
-- Timeouts and backpressure: apply read timeouts when awaiting critical control events (permission_resolved) to avoid deadlocks. Apply output buffering limits to avoid OOM on slow consumers.
-
-Engine adapter skeleton (recommended starting point)
-
-```rust
-// ClawSidecarEngine (synchronous pseudocode - adapt async/Tokio as needed)
-pub struct ClawSidecarEngine {
-  child: std::process::Child,
-}
-
-impl ClawSidecarEngine {
-  pub fn spawn(cmd: &str, args: &[&str], envs: &[(&str,&str)]) -> Result<Self> {
-    let mut child = std::process::Command::new(cmd)
-      .args(args)
-      .envs(envs.iter().cloned())
-      .stdin(std::process::Stdio::piped())
-      .stdout(std::process::Stdio::piped())
-      .stderr(std::process::Stdio::piped())
-      .spawn()?;
-
-    // Spawn stdout reader thread: read lines, parse JSON per-line
-    let out = child.stdout.take().unwrap();
-    std::thread::spawn(move || {
-      let reader = std::io::BufReader::new(out);
-      for line in reader.lines() {
-        match line {
-          Ok(l) => match serde_json::from_str::<serde_json::Value>(&l) {
-            Ok(ev) => handle_event(ev),
-            Err(e) => log::warn!("invalid json from engine: {}", e),
-          },
-          Err(e) => { log::error!("stdout read error: {}", e); break; }
-        }
-      }
-    });
-
-    // Stderr reader: pipe to structured logs
-    let err = child.stderr.take().unwrap();
-    std::thread::spawn(move || {
-      let r = std::io::BufReader::new(err);
-      for line in r.lines() { if let Ok(l)=line { log::error!("engine: {}", l); } }
-    });
-
-    Ok(Self { child })
-  }
-
-  pub fn write_control(&mut self, msg: &serde_json::Value) -> Result<()> {
-    if let Some(stdin) = &mut self.child.stdin {
-      let line = serde_json::to_string(msg)? + "\n";
-      stdin.write_all(line.as_bytes())?;
-      stdin.flush()?;
-    }
-    Ok(())
-  }
-}
-```
-
-Permission reason codes (recommended canonical set)
-
-- `OUT_OF_WORKSPACE`
-- `DESTRUCTIVE_COMMAND`
-- `FILE_WRITE`
-- `RUN_TESTS`
-- `AMBIGUOUS_PERMISSION_REQUEST`
-- `READ_ONLY_MODE_VIOLATION`
-
-Use these codes in `permission_request` and `permission_resolved` so the backend and UI share a fixed vocabulary.
-
-Mock engine (small test helper)
-
-Provide a tiny mock binary for tests that emits NDJSON events and waits for permission decisions on stdin. Example pseudocode (Rust):
-
-```rust
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-  // emit run_started
-  println!("{}", serde_json::json!({"type":"run_started","run_id":"mock","workspace_root":"."}));
-  // emit assistant_delta
-  println!("{}", serde_json::json!({"type":"assistant_delta","run_id":"mock","text_delta":"Hello"}));
-  // request permission
-  println!("{}", serde_json::json!({"type":"permission_request","run_id":"mock","request_id":"r1","tool_name":"write_file","reason_code":"FILE_WRITE","paths":["/path"]}));
-  // read stdin for decision line
-  let mut input = String::new();
-  std::io::stdin().read_line(&mut input)?;
-  // echo permission_resolved and finish
-  println!("{}", serde_json::json!({"type":"permission_resolved","run_id":"mock","request_id":"r1","decision":"allow"}));
-  println!("{}", serde_json::json!({"type":"run_finished","run_id":"mock","summary":"done"}));
-  Ok(())
-}
-```
-
-Testing & CI guidance (practical)
-
-- Add a `mock-engine` binary under `rust/tools/mock-engine` that tests NDJSON parsing and permission handshake. Use it in integration tests to validate the adapter without requiring the real engine.
-- Unit tests: parse partial JSON chunks (simulate line-splitting), verify handler recovers from invalid JSON lines, verify write_control marshals newline-delimited JSON.
-- Integration tests: spawn `mock-engine`, start an `AgentRun`, assert event sequence, send permission decision via `write_control`, assert continuation and final `run_finished`.
-
-### Permissions: structured handshake (no PTY/TTY prompts)
-
-The engine must surface permission requests as explicit events and wait for a decision:
-
-1. Engine emits:
-   - `permission_request { request_id, tool_name, required_mode, input, reason_code?, reason?, tool_call_id?, test_id?, paths?, command?, argv? }`
-2. Backend transitions run state to `awaiting_permission` and forwards the event to UI.
-3. UI responds with allow/deny.
-4. Backend sends a structured decision back to the engine:
-   - `permission_decision { request_id, decision, reason_code?, reason?, tool_call_id?, test_id? }`
-5. Engine continues and emits `permission_resolved`.
-
-**Known gap to address:** the current `claw-code-local` CLI uses a human prompt (`Approve this tool call? [y/N]:`) and reads from stdin. That is not sufficient for a robust UI integration. Stage 1 includes adding a dedicated **UI/NDJSON mode** (or equivalent) so permission requests/decisions are machine-readable and deterministic.
-
-### Cancellation & cleanup (define behavior precisely)
-
-Cancel must:
-
-- Transition state to `cancelling`
-- Terminate the engine process (prefer killing the process group on Unix)
-- Stop stdout/stderr reader tasks
-- Emit `run_finished` (or `run_error` with a clear “cancelled” reason)
-- Guarantee no zombies (wait/reap the child)
-
-Define timeouts:
-
-- Grace period for clean shutdown
-- Escalation to forced kill if needed
-
-**Testing tasks**
-
-- Unit: base URL builder and model mapping.
-- Unit: event parsing (partial chunks, ordering, stderr).
-- Integration: mock-engine binary that emits NDJSON + accepts permission decisions.
-  - Include a cancel test: start mock engine, cancel mid-stream, assert the process is gone and the run reaches a terminal state.
-
-**Exit criteria**
-
-- Start → stream → permission request → allow/deny → continue → finish works end-to-end.
-- Cancel is reliable and does not leave zombie processes.
-
-**Do / Don’t**
-
-- Do: build around structured events only.
-- Don’t: rely on PTY/TTY prompt flows for permissions in the UI path.
+> **מה קיים:** `code_agent.rs` עם spawn/stop/stream — עובד עם Claude CLI ישן.
+> **מה נדרש:** החלפה ל-`ollama launch claude` + הוספת check_ollama + list_ollama_models.
 
 ---
 
+## Deliverables
+
+- `spawn_code_agent()` מריץ `ollama launch claude --model <model>`
+- `stop_code_agent()` עוצר תהליך (ללא zombies)
+- `check_ollama()` מאמת ש-Ollama מותקן
+- `list_ollama_models()` מחזיר מודלים מותקנים
+- Events זורמים מה-stdout ל-frontend
+
+---
+
+## קובץ: `src-tauri/src/core/code_agent.rs`
+
+### 1.1 — `find_ollama_binary()`
+
+```rust
+fn find_ollama_binary() -> Option<PathBuf> {
+    // 1. חפש ב-PATH
+    if let Ok(path) = which::which("ollama") {
+        return Some(path);
+    }
+    // 2. נתיבים ידועים על macOS
+    let known = [
+        "/usr/local/bin/ollama",
+        "/opt/homebrew/bin/ollama",
+        "/usr/bin/ollama",
+    ];
+    for p in &known {
+        if Path::new(p).exists() {
+            return Some(PathBuf::from(p));
+        }
+    }
+    None
+}
+```
+
+### 1.2 — `check_ollama()` (Tauri command)
+
+```rust
+#[tauri::command]
+pub async fn check_ollama() -> Result<String, String> {
+    let ollama = find_ollama_binary()
+        .ok_or_else(|| "Ollama not found. Install: https://ollama.com".to_string())?;
+
+    let output = tokio::process::Command::new(&ollama)
+        .arg("--version")
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let version = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .to_string();
+
+    if version.is_empty() {
+        return Err("Ollama returned empty version".to_string());
+    }
+
+    Ok(version)
+}
+```
+
+### 1.3 — `list_ollama_models()` (Tauri command)
+
+```rust
+#[tauri::command]
+pub async fn list_ollama_models() -> Result<Vec<String>, String> {
+    let ollama = find_ollama_binary()
+        .ok_or_else(|| "Ollama not found".to_string())?;
+
+    let output = tokio::process::Command::new(&ollama)
+        .arg("list")
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // פורמט: "NAME  ID  SIZE  MODIFIED"
+    // שורה ראשונה = header → skip
+    let models: Vec<String> = stdout
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            line.split_whitespace()
+                .next()
+                .map(|name| name.to_string())
+        })
+        .filter(|name| !name.is_empty())
+        .collect();
+
+    Ok(models)
+}
+```
+
+### 1.4 — `spawn_code_agent()` (מעודכן)
+
+```rust
+// State גלובלי — process handle
+static AGENT_CHILD: Mutex<Option<tokio::process::Child>> = Mutex::const_new(None);
+
+#[tauri::command]
+pub async fn spawn_code_agent(
+    project_dir: String,
+    prompt: String,
+    ollama_model: String,      // "qwen3-coder:30b"
+    permission_mode: String,   // "ask" | "auto_accept"
+    app_handle: tauri::AppHandle,
+) -> Result<(), String> {
+    let ollama = find_ollama_binary()
+        .ok_or_else(|| "Ollama not found".to_string())?;
+
+    // בנה את הפקודה
+    let mut cmd = tokio::process::Command::new(&ollama);
+    cmd.arg("launch").arg("claude");
+    cmd.arg("--model").arg(&ollama_model);
+    cmd.arg("--output-format").arg("stream-json");
+    cmd.arg("-p").arg(&prompt);
+    cmd.current_dir(&project_dir);
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
+    // auto_accept = skip כל הבקשות לאישור
+    if permission_mode == "auto_accept" {
+        cmd.arg("--dangerously-skip-permissions");
+    }
+
+    let mut child = cmd.spawn().map_err(|e| {
+        format!("Failed to spawn ollama: {}", e)
+    })?;
+
+    // שמור handle לעצירה
+    {
+        let mut guard = AGENT_CHILD.lock().await;
+        *guard = Some(child);
+    }
+
+    // Stream stdout → Tauri events
+    let stdout = child.stdout.take().unwrap();
+    let reader = tokio::io::BufReader::new(stdout);
+    let mut lines = tokio::io::AsyncBufReadExt::lines(reader);
+
+    while let Ok(Some(line)) = lines.next_line().await {
+        if line.trim().is_empty() { continue; }
+
+        // נסה לפרס JSON
+        let event_type = if let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) {
+            map_claude_event(&val)
+        } else {
+            // fallback — raw text
+            AgentOutputLine {
+                event_type: "assistant".to_string(),
+                content: line.clone(),
+                timestamp: chrono::Utc::now().timestamp_millis(),
+            }
+        };
+
+        app_handle.emit("code-agent-output", &event_type).ok();
+    }
+
+    // Agent סיים
+    app_handle.emit("code-agent-done", ()).ok();
+
+    // נקה handle
+    let mut guard = AGENT_CHILD.lock().await;
+    *guard = None;
+
+    Ok(())
+}
+
+/// ממפה event של claude CLI לפורמט ה-UI
+fn map_claude_event(val: &serde_json::Value) -> AgentOutputLine {
+    // יש לאמת ב-Stage 0 את הפורמט המדויק
+    // ולעדכן את הפונקציה הזו בהתאם
+    let event_type = val.get("type")
+        .and_then(|t| t.as_str())
+        .unwrap_or("assistant");
+
+    let content = val.get("text")
+        .or_else(|| val.get("content"))
+        .and_then(|c| c.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    AgentOutputLine {
+        event_type: map_type(event_type).to_string(),
+        content,
+        timestamp: chrono::Utc::now().timestamp_millis(),
+    }
+}
+
+fn map_type(claude_type: &str) -> &str {
+    match claude_type {
+        "assistant" | "text" => "assistant",
+        "tool_use"           => "tool_use",
+        "tool_result"        => "tool_result",
+        "system"             => "system",
+        "result"             => "done",
+        _                    => "assistant",
+    }
+}
+```
+
+### 1.5 — `stop_code_agent()` (קיים — לוודא)
+
+```rust
+#[tauri::command]
+pub async fn stop_code_agent() -> Result<(), String> {
+    let mut guard = AGENT_CHILD.lock().await;
+    if let Some(mut child) = guard.take() {
+        // kill process group כדי לא להשאיר zombies
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            if let Some(pid) = child.id() {
+                unsafe { libc::killpg(pid as i32, libc::SIGTERM); }
+            }
+        }
+        child.kill().await.ok();
+        child.wait().await.ok();
+    }
+    Ok(())
+}
+```
+
+---
+
+## קובץ: `src-tauri/src/lib.rs`
+
+```rust
+.invoke_handler(tauri::generate_handler![
+    // Code Mode — Ollama
+    code_agent::spawn_code_agent,
+    code_agent::stop_code_agent,
+    code_agent::check_ollama,          // חדש
+    code_agent::list_ollama_models,    // חדש
+
+    // ... שאר commands קיימים
+])
+```
+
+---
+
+## Cancellation — התנהגות מוגדרת
+
+| מצב | פעולה |
+|---|---|
+| SIGTERM נשלח | process מקבל graceful shutdown |
+| אחרי 2 שניות | SIGKILL אם עדיין רץ |
+| wait/reap | אחרי kill — חובה |
+| event | `code-agent-done` עם `{ cancelled: true }` |
+
+---
+
+## Cargo.toml — תלויות נדרשות
+
+```toml
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+which = "6"        # מציאת binary ב-PATH
+libc = "0.2"       # SIGTERM/SIGKILL על Unix
+```
+
+---
+
+## בדיקות הצלחה
+
+- [ ] `check_ollama` → מחזיר version (e.g. "ollama version 0.6.x")
+- [ ] `list_ollama_models` → מחזיר `["qwen3-coder:30b", ...]`
+- [ ] `spawn_code_agent` (auto_accept) → ollama רץ, events זורמים, agent מבצע
+- [ ] `spawn_code_agent` (ask) → ollama רץ ללא `--dangerously-skip-permissions`
+- [ ] `stop_code_agent` → process נעצר, אין zombies
+- [ ] בלי Ollama → שגיאה ברורה עם קישור להתקנה
+
+---
+
+## Do / Don't
+
+- **Do:** אמת את flags של `ollama launch claude` ב-Stage 0 לפני מימוש
+- **Do:** השתמש ב-`process group kill` על Unix
+- **Do:** wait/reap אחרי kill
+- **Don't:** תלה ב-stderr לparsing — רק stdout
+- **Don't:** הנח שפורמט JSON של claude קבוע — אמת ב-Stage 0

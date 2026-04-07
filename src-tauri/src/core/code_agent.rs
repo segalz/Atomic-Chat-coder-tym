@@ -31,28 +31,22 @@ struct CodeAgentErrorEvent {
 }
 
 
-/// Spawn Cline CLI as a subprocess with the given parameters.
+/// Spawn ollama launch claude as a subprocess with the given parameters.
 ///
 /// # Arguments
 ///
 /// * `project_dir` - Path to the project directory
 /// * `prompt` - The user's prompt/request for the agent
-/// * `model_id` - Model identifier (e.g., "claude-3-5-sonnet")
-/// * `permission_mode` - Either "ask" or "auto_accept" (adds --yolo flag if auto_accept)
-/// * `server_url` - Base URL of the model server (e.g., "http://127.0.0.1:8000/v1")
-/// * `api_key` - API key for the model server
-/// * `context` - Optional context to append to the prompt
+/// * `ollama_model` - Model identifier from ollama (e.g., "qwen3-coder:30b")
+/// * `permission_mode` - Either "ask" or "auto_accept" (adds --dangerously-skip-permissions if auto_accept)
 #[tauri::command]
 pub async fn spawn_code_agent<R: Runtime>(
     app: AppHandle<R>,
     state: State<'_, CodeAgentState>,
     project_dir: String,
     prompt: String,
-    model_id: String,
+    ollama_model: String,
     permission_mode: String,
-    server_url: String,
-    api_key: String,
-    _context: Option<String>,
 ) -> Result<(), String> {
     // Check if an agent is already running
     {
@@ -62,35 +56,33 @@ pub async fn spawn_code_agent<R: Runtime>(
         }
     }
 
-    // Build the cline command
-    log::info!("[CodeAgent] Building command with parameters:");
+    // Build the ollama launch command
+    log::info!("[CodeAgent] Building ollama launch command:");
     log::info!("  project_dir: {}", project_dir);
     log::info!("  prompt: {}", prompt);
-    log::info!("  model_id: {}", model_id);
+    log::info!("  ollama_model: {}", ollama_model);
     log::info!("  permission_mode: {}", permission_mode);
-    log::info!("  server_url: {}", server_url);
 
-    // Build command arguments: cline --model <id> --json -p <prompt>
-    // Note: Base URL is passed via ANTHROPIC_BASE_URL environment variable below
-    let mut cmd = Command::new("cline");
-    cmd.arg("--model")
-        .arg(&model_id)
-        .arg("--json")
+    // Build command: ollama launch claude --model <model> -p <prompt>
+    // NOTE: --output-format stream-json is NOT used here — it has not been validated
+    // against `ollama launch claude`. The output (JSON or plain text) is handled
+    // by the frontend's tryParseJson fallback in OutputLine.
+    let mut cmd = Command::new("ollama");
+    cmd.arg("launch")
+        .arg("claude")
+        .arg("--model")
+        .arg(&ollama_model)
         .arg("-p")
         .arg(&prompt);
 
-    // Add --yolo flag if permission_mode is "auto_accept"
+    // Add --dangerously-skip-permissions if permission_mode is "auto_accept"
     if permission_mode == "auto_accept" {
-        cmd.arg("--yolo");
-        log::info!("  [✓] Added --yolo flag for auto-accept mode");
+        cmd.arg("--dangerously-skip-permissions");
+        log::info!("  [✓] Added --dangerously-skip-permissions flag for auto-accept mode");
     }
 
     // Set working directory to project
     cmd.current_dir(&project_dir);
-
-    // Set environment variables for the model server
-    cmd.env("ANTHROPIC_BASE_URL", &server_url);
-    cmd.env("ANTHROPIC_AUTH_TOKEN", &api_key);
 
     // Capture stdout and stderr
     cmd.stdout(std::process::Stdio::piped());
@@ -98,7 +90,7 @@ pub async fn spawn_code_agent<R: Runtime>(
 
     // Spawn the process
     let mut child = cmd.spawn().map_err(|e| {
-        let error_msg = format!("Failed to spawn cline: {}", e);
+        let error_msg = format!("Failed to spawn ollama: {}", e);
         log::error!("{}", error_msg);
         error_msg
     })?;
@@ -173,17 +165,15 @@ pub async fn spawn_code_agent<R: Runtime>(
         );
     });
 
-    // Stream stderr in background task
-    let app_for_stderr = app.clone();
+    // Drain stderr in background — log only, do NOT emit to UI.
+    // Ollama and claude write progress/debug info to stderr that is not errors.
+    // Only truly fatal messages should surface; for now log them all as warnings.
     tokio::spawn(async move {
         let reader = BufReader::new(stderr);
         let mut lines = reader.lines();
 
         while let Ok(Some(line)) = lines.next_line().await {
             if !line.is_empty() {
-                let _ = app_for_stderr.emit("code-agent-error", CodeAgentErrorEvent {
-                    message: line.clone(),
-                });
                 log::warn!("[CodeAgent] stderr: {}", line);
             }
         }
@@ -232,53 +222,50 @@ pub async fn stop_code_agent<R: Runtime>(
     }
 }
 
-/// Check if Claude Code CLI is installed and return its version.
+/// Check if ollama is installed and return its version.
 #[tauri::command]
-pub async fn check_claude_cli() -> Result<String, String> {
-    let claude_bin = find_claude_binary().await?;
-
-    let output = tokio::process::Command::new(&claude_bin)
+pub async fn check_ollama() -> Result<String, String> {
+    let output = tokio::process::Command::new("ollama")
         .arg("--version")
         .output()
         .await
-        .map_err(|e| format!("Failed to run claude --version: {}", e))?;
+        .map_err(|e| format!("Failed to run ollama --version: {}", e))?;
 
     if output.status.success() {
         let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        log::info!("[CodeAgent] ollama version: {}", version);
         Ok(version)
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        Err(format!("claude --version failed: {}", stderr))
+        Err(format!("ollama --version failed: {}", stderr))
     }
 }
 
-/// Find the claude binary on the system.
-async fn find_claude_binary() -> Result<String, String> {
-    // Try `which` first (covers PATH, npm globals, etc.)
-    let which_cmd = if cfg!(windows) { "where" } else { "which" };
-    if let Ok(output) = tokio::process::Command::new(which_cmd)
-        .arg("claude")
+/// List all available models from ollama.
+#[tauri::command]
+pub async fn list_ollama_models() -> Result<Vec<String>, String> {
+    let output = tokio::process::Command::new("ollama")
+        .arg("list")
         .output()
         .await
-    {
-        if output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path.is_empty() {
-                return Ok(path);
+        .map_err(|e| format!("Failed to run ollama list: {}", e))?;
+
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut models = Vec::new();
+
+        // Parse output: skip header line, extract model names
+        for line in stdout.lines().skip(1) {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if !parts.is_empty() {
+                models.push(parts[0].to_string());
             }
         }
-    }
 
-    // Check well-known absolute paths (not on PATH)
-    let candidates = [
-        "/usr/local/bin/claude",
-        "/opt/homebrew/bin/claude",
-    ];
-    for candidate in &candidates {
-        if tokio::fs::metadata(candidate).await.is_ok() {
-            return Ok(candidate.to_string());
-        }
+        log::info!("[CodeAgent] Available models: {:?}", models);
+        Ok(models)
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(format!("ollama list failed: {}", stderr))
     }
-
-    Err("Claude Code CLI not found. Install it with: npm install -g @anthropic-ai/claude-code".to_string())
 }

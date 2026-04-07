@@ -1,115 +1,199 @@
-# Code Mode Development Process (claw-code engine)
+# Stage 0 — ארכיטקטורה + אימות ראשוני
 
-This document describes the development process for **Code Mode** in Atomic Chat using a **claw-code**-based agent engine (see `/Users/zvisegal/devlope/Claw-Code-Local-IOS`) and an **event-driven** UI contract.
+> **עדכון (2026-04-07):** Engine שונה מ-claw-code ל-**`ollama launch claude`**.
+> Ollama מנהל הכל — מודל, serving, Claude Code agent.
 
-## Goals
+---
 
-- Deliver a UI experience similar to Claude Desktop / Codex Desktop: **plan → act → tool-use → code changes → run tests**.
-- Keep the UI **engine-agnostic** by relying on a stable **event contract**, not terminal text parsing.
-- Run **local-first** via a stable OpenAI-compatible base URL (commonly `http://localhost:1337/v1`).
-- Enforce safety: **workspace boundaries + explicit permissions + deny-by-default**.
-- Avoid regressions: Chat Mode stays stable and provider/model serving remains unchanged.
+## חזון ארכיטקטורה
+
+```
+┌─ Atomic Chat (Tauri) ─────────────────────────────────────────┐
+│                                                                │
+│  React Frontend                                                │
+│  ├─ [Chat | Code] toggle                                       │
+│  ├─ Chat Mode: קיים, לא משתנה                                  │
+│  └─ Code Mode:                                                 │
+│       ├─ CodeModelSelector (Qwen3-Coder-30B ▽)                │
+│       ├─ ProjectBar (📁 /path/to/project)                      │
+│       ├─ OutputPanel (transcript)                              │
+│       └─ PromptInput + PermissionSelector                      │
+│         │                                                      │
+│         │ invoke('spawn_code_agent', {                         │
+│         │   projectDir, prompt,                                │
+│         │   ollamaModel,    ← "qwen3-coder:30b"               │
+│         │   permissionMode  ← "ask" | "auto_accept"           │
+│         │ })                                                   │
+│         ▼                                                      │
+│  Rust Backend — code_agent.rs                                  │
+│  ├─ check_ollama()         → ollama --version                  │
+│  ├─ list_ollama_models()   → ollama list                       │
+│  ├─ spawn_code_agent()     → spawns ollama subprocess          │
+│  └─ stop_code_agent()      → kills subprocess                  │
+│         │                                                      │
+│         │  ollama launch claude \                              │
+│         │    --model qwen3-coder:30b \                         │
+│         │    [--dangerously-skip-permissions] \                │
+│         │    --output-format stream-json \                     │
+│         │    -p "{prompt}"                                     │
+│         ▼                                                      │
+│  Ollama (installed locally — חד פעמי)                          │
+│  ├─ מנהל מודלים (pull, cache, serve)                           │
+│  ├─ Claude Code agent loop built-in                            │
+│  └─ Qwen3-Coder / qwen3-coder-next / כל מודל Ollama           │
+│                                                                │
+└────────────────────────────────────────────────────────────────┘
+```
+
+---
 
 ## Repository touchpoints
 
-- UI panel: `/Users/zvisegal/devlope/Atomic-Chat-coder-tym/web-app/src/containers/CodeModePanel.tsx`
-- UI state: `/Users/zvisegal/devlope/Atomic-Chat-coder-tym/web-app/src/stores/code-mode-store.ts`
-- Backend (Tauri/Rust): `/Users/zvisegal/devlope/Atomic-Chat-coder-tym/src-tauri/`
-- Local API/proxy (stable endpoint): `/Users/zvisegal/devlope/Atomic-Chat-coder-tym/src-tauri/src/core/server/proxy.rs`
-- Agent engine source: `/Users/zvisegal/devlope/Claw-Code-Local-IOS`
+| קובץ | תפקיד |
+|---|---|
+| `web-app/src/containers/CodeModePanel.tsx` | UI panel ראשי |
+| `web-app/src/stores/code-mode-store.ts` | UI state |
+| `web-app/src/components/CodeModelSelector.tsx` | בחירת מודל (חדש) |
+| `src-tauri/src/core/code_agent.rs` | Rust spawner |
+| `src-tauri/src/lib.rs` | רישום commands |
 
-## Architecture (target)
+---
 
-The recommended approach is an **internal agent service** inside Tauri that communicates with the UI via Tauri commands + events.
+## Event Contract (UI ↔ Backend)
 
-```mermaid
-flowchart LR
-  UI["React UI (Code Mode)"] -->|Tauri invoke| AS["Agent Service (Rust)"]
-  AS -->|events stream| UI
-  AS -->|HTTP (OpenAI-compatible)| API["Local API Proxy<br/>127.0.0.1:1337/v1"]
-  API --> MS["Local model servers<br/>(MLX / llama.cpp / optional Ollama)"]
-  AS --> ENG["Engine (claw-code)<br/>Sidecar → Embedded"]
-  ENG -->|tool calls + model requests| AS
+ה-UI צריך לקבל events מובנים — לא לפרס terminal text.
+
+### Commands (UI → Backend)
+
+```typescript
+invoke('spawn_code_agent', {
+  projectDir: string,
+  prompt: string,
+  ollamaModel: string,     // "qwen3-coder:30b"
+  permissionMode: string,  // "ask" | "auto_accept"
+})
+
+invoke('stop_code_agent')
+
+invoke('check_ollama')     // → string (version) | error
+
+invoke('list_ollama_models') // → string[] (model ids)
 ```
 
-### Integration strategy
+### Events (Backend → UI)
 
-We recommend a two-step engine integration:
+Tauri events שה-UI מאזין להם:
 
-1. **MVP**: run `claw` as a **sidecar** process and consume a **structured event stream** (NDJSON preferred).
-2. **Upgrade**: embed `claw-code-local` crates **in-process** inside `src-tauri` once the event contract is stable.
+| event | payload | מתי |
+|---|---|---|
+| `code-agent-output` | `{ type, content, timestamp }` | כל שורת פלט |
+| `code-agent-done` | `{ summary? }` | agent סיים |
+| `code-agent-error` | `{ message }` | שגיאה |
 
-This keeps early progress fast while preserving a clean path to deterministic permission handling and stronger safety.
+סוגי output (`type`):
+- `assistant` — תגובת המודל (טקסט)
+- `tool_use` — agent קורא לכלי (read/write/bash)
+- `tool_result` — תוצאת הכלי
+- `permission_request` — agent מבקש אישור
+- `system` — הודעות מערכת
+- `error` — שגיאה
 
-## Agent service contract (must remain stable)
+### Parser (stdout → events)
 
-### Commands (UI → backend)
+Claude Code CLI (`ollama launch claude`) מוציא NDJSON עם `--output-format stream-json`.
+ה-Rust backend קורא שורה שורה ומעביר events ל-frontend.
 
-- `start(runConfig)` → returns `run_id`
-- `sendInput(run_id, text)`
-- `respondPermission(run_id, request_id, decision)` where `decision ∈ {allow, deny}`
-- `cancel(run_id)`
-
-### Events (backend → UI)
-
-Minimum set (engine-agnostic):
-
-- `run_started` `{ run_id, workspace_root, model_id, timestamp }`
-- `assistant_delta` `{ run_id, text_delta }`
-- `tool_start` `{ run_id, tool_name, input, tool_call_id }`
-- `tool_result` `{ run_id, tool_name, tool_call_id, output, is_error }`
-- `permission_request` `{ run_id, request_id, tool_name, required_mode, input, reason_code?, reason?, tool_call_id?, test_id?, paths?, command?, argv? }`
-- `permission_resolved` `{ run_id, request_id, decision, reason_code?, reason?, tool_call_id?, test_id? }`
-- `run_error` `{ run_id, message, details? }`
-- `run_finished` `{ run_id, usage?, summary? }`
-
-Rules:
-
-- UI must never parse terminal formatting; it only renders events.
-- Backward compatibility matters: once shipped, extend events by adding fields rather than renaming.
-
-## “Reality gates” (must be proven early)
-
-These are small spikes that prevent building a large UI on assumptions:
-
-1. **Streaming gate**
-   - Prove the engine can produce a structured stream suitable for UI (NDJSON/SSE/WS).
-   - Confirm we can represent partial assistant output as `assistant_delta`.
-2. **Permissions gate**
-   - Prove permissions are structured as `permission_request` and can be answered programmatically (no TTY-only prompt loops).
-3. **Workspace safety gate**
-   - Prove we can enforce workspace boundaries even in edge cases:
-     - `..` traversal
-     - symlink escape
-     - new-file writes (parent canonicalization)
-
-If any gate fails, pause and adjust the engine adapter before adding more UI features.
+```
+stdout line → parse JSON → emit Tauri event → UI renders
+```
 
 ---
 
-## Stage 0 — Architecture + contract spike
+## "Reality Gates" — חייבים לאמת לפני כתיבת UI
 
-**Code tasks**
+### Gate 1: ollama launch claude עובד
 
-- Lock the command + event schema (above).
-- Implement a fake in-memory engine that emits a deterministic scripted stream (for UI work).
-- Decide the MVP engine transport:
-  - Preferred: **NDJSON** (one JSON object per line) with explicit event types.
+```bash
+ollama launch claude \
+  --model qwen3-coder:30b \
+  --output-format stream-json \
+  -p "list files in current dir"
+```
 
-**Testing tasks**
+**מה לאמת:**
+- [ ] הפקודה קיימת ורצה
+- [ ] NDJSON זורם ל-stdout
+- [ ] format של JSON מובן (type, content, etc.)
 
-- Contract test: replay a recorded event stream into the UI reducer/renderer.
-- Backend parser test: handles partial lines, invalid JSON, stderr noise.
+### Gate 2: Permission mode עובד
 
-**Exit criteria**
+```bash
+# auto_accept — ללא שאלות:
+ollama launch claude --model qwen3-coder:30b \
+  --dangerously-skip-permissions -p "..."
 
-- Event schema is versioned and used end-to-end with the fake engine.
-- “Reality gates” are executable and repeatable.
+# ask — עוצר לאישור:
+ollama launch claude --model qwen3-coder:30b -p "..."
+```
 
-**Do / Don’t**
+**מה לאמת:**
+- [ ] `--dangerously-skip-permissions` קיים ועובד
+- [ ] במצב ask — מה הפורמט של permission request ב-stdout?
+- [ ] האם אפשר לשלוח y/n ל-stdin?
 
-- Do: treat the event schema as a product API.
-- Don’t: ship UI behavior that depends on terminal output formatting.
+### Gate 3: Model selection עובד
+
+```bash
+ollama launch claude --model qwen3-coder-next -p "hello"
+```
+
+**מה לאמת:**
+- [ ] `--model` flag עובד עם מודלים שונים
+- [ ] `ollama list` מציג מודלים מותקנים בפורמט parseable
 
 ---
 
+## פקודת הבדיקה לכל Gate
+
+```bash
+# Gate 1 + 2 + 3 ביחד:
+cd /tmp/test-project
+ollama launch claude \
+  --model qwen3-coder:30b \
+  --output-format stream-json \
+  --dangerously-skip-permissions \
+  -p "create a file hello.txt with content 'it works'"
+
+# בדוק אם hello.txt נוצר:
+cat hello.txt
+```
+
+---
+
+## מודלים נתמכים
+
+| שם תצוגה | ollama model id | גודל | SWE-Bench |
+|---|---|---|---|
+| Qwen3-Coder-Next | `qwen3-coder-next` | 52 GB | 70.6% |
+| Qwen3-Coder 30B | `qwen3-coder:30b` | ~20 GB | — |
+| Qwen2.5-Coder 32B | `qwen2.5-coder:32b` | 20 GB | — |
+| Qwen2.5-Coder 7B | `qwen2.5-coder:7b` | 4.7 GB | — |
+| DeepSeek-Coder V2 | `deepseek-coder-v2:16b` | 9 GB | — |
+
+---
+
+## Exit criteria לשלב 0
+
+- [ ] 3 Reality Gates עברו — `ollama launch claude` עובד
+- [ ] פורמט ה-JSON של claude output מתועד
+- [ ] ידוע איך permission ask/deny עובד
+- [ ] architecture מאושרת לפני כתיבת קוד
+
+---
+
+## Do / Don't
+
+- **Do:** אמת את ה-flags של `ollama launch claude` לפני מימוש
+- **Do:** תעד את פורמט ה-JSON שclaude מוציא
+- **Don't:** כתוב UI לפני שה-Gates עברו
+- **Don't:** הנח ש-flags של claude CLI זהים ל-flags של `ollama launch claude`

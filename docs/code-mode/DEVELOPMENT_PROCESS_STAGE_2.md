@@ -1,102 +1,284 @@
-## Stage 2 — Frontend: UI wiring (MVP UX)
+# Stage 2 — Frontend: UI wiring + Model Selector
 
-### Stage 2 deliverables (what must exist after this stage)
-
-- A Code Mode UI that can run one session end-to-end: **start → stream → permission allow/deny → finish**.
-- Deterministic rendering driven purely by `code_agent_event` (no terminal parsing).
-- A minimal, stable frontend run state model (`run_id`, `status`, `transcript`, `last_error`).
-- A safe listener lifecycle (no duplicate listeners, no leaks).
-- All new Code Mode styling lives in a **separate CSS file**.
-
-### Primary files to touch
-
-- UI panel: `/Users/zvisegal/devlope/Atomic-Chat-coder-tym/web-app/src/containers/CodeModePanel.tsx`
-- UI state/store: `/Users/zvisegal/devlope/Atomic-Chat-coder-tym/web-app/src/stores/code-mode-store.ts`
-- (Recommended) Event types/guards: `/Users/zvisegal/devlope/Atomic-Chat-coder-tym/web-app/src/lib/code-agent/events.ts`
-- (CSS) Code Mode styles: `/Users/zvisegal/devlope/Atomic-Chat-coder-tym/web-app/src/containers/CodeModePanel.css`
-
-### UI → backend wiring (commands + event subscription)
-
-- Start:
-  - call `start_code_agent(run_config)` and store the returned `run_id`
-  - set frontend status to `starting`
-- Subscribe to events:
-  - listen once to `code_agent_event`
-  - route each event into the store keyed by `run_id`
-- Send user input:
-  - call `send_code_agent_input(run_id, text)`
-  - allow this whenever the run is in `running` (do not treat it as “only after permissions”)
-- Permissions:
-  - render `permission_request` with Allow/Deny buttons
-  - call `respond_code_agent_permission(run_id, request_id, decision)` on click
-- Cancel:
-  - call `cancel_code_agent(run_id)`
-  - immediately set frontend status to `cancelling` (then confirm terminal state via events)
-
-### Frontend run state machine (store-owned)
-
-Use the same statuses as the backend:
-
-- `starting | running | awaiting_permission | cancelling | finished | error`
-
-Define transitions based on user actions + events:
-
-- Start button → `starting`
-- `run_started` (for the active `run_id`) → `running`
-- `permission_request` → `awaiting_permission`
-- after the UI calls `respond_code_agent_permission(...)` → `running` (until next event)
-- Cancel button → `cancelling`
-- `run_finished` → `finished`
-- `run_error` → `error`
-
-Rules:
-
-- Ignore events for unknown run ids or non-active runs (unless multi-run support is explicitly added).
-- Be idempotent: duplicated/out-of-order events must not double-append transcript entries.
-
-### Transcript & rendering rules (deterministic)
-
-The UI is a pure projection of events:
-
-- `assistant_delta`: append to the currently streaming assistant message (create one if none exists yet for this turn).
-- `tool_start`: add a tool-call entry keyed by `tool_call_id`.
-- `tool_result`: attach to the tool-call entry and mark it complete (`is_error` affects UI display only).
-- `permission_request`: show a UI prompt card (do not auto-resolve).
-- `permission_resolved`: mark that prompt as resolved and record the decision.
-
-### Listener lifecycle (avoid regressions)
-
-- Register the Tauri event listener **once** per component mount.
-- Always `unlisten()` on unmount.
-- Do not register new listeners per run; use `run_id` routing inside the store.
-
-### Type safety (do not use `any`)
-
-- Define a discriminated union type for events (e.g. `type CodeAgentEvent = { type: 'run_started', ... } | ...`).
-- Validate/guard incoming event payloads before updating state (fail closed → set `run_error`).
-
-### Testing tasks
-
-- Component/store tests:
-  - event ordering and `assistant_delta` accumulation
-  - tool start/result pairing by `tool_call_id`
-  - permission allow/deny flow and status transitions
-  - cancel flow (UI enters `cancelling` and ends in a terminal state)
-- E2E minimal:
-  - fake engine → start → stream → permission → allow/deny → finish
-  - repeat using the real sidecar engine once Stage 1 is ready
-
-### Exit criteria
-
-- UI reliably renders a full run using both the fake engine and the sidecar engine.
-- UI never parses engine stdout; it renders only structured events.
-
-### Do / Don’t
-
-- Do: keep styling in a separate CSS file.
-- Do: keep parsing and policy decisions in the backend.
-- Don’t: parse terminal text or infer tool boundaries from plain strings.
-- Don’t: keep global event listeners without cleanup.
+> **מה קיים:** CodeModePanel, store עם permissionMode, ModeToggle.
+> **מה נדרש:** הוספת codeModel לstore + CodeModelSelector component + חיבור לOllama.
 
 ---
 
+## Deliverables
+
+- Store עם `codeModel` + `availableCodeModels`
+- `CodeModelSelector` component — dropdown לבחירת מודל קוד
+- Header מציג `CodeModelSelector` רק ב-Code Mode
+- `CodeModePanel` מחובר ל-`ollamaModel` + Onboarding UI
+- Chat Mode לא נפגע
+
+---
+
+## שלב 2.1 — Store: הוספת codeModel
+
+**קובץ:** `web-app/src/stores/code-mode-store.ts`
+
+```typescript
+// הוסף לממשק CodeModeState:
+codeModel: string                    // "qwen3-coder:30b"
+setCodeModel: (model: string) => void
+availableCodeModels: string[]
+setAvailableCodeModels: (models: string[]) => void
+
+// ברירת מחדל:
+codeModel: 'qwen3-coder:30b',
+availableCodeModels: [],
+
+// actions:
+setCodeModel: (model) => set({ codeModel: model }),
+setAvailableCodeModels: (models) => set({ availableCodeModels: models }),
+
+// partialize (persist):
+codeModel: state.codeModel,
+// availableCodeModels — לא persist (נטען מחדש בכל פתיחה)
+```
+
+---
+
+## שלב 2.2 — CodeModelSelector Component
+
+**קובץ חדש:** `web-app/src/components/CodeModelSelector.tsx`
+
+```typescript
+interface CodeModelSelectorProps {
+  value: string
+  onChange: (model: string) => void
+  availableModels: string[]
+  disabled?: boolean
+}
+```
+
+### UI מוצג
+
+```
+Trigger button:
+  [Qwen3-Coder-30B ▽]   ← bold, icon, chevron
+
+Dropdown popup:
+┌──────────────────────────────────────────────────┐
+│ מותקן                                            │
+│ ● qwen3-coder:30b         Qwen3-Coder 30B   ✓   │
+│   qwen2.5-coder:32b       Qwen2.5-Coder 32B      │
+│   qwen2.5-coder:7b        Qwen2.5-Coder 7B       │
+├──────────────────────────────────────────────────┤
+│ מומלץ (לא מותקן)                                  │
+│   qwen3-coder-next    ollama pull qwen3-coder-next│
+│   deepseek-coder-v2   ollama pull ...             │
+└──────────────────────────────────────────────────┘
+```
+
+### לוגיקה
+
+```typescript
+// מודלים מומלצים ברירת מחדל
+const RECOMMENDED_MODELS = [
+  { id: 'qwen3-coder-next',       label: 'Qwen3-Coder-Next',  size: '52GB', note: 'SWE 70.6%' },
+  { id: 'qwen3-coder:30b',        label: 'Qwen3-Coder 30B',   size: '~20GB' },
+  { id: 'qwen2.5-coder:32b',      label: 'Qwen2.5-Coder 32B', size: '20GB' },
+  { id: 'qwen2.5-coder:7b',       label: 'Qwen2.5-Coder 7B',  size: '4.7GB', note: 'מהיר' },
+  { id: 'deepseek-coder-v2:16b',  label: 'DeepSeek-Coder V2', size: '9GB' },
+]
+
+// installed = availableModels מ-store
+// לא מותקן = RECOMMENDED_MODELS שלא ב-installed
+```
+
+### Props
+
+| prop | סוג | תיאור |
+|---|---|---|
+| `value` | `string` | המודל הנבחר |
+| `onChange` | `(model: string) => void` | שינוי מודל |
+| `availableModels` | `string[]` | מותקנים (מ-ollama list) |
+| `disabled` | `boolean?` | `true` בזמן ריצת agent |
+
+---
+
+## שלב 2.3 — Header: שילוב CodeModelSelector
+
+**קובץ:** `web-app/src/routes/index.tsx` (או header component)
+
+```typescript
+const { mode, codeModel, setCodeModel, availableCodeModels, isAgentRunning } = useCodeModeStore()
+
+// בתוך ה-header:
+{mode === 'chat' && (
+  <ModelSelector ... />     // קיים — לא משתנה
+)}
+{mode === 'code' && (
+  <CodeModelSelector
+    value={codeModel}
+    onChange={setCodeModel}
+    availableModels={availableCodeModels}
+    disabled={isAgentRunning}
+  />
+)}
+```
+
+---
+
+## שלב 2.4 — CodeModePanel: Onboarding + חיבור
+
+**קובץ:** `web-app/src/containers/CodeModePanel.tsx`
+
+### בכניסה ל-Code Mode
+
+```typescript
+useEffect(() => {
+  if (mode !== 'code') return
+
+  // בדוק Ollama
+  invoke<string>('check_ollama')
+    .then(version => setOllamaStatus({ ok: true, version }))
+    .catch(() => setOllamaStatus({ ok: false }))
+
+  // טען מודלים מותקנים
+  invoke<string[]>('list_ollama_models')
+    .then(models => setAvailableCodeModels(models))
+    .catch(() => {})
+}, [mode])
+```
+
+### Onboarding states
+
+**Ollama לא מותקן:**
+```
+┌────────────────────────────────────────────┐
+│  ⚠️  Ollama נדרש                           │
+│                                             │
+│  Code Mode מריץ AI agent מקומי.            │
+│  יש להתקין Ollama כדי להמשיך.              │
+│                                             │
+│  [התקן Ollama]         [בדוק שוב]          │
+└────────────────────────────────────────────┘
+```
+
+**מודל לא מותקן:**
+```
+┌────────────────────────────────────────────┐
+│  ⚠️  המודל לא מותקן                        │
+│                                             │
+│  ollama pull qwen3-coder:30b               │
+│                                             │
+│  [העתק פקודה]          [בדוק שוב]          │
+└────────────────────────────────────────────┘
+```
+
+**הכל תקין — status bar:**
+```
+✅ Ollama v0.6.x  |  ✅ qwen3-coder:30b מותקן
+```
+
+### `handleSend` מעודכן
+
+```typescript
+const { codeModel, projectDir, draftPrompt, permissionMode } = useCodeModeStore()
+
+const handleSend = async () => {
+  if (!projectDir) {
+    appendOutput({ type: 'error', content: 'בחר תיקיית פרויקט', timestamp: Date.now() })
+    return
+  }
+  if (!codeModel) {
+    appendOutput({ type: 'error', content: 'בחר מודל', timestamp: Date.now() })
+    return
+  }
+
+  clearOutput()
+  setAgentRunning(true)
+
+  try {
+    await invoke('spawn_code_agent', {
+      projectDir,
+      prompt: draftPrompt,
+      ollamaModel: codeModel,     // ← חדש
+      permissionMode,
+    })
+  } catch (e) {
+    appendOutput({ type: 'error', content: String(e), timestamp: Date.now() })
+  } finally {
+    setAgentRunning(false)
+  }
+}
+```
+
+### Event listeners (קיים — ממשיך לעבוד)
+
+```typescript
+useEffect(() => {
+  const unlisten1 = listen('code-agent-output', (e) => {
+    appendOutput(e.payload as AgentOutputLine)
+  })
+  const unlisten2 = listen('code-agent-done', () => {
+    setAgentRunning(false)
+  })
+  const unlisten3 = listen('code-agent-error', (e) => {
+    appendOutput({ type: 'error', content: String(e.payload), timestamp: Date.now() })
+    setAgentRunning(false)
+  })
+
+  return () => {
+    unlisten1.then(fn => fn())
+    unlisten2.then(fn => fn())
+    unlisten3.then(fn => fn())
+  }
+}, [])
+```
+
+---
+
+## Frontend Run State Machine
+
+```
+idle
+  → [שלח] → starting
+  → [spawn_code_agent invoke] → running
+  → [code-agent-done] → idle
+  → [code-agent-error] → idle (עם הודעת שגיאה)
+  → [עצור] → cancelling → idle
+```
+
+---
+
+## Type Safety
+
+```typescript
+// web-app/src/lib/code-agent/events.ts
+export type AgentOutputLine =
+  | { type: 'assistant';         content: string; timestamp: number }
+  | { type: 'tool_use';          content: string; toolName?: string; timestamp: number }
+  | { type: 'tool_result';       content: string; toolName?: string; timestamp: number }
+  | { type: 'permission_request'; content: string; timestamp: number }
+  | { type: 'system';            content: string; timestamp: number }
+  | { type: 'error';             content: string; timestamp: number }
+  | { type: 'done';              content: string; timestamp: number }
+```
+
+---
+
+## בדיקות הצלחה
+
+- [ ] `codeModel` נשמר ב-store בין sessions
+- [ ] `availableCodeModels` מתמלא בכניסה לCode Mode
+- [ ] Header מציג `CodeModelSelector` ב-Code Mode בלבד
+- [ ] Chat Mode לא נפגע
+- [ ] Onboarding מוצג נכון (Ollama חסר / מודל חסר / הכל תקין)
+- [ ] `handleSend` מעביר `ollamaModel` ל-Rust
+- [ ] Events מגיעים ומוצגים ב-panel
+- [ ] Stop עובד
+
+---
+
+## Do / Don't
+
+- **Do:** שמור CodeModelSelector נפרד מ-Chat ModelSelector
+- **Do:** בדוק Ollama + מודלים בכל כניסה לCode Mode
+- **Do:** טיפוסים מפורשים — לא `any`
+- **Don't:** שנה את Chat Mode
+- **Don't:** רשום event listeners מרובים — unlisten on unmount

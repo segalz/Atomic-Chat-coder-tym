@@ -1,45 +1,52 @@
-# Code Mode Development Process (claw-code engine)
+# Code Mode Development Process — ollama launch claude
 
-This document describes the development process for **Code Mode** in Atomic Chat using a **claw-code**-based agent engine (see `/Users/zvisegal/devlope/Claw-Code-Local-IOS`) and an **event-driven** UI contract.
+> **עדכון (2026-04-07):** Engine שונה מ-claw-code ל-**`ollama launch claude`**.
+> Ollama מנהל הכל — model serving + Claude Code agent loop.
+> **100% מקומי. בחירת מודל חופשית. אפס תלויות מקוד.**
+
+This document describes the development process for **Code Mode** in Atomic Chat using **`ollama launch claude`** as the agent engine, with model selection (Qwen3-Coder-30B / qwen3-coder-next / כל מודל Ollama).
 
 ## Goals
 
-- Deliver a UI experience similar to Claude Desktop / Codex Desktop: **plan → act → tool-use → code changes → run tests**.
+- Deliver a UI experience similar to Claude Desktop: **plan → act → tool-use → code changes → run tests**.
+- משתמש בוחר מודל קוד → agent רץ מקומית → תוצאות בזמן אמת.
 - Keep the UI **engine-agnostic** by relying on a stable **event contract**, not terminal text parsing.
-- Run **local-first** via a stable OpenAI-compatible base URL (commonly `http://localhost:1337/v1`).
-- Enforce safety: **workspace boundaries + explicit permissions + deny-by-default**.
-- Avoid regressions: Chat Mode stays stable and provider/model serving remains unchanged.
+- Run **local-first** via Ollama (no cloud, no API keys).
+- Enforce safety: **workspace boundaries + explicit permissions**.
+- Avoid regressions: Chat Mode stays stable and provider/model serving unchanged.
 
 ## Repository touchpoints
 
 - UI panel: `/Users/zvisegal/devlope/Atomic-Chat-coder-tym/web-app/src/containers/CodeModePanel.tsx`
 - UI state: `/Users/zvisegal/devlope/Atomic-Chat-coder-tym/web-app/src/stores/code-mode-store.ts`
-- Backend (Tauri/Rust): `/Users/zvisegal/devlope/Atomic-Chat-coder-tym/src-tauri/`
-- Local API/proxy (stable endpoint): `/Users/zvisegal/devlope/Atomic-Chat-coder-tym/src-tauri/src/core/server/proxy.rs`
-- Agent engine source: `/Users/zvisegal/devlope/Claw-Code-Local-IOS`
+- Model selector: `/Users/zvisegal/devlope/Atomic-Chat-coder-tym/web-app/src/components/CodeModelSelector.tsx` (חדש)
+- Backend (Tauri/Rust): `/Users/zvisegal/devlope/Atomic-Chat-coder-tym/src-tauri/src/core/code_agent.rs`
 
 ## Architecture (target)
 
-The recommended approach is an **internal agent service** inside Tauri that communicates with the UI via Tauri commands + events.
-
 ```mermaid
 flowchart LR
-  UI["React UI (Code Mode)"] -->|Tauri invoke| AS["Agent Service (Rust)"]
-  AS -->|events stream| UI
-  AS -->|HTTP (OpenAI-compatible)| API["Local API Proxy<br/>127.0.0.1:1337/v1"]
-  API --> MS["Local model servers<br/>(MLX / llama.cpp / optional Ollama)"]
-  AS --> ENG["Engine (claw-code)<br/>Sidecar → Embedded"]
-  ENG -->|tool calls + model requests| AS
+  UI["React UI (Code Mode)\nCodeModelSelector\nCodeModePanel"] -->|Tauri invoke| RS["Rust Backend\ncode_agent.rs"]
+  RS -->|Tauri events| UI
+  RS -->|subprocess| OL["ollama launch claude\n--model qwen3-coder:30b\n--output-format stream-json"]
+  OL -->|NDJSON stdout| RS
+  OL --> MOD["Local Model\n(Qwen3-Coder / qwen3-coder-next)"]
 ```
 
 ### Integration strategy
 
-We recommend a two-step engine integration:
+פשוט ויעיל:
+1. **MVP**: `ollama launch claude --model <selected>` — שורה אחת, הכל עובד.
+2. **עתיד**: bundle Ollama עם הapp לחוויה חלקה לחלוטין (אפס התקנות).
 
-1. **MVP**: run `claw` as a **sidecar** process and consume a **structured event stream** (NDJSON preferred).
-2. **Upgrade**: embed `claw-code-local` crates **in-process** inside `src-tauri` once the event contract is stable.
+## Commands (UI → backend)
 
-This keeps early progress fast while preserving a clean path to deterministic permission handling and stronger safety.
+```typescript
+invoke('spawn_code_agent', { projectDir, prompt, ollamaModel, permissionMode })
+invoke('stop_code_agent')
+invoke('check_ollama')           // → string version
+invoke('list_ollama_models')     // → string[] model ids
+```
 
 ## Agent service contract (must remain stable)
 

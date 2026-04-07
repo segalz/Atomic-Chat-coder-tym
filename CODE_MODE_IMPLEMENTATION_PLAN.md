@@ -1,38 +1,41 @@
-# Atomic Chat + Cline CLI + Local Model — תוכנית מימוש
+# Atomic Chat — Code Mode עם Ollama + Claude Code
 
-> **עדכון ארכיטקטורה (2026-03-31):** אחרי בדיקות מעמיקות ואפיון טכני, עברנו מ-**Claude CLI** ל-**Cline CLI**.
-> הסיבה: Cline מדבר OpenAI API ישירות — ללא proxy, ללא אימות שמות מודלים, ללא תלות ב-Anthropic.
-> האפיון המלא נמצא ב-[`docs/code-mode-spec/code-mode-spec.md`](docs/code-mode-spec/code-mode-spec.md).
+> **עדכון ארכיטקטורה (2026-04-07):** עברנו ל-**`ollama launch claude`** כ-engine.
+> הסיבה: פקודה אחת, Ollama מנהל הכל (מודל + API + agent), בחירת מודל חופשית.
+> **100% מקומי, 0 עלות, פרטיות מלאה.**
+
+---
 
 ## חזון
 
-Atomic Chat הופך ל-**GUI של Cline CLI עם מודל מקומי**.
-המנוע: Cline CLI — המוח מקומי (Qwen2.5-Coder / כל מודל OpenAI-compatible).
-**100% מקומי, 0 עלות, פרטיות מלאה.**
+```
+משתמש בוחר מודל קוד (Qwen3-Coder-30B / qwen3-coder-next / כל מודל Ollama)
+   ↓
+Atomic Chat מריץ: ollama launch claude --model <selected>
+   ↓
+Claude Code agent רץ על הפרויקט עם המודל המקומי
+   ↓
+הפלט זורם ל-CodeModePanel בזמן אמת
+```
 
-### מבנה Header חדש
+### מבנה Header — Code Mode
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  ☘ Qwen3_5-4B_Q4_K_M ▽  ⚙  ●     [ Chat     Code ]       │
-│                                     ▲ 2 tabs ליד המודל     │
+│  ☘ Qwen3-Coder-30B ▽  ⚙  ●     [ Chat     Code ]          │
+│    ↑ Code Mode model selector (נפרד מ-Chat)                 │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**2 מצבים:**
-- **Chat** — צ'אט רגיל עם מודל (כמו היום)
-- **Code** — Cline CLI עם מודל מקומי על פרויקט
-
-### מסך ראשי — Code Mode
+### מסך Code Mode
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  Header: Model ▽  ⚙ ●   [ Chat | ▪Code ]                   │
+│  Header: [Qwen3-Coder-30B ▽]  ⚙ ●   [ Chat | ▪Code ]      │
 ├─────────────────────────────────────────────────────────────┤
-│  📁 /Users/zvi/projects/my-app                              │
+│  📁 /Users/zvi/projects/my-app                [Browse]      │
 ├─────────────────────────────────────────────────────────────┤
 │                                                              │
-│  (scrollable output — chat style)                            │
 │  📖 Reading src/components/Form.tsx...                       │
 │  ✏️  Editing line 87: fixed lastName setter...               │
 │  💻 Running: npm test...                                     │
@@ -46,394 +49,431 @@ Atomic Chat הופך ל-**GUI של Cline CLI עם מודל מקומי**.
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### ארכיטקטורה (מעודכן — Cline CLI)
+### ארכיטקטורה
 
 ```
-┌─ Atomic Chat (Tauri) ──────────────────────────────────────┐
-│                                                             │
-│  React Frontend                                             │
-│  ├─ Header: Model selector + [Chat | Code] toggle          │
-│  ├─ Chat Mode: ChatInput → existing chat flow              │
-│  └─ Code Mode: ProjectBar + PermissionSelector + Output    │
-│         │                                                   │
-│         │ invoke('spawn_code_agent', {                      │
-│         │   projectDir, prompt, modelId,                    │
-│         │   permissionMode, serverUrl })                    │
-│         ▼                                                   │
-│  Rust Backend (Tauri) — code_agent.rs                       │
-│  ├─ spawn_code_agent() → spawns Cline CLI subprocess        │
-│  ├─ stop_code_agent()  → kills subprocess                   │
-│  └─ streams stdout JSON → emits Tauri events to frontend   │
-│         │                                                   │
-│         │  cline --base-url http://127.0.0.1:{port}/v1     │
-│         │         --model {modelId}                         │
-│         │         --json [--yolo if auto_accept]            │
-│         ▼                                                   │
-│  Cline CLI (installed globally: npm i -g @cline/cline)      │
-│  ├─ OpenAI API native (no proxy needed!)                    │
-│  ├─ Reads, edits, runs commands on the project             │
-│  └─ 5 permission modes (Phase 1: 2 modes)                  │
-│         │                                                   │
-│         │ OpenAI /v1/chat/completions                       │
-│         ▼                                                   │
-│  llama-server (TurboQuant — כבר קיים!)                      │
-│  ├─ tauri-plugin-mlx → port דינמי per model                │
-│  ├─ OpenAI-compatible API                                   │
-│  └─ Qwen2.5-Coder-32B / כל מודל                            │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### מציאת פורט llama-server
-
-```
-Frontend queries:
-  plugin:mlx|find_mlx_session_by_model(modelId)
-    → { port, api_key } or null
-  fallback: plugin:llamacpp|find_session_by_model(modelId)
-    → { port, api_key } or null
-  → serverUrl = http://127.0.0.1:{port}/v1
+┌─ Atomic Chat (Tauri) ─────────────────────────────────────────┐
+│                                                                │
+│  React Frontend                                                │
+│  ├─ Header: CodeModelSelector (▽) + [Chat | Code] toggle      │
+│  ├─ Chat Mode: כמו היום (ללא שינוי)                           │
+│  └─ Code Mode: ProjectBar + PermissionSelector + OutputPanel  │
+│         │                                                      │
+│         │ invoke('spawn_code_agent', {                         │
+│         │   projectDir, prompt,                                │
+│         │   ollamaModel,      ← "qwen3-coder:30b"             │
+│         │   permissionMode }) ← "ask" | "auto_accept"         │
+│         ▼                                                      │
+│  Rust Backend — code_agent.rs                                  │
+│  ├─ spawn_code_agent()  → spawns ollama subprocess             │
+│  ├─ stop_code_agent()   → kills subprocess                     │
+│  ├─ check_ollama()      → ollama --version                     │
+│  ├─ list_ollama_models()→ ollama list (מסנן מודלי קוד)         │
+│  └─ streams stdout → emits Tauri events → frontend            │
+│         │                                                      │
+│         │  ollama launch claude \                              │
+│         │    --model qwen3-coder:30b \                         │
+│         │    [--dangerously-skip-permissions] (auto_accept)    │
+│         │    -p "{prompt}"                                     │
+│         ▼                                                      │
+│  Ollama (installed locally — חד פעמי)                          │
+│  ├─ מנהל את המודל (download, serve, inference)                 │
+│  ├─ Claude Code agent loop built-in                            │
+│  └─ Qwen3-Coder-30B / qwen3-coder-next / כל מודל             │
+│                                                                │
+└────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## ✅ שלב 1: וידוא תקשורת — CLI ↔ מודל מקומי
+## מודלים נתמכים (Code Mode)
 
-> **סטטוס: בוצע** (בוצע עם Claude CLI + proxy. עם Cline נדרש אימות נפרד — ראה שלב 2.)
+| שם תצוגה | ollama model id | גודל | איכות קוד |
+|---|---|---|---|
+| **Qwen3-Coder-Next** | `qwen3-coder-next` | 52 GB | ⭐⭐⭐⭐⭐ SWE 70.6% |
+| **Qwen3-Coder 30B** | `qwen3-coder:30b` | ~20 GB | ⭐⭐⭐⭐⭐ |
+| **Qwen2.5-Coder 32B** | `qwen2.5-coder:32b` | 20 GB | ⭐⭐⭐⭐ |
+| **Qwen2.5-Coder 7B** | `qwen2.5-coder:7b` | 4.7 GB | ⭐⭐⭐ מהיר |
+| **DeepSeek-Coder V2** | `deepseek-coder-v2:16b` | 9 GB | ⭐⭐⭐⭐ |
+| **CodeLlama 13B** | `codellama:13b` | 7.4 GB | ⭐⭐⭐ |
 
-**מה בוצע:** אומתה תקשורת בין CLI ל-proxy פנימי ול-llama-server. streaming JSON עובד.
+> המשתמש יכול להוסיף כל מודל Ollama — הרשימה היא ברירת מחדל בלבד.
 
 ---
 
-## ✅ שלב 2: Tauri Backend — Code Agent Spawner
+## מה קיים כבר ✅
 
-> **סטטוס: בוצע (בסיס)** — `code_agent.rs` נוצר ועובד עם Claude CLI.
-> **נדרש עדכון:** להחליף Claude CLI ב-Cline CLI (ראה שלב 2 עדכון).
+| רכיב | מיקום | סטטוס |
+|---|---|---|
+| **CodeModePanel** | `web-app/src/containers/CodeModePanel.tsx` | קיים — צריך עדכון |
+| **code-mode-store** | `web-app/src/stores/code-mode-store.ts` | קיים — צריך `codeModel` |
+| **code_agent.rs** | `src-tauri/src/core/code_agent.rs` | קיים — צריך Ollama |
+| **ModeToggle** | `web-app/src/routes/index.tsx` | קיים |
+| permissionMode | code-mode-store.ts | קיים ✅ |
 
-### מה קיים
-- `src-tauri/src/core/code_agent.rs` — spawn, stop, stream stdout → Tauri events
-- Events: `code-agent-output`, `code-agent-done`, `code-agent-error`
-- רשום ב-`lib.rs`: `spawn_code_agent`, `stop_code_agent`, `check_claude_cli`
+---
 
-### שלב 2-עדכון: החלפת Claude CLI → Cline CLI (עדיין נדרש)
+## שלבי מימוש
 
-- [ ] **2-U.1** עדכן `spawn_code_agent` ב-`code_agent.rs`:
-  - **הסר:** `--output-format stream-json`, `--verbose`, `--dangerously-skip-permissions`
-  - **הסר:** env vars של Anthropic (`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_DEFAULT_*_MODEL`)
-  - **הוסף פרמטר:** `permission_mode: String` — `"ask"` או `"auto_accept"`
-  - **הרץ:**
-    ```bash
-    cline \
-      --base-url http://127.0.0.1:{port}/v1 \
-      --model {model_id} \
-      --json \
-      [--yolo]     # רק אם permission_mode == "auto_accept"
-      -p "{prompt}"
-    ```
-  - **לוגיקת permission_mode:**
-    ```rust
-    if permission_mode == "auto_accept" {
-        cmd.arg("--yolo");
+---
+
+### ✅ שלב 0 (בוצע): תשתית קיימת
+- code_agent.rs קיים
+- CodeModePanel קיים
+- store עם permissionMode קיים
+- ModeToggle קיים
+
+---
+
+### שלב 1: Rust Backend — החלפה ל-Ollama
+
+**קובץ:** `src-tauri/src/core/code_agent.rs`
+
+#### 1.1 — `find_ollama_binary()`
+```rust
+fn find_ollama_binary() -> Option<PathBuf> {
+    // חפש ב-PATH
+    if let Ok(path) = which::which("ollama") { return Some(path); }
+    // נתיבים ידועים על macOS
+    for p in ["/usr/local/bin/ollama", "/opt/homebrew/bin/ollama"] {
+        if Path::new(p).exists() { return Some(PathBuf::from(p)); }
     }
-    // "ask" mode: no --yolo → Cline asks before each action
-    ```
+    None
+}
+```
 
-- [ ] **2-U.2** שנה `find_claude_binary` → `find_cline_binary`:
-  - חפש `cline` ב-PATH ובנתיבים ידועים
-  - שגיאה: `"Cline CLI not found. Install: npm install -g @cline/cline"`
+#### 1.2 — `check_ollama()` (Tauri command)
+```rust
+#[tauri::command]
+pub async fn check_ollama() -> Result<String, String> {
+    let ollama = find_ollama_binary()
+        .ok_or("Ollama not found. Install: https://ollama.com")?;
+    let out = Command::new(&ollama).arg("--version").output()
+        .map_err(|e| e.to_string())?;
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+```
 
-- [ ] **2-U.3** שנה `check_claude_cli` → `check_cline_cli`:
-  - הרץ `cline --version`
+#### 1.3 — `list_ollama_models()` (Tauri command)
+```rust
+#[tauri::command]
+pub async fn list_ollama_models() -> Result<Vec<String>, String> {
+    let ollama = find_ollama_binary().ok_or("Ollama not found")?;
+    let out = Command::new(&ollama).arg("list").output()
+        .map_err(|e| e.to_string())?;
+    // parse: שורות שמכילות "coder" / "code" / "deepseek"
+    let models = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .skip(1) // header
+        .filter_map(|l| l.split_whitespace().next().map(|s| s.to_string()))
+        .collect();
+    Ok(models)
+}
+```
 
-- [ ] **2-U.4** עדכן `lib.rs` — שנה `check_claude_cli` → `check_cline_cli`
+#### 1.4 — `spawn_code_agent()` (מעודכן)
+```rust
+#[tauri::command]
+pub async fn spawn_code_agent(
+    project_dir: String,
+    prompt: String,
+    ollama_model: String,      // "qwen3-coder:30b"
+    permission_mode: String,   // "ask" | "auto_accept"
+    app_handle: tauri::AppHandle,
+) -> Result<(), String> {
+    let ollama = find_ollama_binary().ok_or("Ollama not found")?;
 
-- [ ] **2-U.5** עדכן signature ב-`spawn_code_agent` (TypeScript side) בכל מקום שקורא לו:
-  - הוסף `permissionMode: string` לפרמטרים
-  - הוסף `serverUrl: string` (חובה — מגיע מ-port discovery)
+    let mut cmd = Command::new(&ollama);
+    cmd.arg("launch").arg("claude");
+    cmd.arg("--model").arg(&ollama_model);
+    cmd.arg("-p").arg(&prompt);
+    cmd.current_dir(&project_dir);
 
-### בדיקת הצלחה
-- [ ] `check_cline_cli` → מחזיר version
-- [ ] `spawn_code_agent` עם `auto_accept` → Cline רץ עם `--yolo`, events זורמים
-- [ ] `spawn_code_agent` עם `ask` → Cline רץ ללא `--yolo`
-- [ ] `stop_code_agent` → עוצר את ה-process
+    // auto_accept = skip permission prompts
+    if permission_mode == "auto_accept" {
+        cmd.arg("--dangerously-skip-permissions");
+    }
+
+    // spawn + stream stdout → Tauri events
+    // (אותה לוגיקה כמו הקיים ב-code_agent.rs)
+    spawn_and_stream(cmd, app_handle).await
+}
+```
+
+#### 1.5 — עדכן `lib.rs`
+```rust
+// הסר: check_claude_cli, check_cline_cli
+// הוסף:
+.invoke_handler(tauri::generate_handler![
+    spawn_code_agent,
+    stop_code_agent,
+    check_ollama,          // חדש
+    list_ollama_models,    // חדש
+])
+```
+
+**בדיקת הצלחה שלב 1:**
+- [ ] `check_ollama` → מחזיר version string
+- [ ] `list_ollama_models` → מחזיר מודלים מותקנים
+- [ ] `spawn_code_agent` → Ollama רץ, events זורמים
+- [ ] `stop_code_agent` → process נעצר
 
 ---
 
-## ✅ שלב 3: Code Mode Toggle בHeader + Store
+### שלב 2: Store — הוספת `codeModel`
 
-> **סטטוס: בוצע (בסיס)** — Toggle קיים, store קיים, NavMain נוקה.
-> **נדרש הוספה:** שדה `permissionMode` ב-store.
+**קובץ:** `web-app/src/stores/code-mode-store.ts`
 
-### מה קיים
-- `web-app/src/stores/code-mode-store.ts` — Zustand + persist
-- ModeToggle ב-`routes/index.tsx` (כפתורי Chat/Code, z-50)
-- `NavMain.tsx` — הוסר `common:projectMode` link
+#### 2.1 — הוסף שדות
 
-### שלב 3-עדכון: הוספת permissionMode לstore (עדיין נדרש)
+```typescript
+// בתוך CodeModeState:
+codeModel: string           // "qwen3-coder:30b"
+setCodeModel: (model: string) => void
+availableCodeModels: string[]
+setAvailableCodeModels: (models: string[]) => void
+```
 
-- [ ] **3-U.1** הוסף ל-`code-mode-store.ts`:
-  ```typescript
-  permissionMode: 'ask' | 'auto_accept'
-  setPermissionMode: (mode: 'ask' | 'auto_accept') => void
-  ```
-  - ברירת מחדל: `'auto_accept'`
-  - **persist: כן** (נשמר בין sessions)
+ברירת מחדל:
+```typescript
+codeModel: 'qwen3-coder:30b',
+availableCodeModels: [],
+```
 
-### בדיקת הצלחה
-- [ ] Store מכיל `permissionMode` עם persist
+Persist:
+```typescript
+// ב-partialize — הוסף:
+codeModel: state.codeModel,
+```
+
+**בדיקת הצלחה שלב 2:**
+- [ ] `codeModel` נשמר בין sessions
+- [ ] `availableCodeModels` מתמלא בכניסה לCode Mode
 
 ---
 
-## שלב 4: PermissionModeSelector + CodeModePanel שיפורים
+### שלב 3: CodeModelSelector Component
 
-> **סטטוס CodeModePanel: בוצע (בסיס)** — Project Bar, Output, Input קיימים.
-> **נדרש הוספה:** PermissionModeSelector + חיבור permissionMode לrun.
+**קובץ חדש:** `web-app/src/components/CodeModelSelector.tsx`
 
-### מה קיים
-- `web-app/src/containers/CodeModePanel.tsx` — chat-like layout עובד
-- Project folder picker, auto-scroll, Stop button, event listeners
-- Port discovery (MLX → llamacpp fallback) קיים
+```
+Dropdown trigger: [Qwen3-Coder-30B ▽]
 
-### משימות
+Popup:
+┌──────────────────────────────────────────────────┐
+│ מודלים מותקנים:                                  │
+│ ● Qwen3-Coder-Next      qwen3-coder-next  ✓      │
+│   Qwen3-Coder 30B       qwen3-coder:30b           │
+│   Qwen2.5-Coder 7B      qwen2.5-coder:7b          │
+├──────────────────────────────────────────────────┤
+│ מודלים מומלצים (לא מותקנים):                     │
+│   Qwen3-Coder 30B       ollama pull ...           │
+│   DeepSeek-Coder V2     ollama pull ...           │
+└──────────────────────────────────────────────────┘
+```
 
-- [ ] **4.1** צור `web-app/src/components/PermissionModeSelector.tsx`:
+Props:
+```typescript
+interface CodeModelSelectorProps {
+  value: string
+  onChange: (model: string) => void
+  disabled?: boolean
+}
+```
 
-  ```
-  [Ask permissions ▽]    ← trigger button (icon + label + chevron)
+לוגיקה:
+- בטעינה → `invoke('list_ollama_models')` → מציג מה מותקן
+- מודלים לא מותקנים → מציג עם "ollama pull" hint
+- `disabled={isAgentRunning}`
 
-  Dropdown popup (מראה כמו screenshot של Cline):
-  ┌──────────────────────────────────────────┐
-  │ 🤚  Ask permissions               ✓ (אם נבחר) │
-  │     Always ask before making changes     │
-  ├──────────────────────────────────────────┤
-  │ </>  Auto accept edits            ✓ (אם נבחר) │
-  │      Automatically accept all file edits │
-  └──────────────────────────────────────────┘
-  ```
-
-  - מקבל: `value: 'ask' | 'auto_accept'`, `onChange`, `disabled`
-  - `disabled={isAgentRunning}` — לא ניתן לשנות בזמן ריצה
-  - checkmark ליד האפשרות הנבחרת
-  - כל אפשרות: אייקון + title (bold) + subtitle (muted)
-
-- [ ] **4.2** הטמע ב-`CodeModePanel.tsx`:
-  - הוסף `PermissionModeSelector` מעל ה-textarea (בתוך אזור הקלט)
-  - חבר ל-`permissionMode` / `setPermissionMode` מה-store
-  - העבר `permissionMode` ל-`spawn_code_agent` invoke
-
-- [ ] **4.3** עדכן `handleSend` ב-`CodeModePanel.tsx`:
-  - הוסף `permissionMode` לפרמטרים של `invoke('spawn_code_agent', { ..., permissionMode })`
-
-### בדיקת הצלחה
-- [ ] PermissionModeSelector מופיע מעל textarea
-- [ ] בחירה משתנה ונשמרת ב-store
+**בדיקת הצלחה שלב 3:**
+- [ ] Dropdown מציג מודלים מותקנים
+- [ ] בחירה מעדכנת store
 - [ ] מושבת בזמן ריצה
-- [ ] המראה קרוב לscreenshot של Cline (icon + title + subtitle + checkmark)
-- [ ] permissionMode עובר ל-Rust backend
 
 ---
 
-## שלב 5: שיפור Output Panel
+### שלב 4: Header — שילוב CodeModelSelector
 
-> **סטטוס: בוצע (בסיס)** — OutputLine renderer קיים עם פורמט Claude CLI.
-> **נדרש:** עדכון לפורמט Cline + approve/deny buttons למצב `ask`.
+**קובץ:** `web-app/src/routes/index.tsx` (או שם header component)
 
-### משימות
+כשמצב הוא `code`:
+```typescript
+{mode === 'code' && (
+  <CodeModelSelector
+    value={codeModel}
+    onChange={setCodeModel}
+    disabled={isAgentRunning}
+  />
+)}
+{mode === 'chat' && (
+  <ModelSelector ... /> // הקיים — לא משתנה
+)}
+```
 
-- [ ] **5.1** עדכן `OutputLine` ב-`CodeModePanel.tsx` לפורמט Cline JSON:
-  - **חקור** את פורמט ה-JSON stream של Cline (`cline --json`) לפני מימוש
-  - עדכן parsers לפי הפורמט האמיתי
-  - שמור פונקציונליות קיימת לפורמטים אחרים (fallback לraw text)
-
-- [ ] **5.2** Approve/Deny buttons (מצב `ask`):
-  - כאשר `permissionMode == 'ask'` ו-Cline שולח permission request:
-    ```
-    ┌─────────────────────────────────────────┐
-    │ Cline wants to write: src/Form.tsx      │
-    │              [Approve]  [Deny]          │
-    └─────────────────────────────────────────┘
-    ```
-  - לחיצה → שלח `y\n` / `n\n` ל-stdin של ה-process
-  - **הערה:** מחייב stdin pipe פתוח ב-Rust — להוסיף ל-`spawn_code_agent`
-
-- [ ] **5.3** UX שיפורים:
-  - כפתור "Copy All" — מעתיק את כל הפלט
-  - כפתור "Clear" — מנקה פלט קודם
-  - Collapsible tool results (ברירת מחדל: מקופל)
-
-### בדיקת הצלחה
-- [ ] פלט Cline מוצג נכון (tool calls, results, text)
-- [ ] Approve/Deny עובד במצב `ask`
-- [ ] Copy All + Clear עובדים
+**בדיקת הצלחה שלב 4:**
+- [ ] Header מציג CodeModelSelector רק ב-Code Mode
+- [ ] Chat Mode לא נפגע
 
 ---
 
-## שלב 6: ניקוי, i18n, ובדיקות
+### שלב 5: CodeModePanel — חיבור לOllama
 
-### משימות
+**קובץ:** `web-app/src/containers/CodeModePanel.tsx`
 
-- [ ] **6.1** הסר routes ישנים (Project Mode):
-  - מחק `web-app/src/routes/project-mode/` (כולל vision, plan, translation)
-  - עדכן `web-app/src/constants/routes.ts`
-  - עדכן `web-app/src/routeTree.gen.ts` — רגנרציה
+#### 5.1 — `handleSend` מעודכן
+```typescript
+const handleSend = async () => {
+  if (!projectDir) return showError('בחר תיקיית פרויקט')
+  if (!codeModel) return showError('בחר מודל')
 
-- [ ] **6.2** העבר services שצריך לשמור:
-  - `web-app/src/services/pm/` → ישאר (Vision, file-matcher, analyzer, bundler)
-  - מחק containers שלא בשימוש (PlanComposer, PlanResultView, TranslationSearchPanel)
+  clearOutput()
+  setAgentRunning(true)
 
-- [ ] **6.3** i18n — עדכן מפתחות:
+  await invoke('spawn_code_agent', {
+    projectDir,
+    prompt: draftPrompt,
+    ollamaModel: codeModel,       // ← חדש
+    permissionMode,
+  })
+}
+```
+
+#### 5.2 — Onboarding בכניסה לCode Mode
+```typescript
+useEffect(() => {
+  if (mode !== 'code') return
+
+  invoke('check_ollama')
+    .then(v => setOllamaStatus({ ok: true, version: v }))
+    .catch(() => setOllamaStatus({ ok: false }))
+
+  invoke('list_ollama_models')
+    .then(models => setAvailableCodeModels(models))
+}, [mode])
+```
+
+#### 5.3 — Onboarding UI
+
+אם Ollama לא מותקן:
+```
+┌──────────────────────────────────────────────────┐
+│  ⚠️  Ollama נדרש                                 │
+│                                                   │
+│  Code Mode מריץ AI agent מקומי דרך Ollama.       │
+│                                                   │
+│  [התקן Ollama]    [בדוק שוב]                     │
+└──────────────────────────────────────────────────┘
+```
+
+אם המודל לא מותקן:
+```
+┌──────────────────────────────────────────────────┐
+│  ⚠️  מודל לא מותקן                               │
+│                                                   │
+│  ollama pull qwen3-coder:30b                      │
+│                                                   │
+│  [העתק פקודה]    [בדוק שוב]                      │
+└──────────────────────────────────────────────────┘
+```
+
+אם הכל תקין — status bar:
+```
+✅ Ollama v0.x  |  ✅ Qwen3-Coder-30B מותקן
+```
+
+**בדיקת הצלחה שלב 5:**
+- [ ] אם Ollama חסר → הודעה + קישור
+- [ ] אם מודל חסר → הוראת `ollama pull`
+- [ ] אם הכל תקין → agent רץ
+- [ ] פלט זורם לPanel
+
+---
+
+### שלב 6: ניקוי
+
+- [ ] **6.1** הסר קוד Claude CLI ישן מ-`code_agent.rs`
+- [ ] **6.2** הסר `check_claude_cli` / `check_cline_cli` מ-`lib.rs`
+- [ ] **6.3** עדכן i18n:
   ```json
   {
-    "codeMode": "Code Mode",
+    "codeMode": "Code",
     "chatMode": "Chat",
-    "projectFolder": "Project Folder",
-    "runAgent": "Send",
-    "stopAgent": "Stop",
-    "askPermissions": "Ask permissions",
-    "autoAcceptEdits": "Auto accept edits",
-    "installClineCli": "Install Cline CLI",
-    "noModelServer": "No model server detected"
+    "selectCodeModel": "בחר מודל קוד",
+    "ollamaNotFound": "Ollama לא מותקן",
+    "modelNotInstalled": "מודל לא מותקן",
+    "installOllama": "התקן Ollama",
+    "checkAgain": "בדוק שוב",
+    "copyCommand": "העתק פקודה"
   }
   ```
-
-- [ ] **6.4** עדכן tests:
-  - `SettingsMenu.test.tsx`
-  - `useTools.test.ts`
-  - `general.test.tsx`, `interface.test.tsx`
-  - הוסף test ל-code-mode-store (כולל permissionMode)
-
-- [ ] **6.5** בדיקות end-to-end:
-  - [ ] Chat Mode → עובד ללא regression
-  - [ ] Toggle Chat ↔ Code → חלק
-  - [ ] Code Mode: Browse folder → תיקיה נבחרת
-  - [ ] Code Mode: Auto accept edits → Cline רץ עם --yolo
-  - [ ] Code Mode: Ask permissions → Cline מבקש אישור
-  - [ ] Code Mode: Stop → agent נעצר
-  - [ ] Code Mode: בלי תיקיה → הודעת שגיאה
-  - [ ] Code Mode: בלי Cline CLI → הודעת התקנה
+- [ ] **6.4** עדכן tests
 
 ---
 
-## שלב 7: Setup & Onboarding
-
-**מטרה:** חוויית onboarding חלקה — אם Cline לא מותקן, להנחות.
-
-### משימות
-
-- [ ] **7.1** בכניסה ל-Code Mode, בדוק:
-  ```typescript
-  const cliVersion = await invoke('check_cline_cli')
-  // sessionPort מ-port discovery
-  ```
-
-- [ ] **7.2** אם Cline CLI לא מותקן:
-  ```
-  ┌─────────────────────────────────────────┐
-  │  ⚠️ Cline CLI Required                   │
-  │                                          │
-  │  Code Mode uses Cline CLI engine         │
-  │  with your local model.                  │
-  │                                          │
-  │  [Install: npm i -g @cline/cline]        │
-  │  [Check Again]                           │
-  └──────────────────────────────────────────┘
-  ```
-
-- [ ] **7.3** אם model session לא נמצא:
-  ```
-  ┌─────────────────────────────────────────┐
-  │  ⚠️ No Running Model Session             │
-  │                                          │
-  │  Load a model in the Models tab first.   │
-  │                                          │
-  │  [Go to Models]  [Check Again]           │
-  └──────────────────────────────────────────┘
-  ```
-
-- [ ] **7.4** אם הכל תקין — status bar:
-  ```
-  ✅ Cline CLI v0.x  |  ✅ Qwen2.5-Coder-32B @ 127.0.0.1:{port}
-  ```
-
----
-
-## סדר ביצוע (מעודכן)
+## סדר ביצוע
 
 ```
-✅ שלב 1: וידוא תקשורת (Claude CLI + proxy — בוצע)
-✅ שלב 2: Tauri spawner (code_agent.rs — בוצע בסיס)
-✅ שלב 3: Header toggle + store (בוצע בסיס)
-✅ שלב 4: CodeModePanel UI (בוצע בסיס)
-✅ אפיון טכני: docs/code-mode-spec/code-mode-spec.md (בוצע)
+✅ שלב 0: תשתית קיימת (code_agent.rs, store, panel, toggle)
   ↓
-⬜ שלב 2-עדכון: החלפת Claude CLI → Cline CLI ב-code_agent.rs
+⬜ שלב 1: Rust — החלפה ל-ollama launch claude
+           check_ollama + list_ollama_models + spawn_code_agent
   ↓
-⬜ שלב 3-עדכון: הוספת permissionMode לstore
+⬜ שלב 2: Store — הוספת codeModel
   ↓
-⬜ שלב 4: PermissionModeSelector component + חיבור לrun
+⬜ שלב 3: CodeModelSelector component
   ↓
-⬜ שלב 5: עדכון Output Panel לפורמט Cline + Approve/Deny
+⬜ שלב 4: Header — שילוב CodeModelSelector
   ↓
-⬜ שלב 6: ניקוי + tests
+⬜ שלב 5: CodeModePanel — חיבור + Onboarding
   ↓
-⬜ שלב 7: Onboarding (Cline CLI check)
+⬜ שלב 6: ניקוי + i18n + tests
 ```
 
-**כל שלב נבדק לפני שממשיכים הלאה.**
+**כל שלב נבדק לפני המשך.**
 
 ---
 
 ## הערות טכניות
 
-### Cline CLI Flags
+### הפקודה המדויקת
+
 ```bash
-cline \
-  --base-url http://127.0.0.1:{port}/v1 \  # OpenAI endpoint של llama-server
-  --model {model_id} \                       # שם המודל כפי שמוכר ל-llama-server
-  --json \                                   # structured JSON stream output
-  [--yolo] \                                 # auto_accept mode בלבד
-  -p "{prompt}"                              # non-interactive prompt
+# auto_accept (agent פועל בלי לשאול):
+ollama launch claude \
+  --model qwen3-coder:30b \
+  --dangerously-skip-permissions \
+  -p "תקן את הבאג בטופס..."
+
+# ask (agent שואל לפני כל פעולה):
+ollama launch claude \
+  --model qwen3-coder:30b \
+  -p "תקן את הבאג בטופס..."
 ```
 
-> **אימות נדרש:** יש לאמת את שמות ה-flags המדויקים של Cline לפני מימוש שלב 2-עדכון.
+> **לאמת לפני מימוש:** flags מדויקים של `ollama launch claude`
+> (ייתכן ש-`--dangerously-skip-permissions` הוא flag של claude ולא ollama)
 
-### Permission Mode → Flags
+### Permission Mode
 
-| permissionMode | flag | התנהגות |
-|---|---|---|
-| `ask` | ללא `--yolo` | Cline עוצר לפני כל פעולה |
-| `auto_accept` | `--yolo` | Cline פועל אוטומטית |
+| permissionMode | התנהגות |
+|---|---|
+| `ask` | agent עוצר לפני כל שינוי |
+| `auto_accept` | agent פועל אוטומטית |
 
-### מצבי הרשאות — שלב 1 (Phase 1)
+### מודלים מומלצים לפי חומרה
 
-| # | שם | icon | ערך | מימוש |
-|---|---|---|---|---|
-| 1 | Ask permissions | 🤚 | `ask` | **שלב 1** |
-| 2 | Auto accept edits | `</>` | `auto_accept` | **שלב 1** |
-| 3 | Plan mode | 📋 | `plan` | עתידי |
-| 4 | Bypass permissions | ⚠️ | `bypass` | עתידי |
-| 5 | Auto mode | ⚡ | `auto` | עתידי |
+| RAM | מודל מומלץ |
+|---|---|
+| 8 GB | `qwen2.5-coder:7b` |
+| 16 GB | `qwen3-coder:30b` |
+| 32 GB+ | `qwen3-coder-next` (80B/3B active) |
 
-### תשתית קיימת
-
-| רכיב | מיקום | סטטוס |
-|---|---|---|
-| **CodeModePanel** | `web-app/src/containers/CodeModePanel.tsx` | **קיים — בסיס** |
-| **code-mode-store** | `web-app/src/stores/code-mode-store.ts` | **קיים — צריך permissionMode** |
-| **code_agent.rs** | `src-tauri/src/core/code_agent.rs` | **קיים — צריך Cline** |
-| **ModeToggle** | `web-app/src/routes/index.tsx` | **קיים** |
-| MLX Plugin (session registry) | `src-tauri/plugins/tauri-plugin-mlx/` | קיים |
-| llamacpp Plugin | `src-tauri/plugins/tauri-plugin-llamacpp/` | קיים |
-| Vision analyzer | `web-app/src/services/pm/vision-analyzer.ts` | קיים |
-| File matcher (TF-IDF) | `web-app/src/services/pm/file-matcher.ts` | קיים |
-| Project analyzer | `web-app/src/services/pm/project-analyzer.ts` | קיים |
-| Context bundler | `web-app/src/services/pm/context-bundler.ts` | קיים |
-
-### שאלות פתוחות לפני מימוש שלב 2-עדכון
+### שאלות פתוחות
 
 | # | שאלה | עדיפות |
 |---|---|---|
-| 1 | מהם ה-flags המדויקים של Cline? (`--base-url`, `--model`, `--json`, `--yolo`) | גבוהה |
-| 2 | מהו פורמט ה-JSON stream של Cline? | גבוהה |
-| 3 | כיצד שולחים approve/deny ל-stdin של Cline? | גבוהה |
-| 4 | האם `cline` הוא שם ה-binary או שם שונה? | גבוהה |
+| 1 | מהי הפקודה המדויקת לauto-accept ב-`ollama launch claude`? | גבוהה |
+| 2 | האם `ollama launch claude` מחזיר JSON stream? | גבוהה |
+| 3 | האם אפשר לשלוח stdin ל-agent (approve/deny)? | בינונית |
+| 4 | האם `ollama launch` תומך ב-`-p` flag? | גבוהה |
