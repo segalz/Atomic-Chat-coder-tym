@@ -5,17 +5,23 @@ export type AppMode = 'chat' | 'code'
 
 export interface AgentOutputLine {
   type:
-    | 'system'
+    | 'userPrompt'
     | 'thinking'
     | 'assistant'
     | 'tool_use'
     | 'tool_result'
     | 'permission_request'
-    | 'result'
+    | 'system'
     | 'error'
     | 'done'
+    | 'diff_snapshot'
   content: string
   toolName?: string
+  patch?: string
+  paths?: string[]
+  toolCallId?: string
+  isTruncated?: boolean
+  note?: string
   timestamp: number
 }
 
@@ -25,7 +31,7 @@ interface CodeModeState {
   projectDir: string
   draftPrompt: string
   permissionMode: 'ask' | 'auto_accept'
-  selectedOllamaModel: string | null
+  codeModel: string
   lastVisionResult: {
     bestFile: string
     extractedWords: string[]
@@ -35,17 +41,19 @@ interface CodeModeState {
   // ── Runtime (not persisted) ──────────────────────
   isAgentRunning: boolean
   agentOutput: AgentOutputLine[]
+  availableCodeModels: string[]
 
   // ── Actions ──────────────────────────────────────
   setMode: (mode: AppMode) => void
   setProjectDir: (dir: string) => void
   setDraftPrompt: (text: string) => void
   setPermissionMode: (mode: 'ask' | 'auto_accept') => void
-  setSelectedOllamaModel: (model: string | null) => void
+  setCodeModel: (model: string) => void
   setVisionResult: (r: CodeModeState['lastVisionResult']) => void
   setAgentRunning: (running: boolean) => void
   appendOutput: (line: AgentOutputLine) => void
   clearOutput: () => void
+  setAvailableCodeModels: (models: string[]) => void
 }
 
 export const useCodeModeStore = create<CodeModeState>()(
@@ -56,24 +64,26 @@ export const useCodeModeStore = create<CodeModeState>()(
       projectDir: '',
       draftPrompt: '',
       permissionMode: 'ask',
-      selectedOllamaModel: null,
+      codeModel: 'qwen3-coder:30b',
       lastVisionResult: null,
 
       // Runtime
       isAgentRunning: false,
       agentOutput: [],
+      availableCodeModels: [],
 
       // Actions
       setMode: (mode) => set({ mode }),
       setProjectDir: (dir) => set({ projectDir: dir }),
       setDraftPrompt: (text) => set({ draftPrompt: text }),
       setPermissionMode: (mode) => set({ permissionMode: mode }),
-      setSelectedOllamaModel: (model) => set({ selectedOllamaModel: model }),
+      setCodeModel: (model) => set({ codeModel: model }),
       setVisionResult: (r) => set({ lastVisionResult: r }),
       setAgentRunning: (running) => set({ isAgentRunning: running }),
       appendOutput: (line) =>
         set((state) => ({ agentOutput: [...state.agentOutput, line] })),
       clearOutput: () => set({ agentOutput: [] }),
+      setAvailableCodeModels: (models) => set({ availableCodeModels: models }),
     }),
     {
       name: 'code-mode-store',
@@ -82,7 +92,7 @@ export const useCodeModeStore = create<CodeModeState>()(
         projectDir: state.projectDir,
         draftPrompt: state.draftPrompt,
         permissionMode: state.permissionMode,
-        selectedOllamaModel: state.selectedOllamaModel,
+        codeModel: state.codeModel,
         lastVisionResult: state.lastVisionResult,
       }),
     }

@@ -1,88 +1,96 @@
-import { useEffect, useState } from 'react'
-import { invoke } from '@tauri-apps/api/core'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import { Button } from '@/components/ui/button'
-import { IconRefresh } from '@tabler/icons-react'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
+import { IconChevronDown } from '@tabler/icons-react'
+import { useTranslation } from '@/i18n/react-i18next-compat'
 
 interface CodeModelSelectorProps {
-  value: string | null
+  value: string
   onChange: (model: string) => void
+  availableModels: string[]
   disabled?: boolean
 }
 
-export function CodeModelSelector({ value, onChange, disabled }: CodeModelSelectorProps) {
-  const [models, setModels] = useState<string[]>([])
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+// מודלים מומלצים ברירת מחדל
+const RECOMMENDED_MODELS = [
+  { id: 'qwen3-coder-next',       label: 'Qwen3-Coder-Next',  size: '52GB', note: 'SWE 70.6%' },
+  { id: 'qwen3-coder:30b',        label: 'Qwen3-Coder 30B',   size: '~20GB' },
+  { id: 'qwen2.5-coder:32b',      label: 'Qwen2.5-Coder 32B', size: '20GB' },
+  { id: 'qwen2.5-coder:7b',       label: 'Qwen2.5-Coder 7B',  size: '4.7GB', note: 'מהיר' },
+  { id: 'deepseek-coder-v2:16b',  label: 'DeepSeek-Coder V2', size: '9GB' },
+]
 
-  const loadModels = async () => {
-    setLoading(true)
-    setError(null)
-    try {
-      const modelList = await invoke<string[]>('list_ollama_models')
-      setModels(modelList)
-      
-      // Auto-select first model if none selected
-      if (!value && modelList.length > 0) {
-        onChange(modelList[0])
-      }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      setError(message)
-      console.error('[CodeModelSelector] Failed to list ollama models:', err)
-    } finally {
-      setLoading(false)
-    }
+export function CodeModelSelector({ value, onChange, availableModels, disabled }: CodeModelSelectorProps) {
+  const { t } = useTranslation()
+  const installed = availableModels
+  const recommended = RECOMMENDED_MODELS.filter(m => !installed.includes(m.id))
+
+  const getDisplayLabel = (modelId: string) => {
+    const rec = RECOMMENDED_MODELS.find(m => m.id === modelId)
+    return rec ? rec.label : modelId
   }
 
-  // Load models on mount
-  useEffect(() => {
-    void loadModels()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  const triggerLabel = getDisplayLabel(value)
 
   return (
-    <div className="flex items-center gap-2">
-      <Select value={value || ''} onValueChange={onChange} disabled={disabled || loading}>
-        <SelectTrigger className="w-48">
-          <SelectValue placeholder="Select model..." />
-        </SelectTrigger>
-        <SelectContent>
-          {models.length === 0 ? (
-            <SelectItem value="" disabled>
-              {loading ? 'Loading...' : error ? 'Error loading models' : 'No models available'}
-            </SelectItem>
-          ) : (
-            models.map((model) => (
-              <SelectItem key={model} value={model}>
-                {model}
-              </SelectItem>
-            ))
-          )}
-        </SelectContent>
-      </Select>
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={disabled}
+          className="gap-1.5 font-medium"
+        >
+          {triggerLabel} <IconChevronDown size={14} />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="min-w-64">
+        {installed.length > 0 && (
+          <>
+            <div className="px-2 py-1 text-xs font-medium text-muted-foreground">{t('code-mode:installed')}</div>
+            {installed.map((model) => (
+              <DropdownMenuItem
+                key={model}
+                onClick={() => onChange(model)}
+                className="flex items-center justify-between gap-2"
+              >
+                <div className="flex flex-col">
+                  <span className="font-medium">{getDisplayLabel(model)}</span>
+                  <span className="text-xs text-muted-foreground">{model}</span>
+                </div>
+                {model === value && <span>✓</span>}
+              </DropdownMenuItem>
+            ))}
+            {recommended.length > 0 && <DropdownMenuSeparator />}
+          </>
+        )}
 
-      <Button
-        variant="outline"
-        size="icon-sm"
-        onClick={loadModels}
-        disabled={loading || disabled}
-        title="Refresh models"
-      >
-        <IconRefresh size={16} />
-      </Button>
-
-      {error && (
-        <span className="text-xs text-destructive" title={error}>
-          ⚠️
-        </span>
-      )}
-    </div>
+        {recommended.length > 0 && (
+          <>
+            <div className="px-2 py-1 text-xs font-medium text-muted-foreground">{t('code-mode:recommendedNotInstalled')}</div>
+            {recommended.map((model) => (
+              <DropdownMenuItem
+                key={model.id}
+                onClick={() => onChange(model.id)}
+                className="flex items-center justify-between gap-2"
+              >
+                <div className="flex flex-col">
+                  <span className="font-medium">{model.label}</span>
+                  <span className="text-xs text-muted-foreground">
+                    {model.size} {model.note && `• ${model.note}`}
+                  </span>
+                </div>
+                <span className="text-xs text-muted-foreground">ollama pull {model.id}</span>
+              </DropdownMenuItem>
+            ))}
+          </>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
   )
 }

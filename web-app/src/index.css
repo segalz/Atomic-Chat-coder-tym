@@ -99,6 +99,10 @@
   --sidebar-accent-foreground: oklch(0.205 0 0);
   --sidebar-border: oklch(0.922 0 0);
   --sidebar-ring: oklch(0.708 0 0);
+  /* Code Mode semantic colors */
+  --green-9: oklch(0.55 0.17 145);
+  --yellow-7: oklch(0.72 0.15 75);
+  --yellow-2: oklch(0.97 0.03 90);
 }
 
 .dark {
@@ -134,6 +138,10 @@
   --sidebar-accent-foreground: oklch(0.985 0 0);
   --sidebar-border: oklch(1 0 0 / 14%);
   --sidebar-ring: oklch(0.72 0 0);
+  /* Code Mode semantic colors (dark) */
+  --green-9: oklch(0.72 0.18 145);
+  --yellow-7: oklch(0.68 0.16 70);
+  --yellow-2: oklch(0.25 0.04 75);
 }
 
 @layer base {

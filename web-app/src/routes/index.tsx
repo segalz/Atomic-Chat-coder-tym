@@ -26,6 +26,7 @@ import DropdownModelProvider from '@/containers/DropdownModelProvider'
 import { useCodeModeStore, type AppMode } from '@/stores/code-mode-store'
 import { CodeModePanel } from '@/containers/CodeModePanel'
 import { invoke } from '@tauri-apps/api/core'
+import { CodeModelSelector } from '@/components/CodeModelSelector'
 
 export const Route = createFileRoute(route.home as any)({
   component: Index,
@@ -38,12 +39,13 @@ export const Route = createFileRoute(route.home as any)({
   },
 })
 
-const modes: { key: AppMode; label: string }[] = [
-  { key: 'chat', label: 'Chat' },
-  { key: 'code', label: 'Code' },
-]
-
 function ModeToggle() {
+  const { t } = useTranslation()
+  const modes: { key: AppMode; label: string }[] = [
+    { key: 'chat', label: t('code-mode:chatMode') },
+    { key: 'code', label: t('code-mode:codeMode') },
+  ]
+
   const mode = useCodeModeStore((s) => s.mode)
   const setMode = useCodeModeStore((s) => s.setMode)
   const setAgentRunning = useCodeModeStore((s) => s.setAgentRunning)
@@ -91,6 +93,10 @@ function Index() {
   const threadModel = search.threadModel
   const { setCurrentThreadId } = useThreads()
   const mode = useCodeModeStore((s) => s.mode)
+  const codeModel = useCodeModeStore((s) => s.codeModel)
+  const setCodeModel = useCodeModeStore((s) => s.setCodeModel)
+  const availableCodeModels = useCodeModeStore((s) => s.availableCodeModels)
+  const isAgentRunning = useCodeModeStore((s) => s.isAgentRunning)
   useTools()
 
   //* После Skip без перемонтирования роутера — поднимаем флаг, иначе ре-рендер не гарантирован
@@ -138,7 +144,15 @@ function Index() {
     <div className={cn('flex h-full flex-col', mode === 'chat' && 'justify-center')}>
       <HeaderPage>
         <div className="flex items-center gap-2">
-          <DropdownModelProvider model={threadModel} />
+          {mode === 'chat' && <DropdownModelProvider model={threadModel} />}
+          {mode === 'code' && (
+            <CodeModelSelector
+              value={codeModel}
+              onChange={setCodeModel}
+              availableModels={availableCodeModels}
+              disabled={isAgentRunning}
+            />
+          )}
           <ModeToggle />
         </div>
       </HeaderPage>

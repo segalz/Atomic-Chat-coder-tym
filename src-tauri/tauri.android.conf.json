@@ -3,8 +3,8 @@
   "build": {
     "devUrl": null,
     "frontendDist": "../web-app/dist",
-    "beforeDevCommand": "cross-env IS_DEV=true IS_ANDROID=true yarn build:web",
-    "beforeBuildCommand": "cross-env IS_ANDROID=true yarn build:web"
+    "beforeDevCommand": "bash -c 'cd .. && IS_DEV=true IS_ANDROID=true yarn build:web'",
+    "beforeBuildCommand": "bash -c 'cd .. && IS_ANDROID=true yarn build:web'"
   },
   "app": {
     "security": {

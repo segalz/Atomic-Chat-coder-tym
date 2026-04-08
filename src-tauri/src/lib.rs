@@ -112,6 +112,8 @@ pub fn run() {
         // Code Agent commands
         core::code_agent::spawn_code_agent,
         core::code_agent::stop_code_agent,
+        core::code_agent::send_agent_input,
+        core::code_agent::pull_ollama_model,
         core::code_agent::check_ollama,
         core::code_agent::list_ollama_models,
         // Server commands

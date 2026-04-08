@@ -7,13 +7,15 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { ChevronDownIcon } from 'lucide-react'
+import { useTranslation } from '@/i18n/react-i18next-compat'
 
 export function PermissionModeSelector() {
+  const { t } = useTranslation()
   const permissionMode = useCodeModeStore((s) => s.permissionMode)
   const setPermissionMode = useCodeModeStore((s) => s.setPermissionMode)
   const isAgentRunning = useCodeModeStore((s) => s.isAgentRunning)
 
-  const modeLabel = permissionMode === 'ask' ? 'Ask permissions' : 'Auto accept edits'
+  const modeLabel = permissionMode === 'ask' ? t('code-mode:askPermissions') : t('code-mode:autoAcceptEdits')
 
   return (
     <DropdownMenu>
@@ -28,13 +30,13 @@ export function PermissionModeSelector() {
           checked={permissionMode === 'ask'}
           onCheckedChange={() => setPermissionMode('ask')}
         >
-          Ask permissions
+          {t('code-mode:askPermissions')}
         </DropdownMenuCheckboxItem>
         <DropdownMenuCheckboxItem
           checked={permissionMode === 'auto_accept'}
           onCheckedChange={() => setPermissionMode('auto_accept')}
         >
-          Auto accept edits
+          {t('code-mode:autoAcceptEdits')}
         </DropdownMenuCheckboxItem>
       </DropdownMenuContent>
     </DropdownMenu>

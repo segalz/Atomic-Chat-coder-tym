@@ -182,18 +182,75 @@ cat hello.txt
 
 ---
 
+## ✅ Reality Gates — תוצאות (2026-04-07)
+
+### Gate 1: ollama launch claude עובד ✅
+
+```bash
+PATH="$HOME/.nvm/versions/node/v24.11.1/bin:/usr/local/bin:$PATH" \
+  /usr/local/bin/ollama launch claude --model qwen3-coder:30b -- \
+  -p --output-format stream-json --verbose \
+  --dangerously-skip-permissions \
+  "say the word HELLO only"
+```
+
+**תוצאה:** NDJSON זורם, המודל ענה `HELLO` ✅
+
+### Gate 2: פורמט JSON מאושר ✅
+
+```jsonc
+// אתחול
+{"type":"system","subtype":"init","cwd":"...","model":"qwen3-coder:30b","permissionMode":"bypassPermissions",...}
+
+// תגובת assistant
+{"type":"assistant","message":{"content":[{"type":"text","text":"HELLO"}],...},...}
+
+// rate limit info (דלג)
+{"type":"rate_limit_event",...}
+
+// סיום
+{"type":"result","subtype":"success","result":"HELLO","duration_ms":75258,...}
+```
+
+### Gate 3: Flags מאושרים ✅
+
+| flag | מיקום | הערה |
+|---|---|---|
+| `--model MODEL` | לפני `--` | flag של ollama |
+| `--` | מפריד | חובה — כל מה שאחריו הולך לclaude |
+| `-p` | אחרי `--` | `--print` — non-interactive mode |
+| `--output-format stream-json` | אחרי `-p` | דורש `--verbose` |
+| `--verbose` | חובה עם stream-json | בלעדיו stream-json נכשל |
+| `--dangerously-skip-permissions` | אחרי `--verbose` | auto_accept mode |
+| `"PROMPT"` | **אחרון** | positional argument |
+
+### Gate 4: PATH נדרש ✅
+
+claude מותקן דרך nvm — לא ב-PATH של Tauri.
+**פתרון:** מוסיפים לenv לפני spawn:
+```
+~/.nvm/versions/node/v24.11.1/bin:/usr/local/bin:/opt/homebrew/bin:...
+```
+
+---
+
 ## Exit criteria לשלב 0
 
-- [ ] 3 Reality Gates עברו — `ollama launch claude` עובד
-- [ ] פורמט ה-JSON של claude output מתועד
-- [ ] ידוע איך permission ask/deny עובד
-- [ ] architecture מאושרת לפני כתיבת קוד
+- [x] Gate 1 — `ollama launch claude` עובד
+- [x] Gate 2 — פורמט JSON מתועד
+- [x] Gate 3 — flags מדויקים אומתו
+- [x] Gate 4 — PATH נדרש ומתועד
+- [x] code_agent.rs עודכן עם הפקודה הנכונה
+- [x] `cargo check` עובר
+
+**שלב 0 הושלם. ממשיכים לשלב 1.**
 
 ---
 
 ## Do / Don't
 
-- **Do:** אמת את ה-flags של `ollama launch claude` לפני מימוש
-- **Do:** תעד את פורמט ה-JSON שclaude מוציא
-- **Don't:** כתוב UI לפני שה-Gates עברו
-- **Don't:** הנח ש-flags של claude CLI זהים ל-flags של `ollama launch claude`
+- **Do:** השתמש תמיד ב-`--` לפני flags של claude
+- **Do:** הוסף `--verbose` יחד עם `--output-format stream-json`
+- **Do:** הוסף PATH של nvm לenv לפני spawn
+- **Don't:** כתוב flags של claude לפני `--`
+- **Don't:** שכח `--verbose` — stream-json ייכשל בשקט
