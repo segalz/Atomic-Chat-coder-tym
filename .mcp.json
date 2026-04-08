@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "CodeHelper": {
+      "command": "/Users/zvisegal/devlope/CodeHelper/venv/bin/python3",
+      "args": ["/Users/zvisegal/devlope/CodeHelper/server.py"]
+    }
+  }
+}

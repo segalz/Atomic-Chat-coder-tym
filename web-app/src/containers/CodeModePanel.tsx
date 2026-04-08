@@ -68,6 +68,7 @@ export function CodeModePanel() {
     agentOutput,
     appendOutput,
     clearOutput,
+    persistOutput,
   } = useCodeModeStore()
 
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -143,11 +144,7 @@ export function CodeModePanel() {
               break
 
             case 'result': {
-              // Claude Code CLI final result — extract the text
-              const resultText = parsed.result as string | undefined
-              if (resultText?.trim()) {
-                appendOutput({ type: 'assistant', content: resultText, timestamp: Date.now() })
-              }
+              // Content already rendered via 'assistant' events during streaming — skip to avoid duplication
               break
             }
 
@@ -244,6 +241,7 @@ export function CodeModePanel() {
               : `✗ ${t('code-mode:stopAgent')}`,
             timestamp: Date.now(),
           })
+          persistOutput()
         }
       })
       const u3 = await listen<CodeAgentErrorEvent>('code-agent-error', (event) => {
@@ -280,7 +278,7 @@ export function CodeModePanel() {
       cancelled = true
       unlisteners.forEach((u) => u())
     }
-  }, [appendOutput, setAgentRunning, t])
+  }, [appendOutput, setAgentRunning, persistOutput, t])
 
   // ── Handlers ─────────────────────────────────────────────
   const handleSelectFolder = useCallback(async () => {
@@ -308,6 +306,7 @@ export function CodeModePanel() {
     clearOutput()
     setDraftPrompt('')
     appendOutput({ type: 'userPrompt', content: promptToSend, timestamp: Date.now() })
+    persistOutput()
     setAgentRunning(true)
 
     try {
@@ -324,7 +323,7 @@ export function CodeModePanel() {
       appendOutput({ type: 'error', content: String(e), timestamp: Date.now() })
       setAgentRunning(false)
     }
-  }, [projectDir, codeModel, draftPrompt, permissionMode, clearOutput, setDraftPrompt, setAgentRunning, appendOutput, t])
+  }, [projectDir, codeModel, draftPrompt, permissionMode, clearOutput, setDraftPrompt, setAgentRunning, appendOutput, persistOutput, t])
 
   const handleStop = useCallback(async () => {
     try {

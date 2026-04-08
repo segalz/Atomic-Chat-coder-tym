@@ -25,6 +25,27 @@ export interface AgentOutputLine {
   timestamp: number
 }
 
+const AGENT_OUTPUT_STORAGE_KEY = 'code-mode-agent-output'
+
+function loadPersistedOutput(): AgentOutputLine[] {
+  try {
+    const raw = localStorage.getItem(AGENT_OUTPUT_STORAGE_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+function saveOutputToStorage(output: AgentOutputLine[]) {
+  try {
+    localStorage.setItem(AGENT_OUTPUT_STORAGE_KEY, JSON.stringify(output))
+  } catch {
+    // localStorage quota exceeded — skip silently
+  }
+}
+
 interface CodeModeState {
   // ── Persisted (session restore) ──────────────────
   mode: AppMode
@@ -38,7 +59,7 @@ interface CodeModeState {
     screenDescription: string
   } | null
 
-  // ── Runtime (not persisted) ──────────────────────
+  // ── Runtime (not persisted via zustand) ──────────
   isAgentRunning: boolean
   agentOutput: AgentOutputLine[]
   availableCodeModels: string[]
@@ -54,11 +75,13 @@ interface CodeModeState {
   appendOutput: (line: AgentOutputLine) => void
   clearOutput: () => void
   setAvailableCodeModels: (models: string[]) => void
+  /** Explicitly flush agentOutput to localStorage — call on send + done only */
+  persistOutput: () => void
 }
 
 export const useCodeModeStore = create<CodeModeState>()(
   persist(
-    (set) => ({
+    (set, get) => ({
       // Persisted
       mode: 'chat',
       projectDir: '',
@@ -69,7 +92,7 @@ export const useCodeModeStore = create<CodeModeState>()(
 
       // Runtime
       isAgentRunning: false,
-      agentOutput: [],
+      agentOutput: loadPersistedOutput(),
       availableCodeModels: [],
 
       // Actions
@@ -80,10 +103,18 @@ export const useCodeModeStore = create<CodeModeState>()(
       setCodeModel: (model) => set({ codeModel: model }),
       setVisionResult: (r) => set({ lastVisionResult: r }),
       setAgentRunning: (running) => set({ isAgentRunning: running }),
-      appendOutput: (line) =>
-        set((state) => ({ agentOutput: [...state.agentOutput, line] })),
-      clearOutput: () => set({ agentOutput: [] }),
+      appendOutput: (line) => {
+        set((state) => ({ agentOutput: [...state.agentOutput, line] }))
+        saveOutputToStorage(get().agentOutput)
+      },
+      clearOutput: () => {
+        set({ agentOutput: [] })
+        saveOutputToStorage([])
+      },
       setAvailableCodeModels: (models) => set({ availableCodeModels: models }),
+      persistOutput: () => {
+        saveOutputToStorage(get().agentOutput)
+      },
     }),
     {
       name: 'code-mode-store',
