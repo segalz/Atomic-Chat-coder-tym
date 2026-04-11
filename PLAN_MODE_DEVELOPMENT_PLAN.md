@@ -61,7 +61,7 @@ User clicks RUN
       ▼
 ┌─ Stage 2: Vision (CONDITIONAL — only if image was attached) ─────────┐
 │  Rust → POST http://localhost:11434/v1/chat/completions              │
-│  Model: VISION_MODEL (qwen2.5vl:7b-q5_K_M)                         │
+│  Model: VISION_MODEL (qwen2.5vl:7b)                         │
 │  Input: base64 image + translated prompt                             │
 │  Output: text description of UI state / visible issue               │
 │  Emits: plan-stage-progress { stage: "vision", status: "done|skipped" }│
@@ -133,7 +133,7 @@ and merges user overrides at startup.
 
 [models]
 translator  = "qwen2.5:14b-instruct-q5_K_M"
-vision      = "qwen2.5vl:7b-q5_K_M"
+vision      = "qwen2.5vl:7b"
 navigator   = "qwen3.5:35b-a3b-q4_K_M"
 architect   = "qwen3.5:35b-a3b-q4_K_M"
 
