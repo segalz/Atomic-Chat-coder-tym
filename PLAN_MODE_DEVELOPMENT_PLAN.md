@@ -4,7 +4,7 @@
 > **Goal:** Transform the existing "Code Mode" (which runs `ollama launch claude` as an
 > agentic coder) into a **pure planning tool**. The user describes a bug or feature
 > (in Hebrew or English), optionally attaches a screenshot, and the pipeline produces a
-> structured Markdown execution plan. **No file is ever written, no code is ever executed.**
+> structured Markdown execution plan. **No project files are modified and no write-capable shell/tool execution inside the target project is allowed.**
 >
 > The generated plan is displayed in the panel and can be copied to the clipboard.
 > The user then takes it and runs it elsewhere (e.g. another Claude Code session, a
@@ -64,7 +64,7 @@ User clicks RUN
 │  Model: VISION_MODEL (qwen2.5vl:7b-q5_K_M)                         │
 │  Input: base64 image + translated prompt                             │
 │  Output: text description of UI state / visible issue               │
-│  Emits: plan-stage-progress { stage: "vision", status: "done|skip" }│
+│  Emits: plan-stage-progress { stage: "vision", status: "done|skipped" }│
 └──────────────────────────────────────────────────────────────────────┘
       │
       ▼
@@ -86,7 +86,7 @@ User clicks RUN
 │       --output-format stream-json                                    │
 │       --verbose                                                      │
 │       --allowedTools "Read,LS,Glob,Grep"                            │
-│       --disallowedTools "Write,Edit,MultiEdit,NotebookEdit,Bash"    │
+│       --disallowedTools "Write,Edit,MultiEdit,NotebookEdit,Bash,WebFetch,WebSearch" │
 │       "{MEGA_PROMPT}"                                                │
 │                                                                      │
 │  Reuses existing streaming infrastructure:                           │
@@ -128,7 +128,7 @@ and merges user overrides at startup.
 ```toml
 # Planner pipeline model configuration.
 # To override, copy this file to:
-#   macOS: ~/Library/Application Support/com.atomic-chat.app/planner-config.toml
+#   macOS: ~/Library/Application Support/chat.atomic.app/planner-config.toml
 # Changes take effect after restarting the app.
 
 [models]
@@ -153,7 +153,7 @@ max_context_tokens   = 32000
 New file: `src-tauri/src/core/planner_config.rs`
 
 ```rust
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ModelConfig {
     pub translator: String,
     pub vision:     String,
@@ -161,7 +161,7 @@ pub struct ModelConfig {
     pub architect:  String,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OllamaConfig {
     pub base_url:            String,
     pub api_path:            String,
@@ -169,13 +169,13 @@ pub struct OllamaConfig {
     pub max_retries:         u8,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PipelineConfig {
     pub max_file_tree_lines: usize,
     pub max_context_tokens:  usize,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PlannerConfig {
     pub models:   ModelConfig,
     pub ollama:   OllamaConfig,
@@ -186,7 +186,7 @@ impl PlannerConfig {
     /// Load config: user override first, fall back to bundled default.
     pub fn load(app_handle: &tauri::AppHandle) -> Self {
         // 1. Try user override at app_config_dir/planner-config.toml
-        // 2. Fall back to bundled src-tauri/resources/planner-config.toml
+        // 2. Fall back to bundled resource_dir/resources/planner-config.toml
         // 3. If both fail, use hardcoded defaults
         // (implementation: toml::from_str on file contents)
     }
@@ -209,10 +209,10 @@ pub fn get_planner_config(app: tauri::AppHandle) -> Result<PlannerConfig, String
 | `code-agent-done` | `{ exit_code, success }` | Pipeline completion |
 | `code-agent-error` | `{ message }` | Fatal errors |
 
-### New events (stages 1–3 progress)
+### New events (pipeline progress)
 | Event | Payload | Used for |
 |-------|---------|---------|
-| `plan-stage-progress` | `{ stage: "translate"\|"vision"\|"navigate", status: "running"\|"done"\|"skipped", detail?: String }` | Progress indicator in UI |
+| `plan-stage-progress` | `{ stage: "translate"\|"vision"\|"navigate"\|"architect", status: "running"\|"done"\|"skipped"\|"warning"\|"fallback"\|"error", detail?: String }` | Progress indicator + non-fatal warnings/fallbacks |
 
 ---
 
@@ -236,7 +236,7 @@ pub async fn run_plan_pipeline<R: Runtime>(
 ```
 1. validate_workspace(&project_dir)           // existing helper
 2. check_not_root()                            // existing helper
-3. Guard: no agent already running             // reuse child_arc check
+3. Guard: no pipeline already running          // dedicated running flag, not only child process check
 
 4. STAGE 1 — Translate
    app.emit("plan-stage-progress", { stage: "translate", status: "running" })
@@ -266,6 +266,7 @@ pub async fn run_plan_pipeline<R: Runtime>(
             detail: file_hints.join(", ") })
 
 7. STAGE 4 — Architect (ollama launch claude, read-only)
+   app.emit("plan-stage-progress", { stage: "architect", status: "running" })
    build_mega_prompt(translated, vision_analysis, file_hints, project_dir)
    spawn ollama launch claude
      --model architect_model
@@ -275,6 +276,7 @@ pub async fn run_plan_pipeline<R: Runtime>(
         "{mega_prompt}"
    Store child in state.child (same as before)
    Stream stdout → app.emit("code-agent-output", ...) (identical to today)
+   On process exit success → app.emit("plan-stage-progress", { stage: "architect", status: "done" })
 ```
 
 ---
@@ -384,7 +386,8 @@ setAgentRunning, setMode, setProjectDir, setDraftPrompt, setVisionResult
    ```tsx
    // onDragOver, onDrop handlers on the textarea wrapper div
    // Accept: image/png, image/jpeg, image/webp
-   // On drop: invoke('get_file_path_from_drop', event) → setAttachedImagePath(path)
+   // On drop: read file.path from dataTransfer items/files (Tauri non-standard File.path)
+   // (no new invoke command required)
    // Show: small thumbnail or filename pill with an ✕ to clear
    ```
 
@@ -399,7 +402,7 @@ setAgentRunning, setMode, setProjectDir, setDraftPrompt, setVisionResult
    ```tsx
    // Extract all AgentOutputLine where type === 'assistant'
    // Join their content and copy to clipboard
-   // Label: t('plan-mode:copyPlan')
+   // Label: t('code-mode:copyPlan')
    ```
 
 ### Change
@@ -414,6 +417,7 @@ setAgentRunning, setMode, setProjectDir, setDraftPrompt, setVisionResult
 - Tool/thinking/assistant output rendering (Stage 4 emits the same NDJSON)
 - `handleSelectFolder` (project dir picker)
 - `code-agent-output` / `code-agent-done` / `code-agent-error` event listeners
+- Keep plain `assistant` line fallback parsing for non-NDJSON outputs (needed for future Gemini fallback path)
 
 ---
 
@@ -428,8 +432,8 @@ const modes = [
 
 // After
 const modes = [
-  { key: 'chat',  label: t('plan-mode:chatMode') },
-  { key: 'plan',  label: t('plan-mode:planMode') },
+  { key: 'chat',  label: t('code-mode:chatMode') },
+  { key: 'plan',  label: t('code-mode:planMode') },
 ]
 ```
 
@@ -446,7 +450,7 @@ The conditional rendering at line ~148:
 
 ## 11. i18n Changes
 
-### `en/code-mode.json` — add/rename keys
+### `en/code-mode.json` — add/rename keys (keep existing namespace to avoid broad i18n regression)
 
 ```json
 {
@@ -491,15 +495,20 @@ No new functionality added yet.
    - Update `partialize` accordingly
 2. In `routes/index.tsx`:
    - Change mode keys `'code'` → `'plan'`
-   - Update labels to use new i18n keys
+   - Update labels to use `code-mode` namespace keys (`chatMode`, `planMode`)
+   - Remove `CodeModelSelector` usage + `codeModel` store selectors
+   - Update switch-stop logic to stop when leaving `'plan'` (not `'code'`)
 3. In `CodeModePanel.tsx`:
    - Remove `<CodeModelSelector />`
    - Remove `<PermissionModeSelector />`
    - Remove `handlePullModel`, `isPullingModel`, `pullStatus`
    - Remove `ollamaStatus` state and its `useEffect`
    - Remove `diff_snapshot` listener and rendering
-   - Comment out `handleSend` body (keep shell, replace with TODO)
-4. Update `en/code-mode.json` and `he/code-mode.json` with new keys
+   - Keep `handleSend` functional by wiring it to `run_plan_pipeline` (or temporary backend stub), do not leave TODO/no-op UI paths
+4. Update auxiliary references that still depend on removed store fields:
+   - `web-app/src/components/CodeModeStoreTest.tsx`
+   - Any `mode === 'code'` checks outside `routes/index.tsx`
+5. Update `en/code-mode.json` and `he/code-mode.json` with new keys
 
 **Verification:**
 - [ ] App compiles without errors (`yarn dev:web`)
@@ -517,14 +526,16 @@ No new functionality added yet.
 1. Create `src-tauri/resources/planner-config.toml` with defaults from Section 4.1
 2. Ensure `tauri.conf.json` includes the resource (check `bundle.resources`)
 3. Create `src-tauri/src/core/planner_config.rs` with `PlannerConfig` struct (Section 4.2)
-4. Add `get_planner_config` Tauri command
-5. Register command in `lib.rs`
-6. (Optional) Add a small frontend config display in Plan Mode footer for debugging
+4. Add `toml` crate dependency (`Cargo.toml`) for parsing planner config
+5. Add `get_planner_config` Tauri command
+6. Register command in `lib.rs` (desktop invoke handler)
+7. (Optional) Add a small frontend config display in Plan Mode footer for debugging
 
 **Verification:**
 - [ ] `cargo check` passes
 - [ ] `invoke('get_planner_config')` returns valid JSON with model names
 - [ ] Editing `planner-config.toml` and restarting app picks up new values
+- [ ] Bundled build reads from `resource_dir/resources/planner-config.toml` (not source path)
 
 ---
 
@@ -534,8 +545,7 @@ No new functionality added yet.
 **Tasks:**
 1. In `CodeModePanel.tsx`:
    - Add `onDragOver`, `onDrop` handlers to the textarea wrapper `<div>`
-   - Use Tauri's `convertFileSrc` or path extraction from drop event to get the
-     absolute file path
+   - Use path extraction from drop event (`File.path`) to get absolute file path
    - Call `setAttachedImagePath(path)` on successful drop
    - Show image preview: small thumbnail below the textarea with an ✕ clear button
    - Show a dashed border on drag-over
@@ -573,17 +583,19 @@ as HTTP calls to Ollama. No `ollama launch claude` yet.
    - `ollama_chat_with_image(config, model, prompt, image_path) → Result<String, String>`
      Reads file, base64-encodes it, sends multimodal message
    - `scan_file_tree(project_dir, max_lines) → String`
-     Walks directory with `walkdir` or `std::fs::read_dir`, skips `node_modules`,
+     Walks directory recursively (prefer `std::fs` to minimize new deps), skips `node_modules`,
      `.git`, `target`, `dist`, `.expo` — returns tree string
    - `detect_explicit_paths(text) → Vec<String>`
-     Regex: look for patterns like `src/...`, `./...`, `components/...` in translated text
+     Heuristic path scan (or `regex` crate if explicitly added): look for patterns like `src/...`, `./...`, `components/...`
 
 2. Implement `run_plan_pipeline` command (stub first, then fill stages):
+   - Add a dedicated pipeline-running guard in shared state (do not rely only on `state.child`)
    - Stage 1: call `ollama_chat` with translator model + system prompt
    - Stage 2: call `ollama_chat_with_image` if `image_path.is_some()`
    - Stage 3: call `ollama_chat` with navigator model + file tree
      Parse JSON array from response (robust: try `serde_json::from_str`, on failure
      extract first `[...]` substring)
+   - If pipeline intentionally stops at Stage 3 in this phase, emit `code-agent-done` and clear running flag so UI does not stay stuck
 
 3. Register `run_plan_pipeline` in `lib.rs`
 
@@ -631,6 +643,7 @@ as HTTP calls to Ollama. No `ollama launch claude` yet.
      ```
    - Reuse the existing PATH extension logic (nvm/volta dirs) from `spawn_code_agent`
    - Store child in `state.child` (same `CodeAgentState`)
+   - Emit `plan-stage-progress` for architect (`running`/`done`/`error`)
    - Stream stdout → `code-agent-output` events (identical to today)
    - On process exit → `code-agent-done` event (identical to today)
 
@@ -640,6 +653,9 @@ as HTTP calls to Ollama. No `ollama launch claude` yet.
 
 3. Verify `--allowedTools` is properly scoped: test that the agent reads files but
    cannot write them.
+4. On fatal failures in any stage, emit both:
+   - `code-agent-error` with user-facing message
+   - `code-agent-done` with `success: false` to guarantee frontend state cleanup
 
 **Verification:**
 - [ ] Full pipeline runs end-to-end: Translate → Vision → Navigate → Planning
@@ -669,8 +685,10 @@ as HTTP calls to Ollama. No `ollama launch claude` yet.
    ```
 3. Style the copy button prominently (not just an icon — a visible labeled button)
 4. Add stage progress indicator (from Phase 3) finalized with proper styling
-5. The `plan-stage-progress` events should also add lines to `agentOutput` with
-   `type: 'system'` so the output log shows stage transitions
+5. If stage transitions should appear in the output log, do **not** use hidden `system` rows.
+   Choose one:
+   - Render `system` rows visibly in `OutputLine`, or
+   - Append visible assistant/status rows for stage transitions
 
 **Verification:**
 - [ ] After pipeline completes, "Copy Plan" button is visible
@@ -686,7 +704,10 @@ as HTTP calls to Ollama. No `ollama launch claude` yet.
 **Tasks:**
 
 1. Pre-flight check when Plan Mode opens (`useEffect` on `mode === 'plan'`):
-   - `invoke('check_ollama')` → if fails: show banner "Ollama not found — install at ollama.com"
+   - `invoke('check_ollama')` verifies binary exists/version
+   - Add `invoke('check_ollama_health')` (new command) to verify daemon responds (e.g. `/api/tags` or `/v1/models`)
+   - If binary missing: show install banner
+   - If binary exists but daemon unavailable: show "Ollama is not running"
    - No model availability check in UI (user manages models via CLI)
 
 2. Error cases to handle explicitly:
@@ -698,7 +719,7 @@ as HTTP calls to Ollama. No `ollama launch claude` yet.
    | Stage 3 — invalid JSON from navigator | Logged to console; pipeline continues with empty hints |
    | Stage 4 — `ollama launch claude` not found | "Claude Code CLI not found. Run: `npm i -g @anthropic-ai/claude-code`" |
    | Stage 4 — architect timeout | "Planning timed out. The model may need more time — try again." |
-   | Project dir not an Expo project | "No `app.json` or `app.config.js` found. Select an Expo project folder." |
+   | Project dir not an Expo project | Warning only: "Expo markers not found (`app.json` / `app.config.js` / expo dep). Plan quality may be lower." |
 
 3. Expo project validation in Rust (inside `run_plan_pipeline`):
    ```rust
@@ -725,7 +746,10 @@ as HTTP calls to Ollama. No `ollama launch claude` yet.
    `permissionMode`, `diff_snapshot`, `pull_ollama_model` in the frontend)
 3. Update `README.md` Status section: replace "Code Mode (agentic coding)" with
    "Plan Mode (development planning)"
-4. Add minimal test: verify `run_plan_pipeline` returns an error for a non-existent
+4. Add persisted-state migration guard:
+   - If persisted `mode === 'code'`, coerce to `'plan'` on hydration
+   - Remove stale persisted keys (`codeModel`, `permissionMode`) safely
+5. Add minimal test: verify `run_plan_pipeline` returns an error for a non-existent
    project directory
 
 **Verification:**
@@ -738,8 +762,9 @@ as HTTP calls to Ollama. No `ollama launch claude` yet.
 ---
 
 ### Phase 8 — Gemini CLI Primary + Ollama Fallback (Stage 4)
-**Goal:** Use Gemini CLI (Gemini 2.5 Pro / 3.1 Pro) as the primary architect engine.
+**Goal:** Use Gemini CLI as the primary architect engine.
 If Gemini is unavailable or fails, fall back transparently to `ollama launch claude`.
+Keep the same product invariant: no project file modifications.
 
 > **Why Phase 8 (last):** Phases 1–7 deliver a fully working product using the Ollama
 > path. Phase 8 upgrades Stage 4 to a cloud model without touching any other phase.
@@ -749,10 +774,9 @@ If Gemini is unavailable or fails, fall back transparently to `ollama launch cla
 
 #### 8.1 — How Gemini CLI Works (Reference Implementation)
 
-From `PromptMasterAiAgentIOS`, the proven command is:
+Use non-interactive command execution from the selected project directory:
 
 ```bash
-cd {projectRoot}
 gemini -y --include-directories {projectRoot} -p '{prompt}' -o text
 ```
 
@@ -768,51 +792,56 @@ Output is **plain text** (the plan as Markdown). Much simpler to render than `ol
 
 ---
 
-#### 8.2 — Project Config Files (Auto-Created)
+#### 8.2 — Thinking Budget via `~/.gemini/settings.json`
 
-Before every Gemini plan run, create two files in `{projectRoot}`:
+There is no `--thinking-budget` CLI flag in Gemini CLI. The only way to set
+`thinkingBudget: 32768` (maximum) is via a `settings.json` config file.
 
-**`.gemini/settings.json`** — routes to Pro model + max thinking:
-```json
-{
-  "general.plan.modelRouting": true,
-  "thinkingConfig": {
-    "thinkingBudget": 32768
-  }
+**Solution:** Write the settings file to the **user's home directory** (`~/.gemini/`),
+not to the Expo project. This restores full thinking budget control without touching
+the target project at all.
+
+```rust
+async fn ensure_gemini_user_config() -> Result<(), String> {
+    let home = dirs::home_dir()
+        .ok_or("Cannot resolve home directory")?;
+    let gemini_dir = home.join(".gemini");
+    tokio::fs::create_dir_all(&gemini_dir).await
+        .map_err(|e| format!("Cannot create ~/.gemini: {}", e))?;
+
+    let settings_path = gemini_dir.join("settings.json");
+
+    // Read existing settings or start fresh
+    let mut settings: serde_json::Value = if settings_path.exists() {
+        let raw = tokio::fs::read_to_string(&settings_path).await
+            .unwrap_or_else(|_| "{}".to_string());
+        serde_json::from_str(&raw).unwrap_or(serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+
+    // Patch in planner settings without overwriting existing user values
+    settings["thinkingConfig"]["thinkingBudget"] = serde_json::json!(32768);
+
+    tokio::fs::write(&settings_path, serde_json::to_string_pretty(&settings).unwrap())
+        .await
+        .map_err(|e| format!("Cannot write ~/.gemini/settings.json: {}", e))?;
+
+    Ok(())
 }
 ```
 
-`general.plan.modelRouting: true` is what forces **Gemini 2.5 Pro / 3.1 Pro** instead of Flash.
-Without it the CLI may use a weaker model. If the file already exists, patch in missing keys only
-(do not overwrite existing user settings).
+Call `ensure_gemini_user_config().await?` at the start of `run_stage4_gemini`,
+before spawning the process.
 
-**`.gemini/commands/plan.toml`** — custom `/plan` slash command:
-```toml
-description = "Generate a code-grounded implementation plan"
-prompt = """
-You are a Lead Software Strategist — an architect, NOT an implementer.
+**Why this is safe:**
+- `~/.gemini/` is Gemini CLI's own global config directory — writing there is expected
+- The Expo project is never touched
+- Existing user settings are preserved (patch, not overwrite)
+- If the write fails, return `Err` → fallback to Ollama (no silent degradation)
+- Optional environment variables
 
-ABSOLUTE CONSTRAINTS:
-- You MUST NOT write, modify, create, or delete any files.
-- You MUST NOT run shell commands or git operations.
-- Your ONLY output is a structured Markdown implementation plan.
-
-METHODOLOGY:
-1. Read the relevant source files using your file-reading tools.
-2. Understand existing patterns, naming conventions, and architecture.
-3. Produce a concrete, file-specific plan with actual function names and line references.
-4. Self-review before presenting: verify every file path exists and every pattern is real.
-
-OUTPUT STRUCTURE:
-# Execution Plan: [short title]
-## Understanding the Goal
-## Investigation & Analysis (file:line references)
-## Proposed Strategy (files → changes → dependency order → risks)
-## Self-Review Checklist
-
-{{args}}
-"""
-```
+This keeps Phase 8 aligned with the planner's "no project modifications" contract.
 
 ---
 
@@ -844,7 +873,7 @@ async fn run_stage4_architect(
 }
 ```
 
-**`run_stage4_gemini`** — creates config files, spawns Gemini CLI:
+**`run_stage4_gemini`** — spawns Gemini CLI in non-interactive mode:
 
 ```rust
 async fn run_stage4_gemini(...) -> Result<(), String> {
@@ -852,51 +881,22 @@ async fn run_stage4_gemini(...) -> Result<(), String> {
     let gemini_bin = find_binary("gemini")
         .ok_or("gemini CLI not found")?;
 
-    // 2. Create .gemini/ config files in projectRoot
-    ensure_gemini_plan_config(project_dir).await?;
-
-    // 3. Build shell script (same technique as PromptMasterAiAgentIOS)
-    //    Needed to set working directory correctly and handle PATH
-    let script = format!(
-        "#!/bin/zsh\ncd '{}'\ngemini -y --include-directories '{}' -p '{}' -o text",
-        project_dir,
-        project_dir,
-        shell_escape(mega_prompt)
-    );
-    let script_path = write_temp_script(&script).await?;
-
-    // 4. Spawn and stream
-    let mut cmd = Command::new("/bin/zsh");
-    cmd.arg(&script_path);
+    // 2. Spawn directly (no project file writes)
+    let mut cmd = Command::new(&gemini_bin);
+    cmd.current_dir(project_dir);
+    cmd.arg("-y")
+       .arg("--include-directories").arg(project_dir)
+       .arg("-p").arg(mega_prompt)
+       .arg("-o").arg("text");
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     cmd.env("PATH", build_extended_path()); // same nvm/volta dirs
 
-    // 5. Stream stdout as plain text lines
+    // 3. Stream stdout as plain text lines
     //    Each line → emit "code-agent-output" with a synthetic assistant JSON
     //    so the existing frontend event handler renders it correctly:
     //    { "type": "assistant", "message": { "content": [{ "type": "text", "text": line }] } }
-    spawn_and_stream_plain_text(cmd, app, state, script_path).await
-}
-```
-
-**`ensure_gemini_plan_config`** — creates `.gemini/settings.json` + `plan.toml`:
-```rust
-async fn ensure_gemini_plan_config(project_dir: &str) -> Result<(), String> {
-    let gemini_dir = PathBuf::from(project_dir).join(".gemini");
-    tokio::fs::create_dir_all(&gemini_dir).await
-        .map_err(|e| format!("Cannot create .gemini dir: {}", e))?;
-
-    // settings.json — patch if exists, create if not
-    let settings_path = gemini_dir.join("settings.json");
-    // ... merge JSON (serde_json::Value patch)
-
-    // commands/plan.toml
-    let commands_dir = gemini_dir.join("commands");
-    tokio::fs::create_dir_all(&commands_dir).await.ok();
-    let plan_toml_path = commands_dir.join("plan.toml");
-    // ... write PLAN_TOML_TEMPLATE constant
-    Ok(())
+    spawn_and_stream_plain_text(cmd, app, state).await
 }
 ```
 
@@ -934,7 +934,6 @@ an incomplete one from Gemini.
 | `gemini` binary not in PATH | ✅ |
 | Gemini process exit code ≠ 0 (any reason, even with partial stdout) | ✅ |
 | Timeout (>300s) | ✅ |
-| `.gemini/` config write fails | ✅ |
 | Any `Err` from `run_stage4_gemini` | ✅ |
 
 Implementation — `run_stage4_gemini` must return `Err` on any non-zero exit:
@@ -950,13 +949,13 @@ if !status.success() {
 
 #### 8.5 — Output Line Filtering
 
-Strip these Gemini CLI noise lines before emitting to frontend (same as PromptMaster):
+Strip only stable Gemini CLI banner/noise lines before emitting to frontend:
 - `Loaded cached credentials`
 - `YOLO mode`
 - `Plan mode` / `Entering plan mode`
 - `Using model:`
-- `I will ...` / `I'll ...` / `Let me ...`
-- `Error executing tool` (when tool fails but output continues)
+
+Do **not** strip arbitrary natural-language lines like "I will..." — that can remove real plan content.
 
 ---
 
@@ -965,29 +964,56 @@ Strip these Gemini CLI noise lines before emitting to frontend (same as PromptMa
 Add to `planner-config.toml`:
 ```toml
 [gemini]
-cli_path          = "gemini"      # override if not in PATH
-timeout_ms        = 300000        # 5 min — Pro + max thinking needs more time
-thinking_budget   = 32768
-enabled           = true          # set to false to always use Ollama
+cli_path          = "gemini"             # override if gemini is not in PATH
+model             = "gemini-3.1-pro"     # explicit model — REQUIRED.
+                                         # Without this, CLI defaults to "Auto (Gemini 3)"
+                                         # which may choose gemini-3-flash for "simple" tasks.
+                                         # We always want Pro for code planning.
+thinking_budget   = 32768               # maximum thinking tokens — written to ~/.gemini/settings.json
+                                         # before each run (not to the Expo project)
+timeout_ms        = 300000               # 5 min — Pro with max thinking needs more time
+enabled           = true                 # set to false to always use Ollama directly
 ```
 
-Add to `PlannerConfig` Rust struct accordingly.
+**Why `--model` is required here:**
+Gemini CLI's default mode is "Auto (Gemini 3)" — it picks between `gemini-3.1-pro` and
+`gemini-3-flash` based on what it considers task complexity. Code planning analysis will
+sometimes be classified as "simple enough for Flash." Passing `--model gemini-3.1-pro`
+bypasses Auto routing and guarantees Pro every time.
+
+Add to `GeminiConfig` Rust struct:
+```rust
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GeminiConfig {
+    pub cli_path:   String,
+    pub model:      String,
+    pub timeout_ms: u64,
+    pub enabled:    bool,
+}
+```
+
+Spawn command with explicit model:
+```bash
+gemini --model {config.gemini.model} -y --include-directories {project_dir} -p '{prompt}' -o text
+```
 
 ---
 
-#### 8.7 — `.gemini/` in `.gitignore`
+#### 8.7 — Write Boundary Summary
 
-Add `.gemini/` to the Expo project's `.gitignore` awareness:
-- The auto-created config files are **project-specific temporary config**
-- They should not be committed to the Expo project's git history
-- Note in the plan output or a UI tooltip: "Plan Mode creates `.gemini/` in your project folder. You may add it to `.gitignore`."
+| Location | Gemini path writes? | Notes |
+|----------|-------------------|-------|
+| `{expo_project}/` | ❌ Never | Core contract — no exceptions |
+| `~/.gemini/settings.json` | ✅ Yes | Gemini CLI's own global config — safe to write |
+| `/tmp/` | ✅ Yes (optional) | Only if temp script needed — cleaned up immediately |
+
+The Expo project is read-only. `~/.gemini/` is Gemini's own directory.
 
 ---
 
 #### Phase 8 Verification
 
 - [ ] `gemini -y --include-directories . -p 'hello' -o text` works from terminal in the Expo project
-- [ ] `.gemini/settings.json` is created before each run with `modelRouting: true`
 - [ ] Output streams into the panel correctly (plain text wrapped as synthetic NDJSON)
 - [ ] Gemini plan uses file:line references from the actual Expo project
 - [ ] **Fallback test A — binary missing**: rename `gemini` binary temporarily → run → Ollama path activates with "fallback" notice in the panel
