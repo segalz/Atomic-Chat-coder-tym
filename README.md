@@ -21,12 +21,11 @@ Open-source ChatGPT alternative. Run local LLMs or connect cloud models — with
 ## Status (April 2026)
 
 - **Chat Mode** is the primary, stable experience (local + cloud models).
-- **Code Mode (agentic coding)** is **actively being built** in this repo. Expect rough edges and breaking changes.
-- Code Mode design + progress docs live in:
-  - `CODE_MODE_IMPLEMENTATION_PLAN.md`
-  - `CODE_MODE_PHASE1_REPORT.md`
-  - `CODE_MODE_PHASE6_TESTING_GUIDE.md`
-  - `CODE_MODE_PHASE6_VERIFICATION.md`
+- **Plan Mode (development planning)** is **actively being built** in this repo. It transforms user prompts into structured Markdown execution plans.
+- Plan Mode design + progress docs live in:
+  - `PLAN_MODE_DEVELOPMENT_PLAN.md`
+  - `PLAN_MODE_PROGRESS.md`
+  - `CODE_MODE_PHASE6_VERIFICATION.md` (Legacy reference)
 
 ---
 
@@ -69,7 +68,7 @@ Atomic Chat is a **Tauri** desktop app with a React UI and a native Rust backend
 ### Modes
 
 - **Chat Mode**: standard chat UX backed by the selected provider/model (local or cloud).
-- **Code Mode (WIP)**: a coding agent UX that aims to match CLI agent capabilities (plan → act → tool-use → code changes → tests) while being driven from the UI.
+- **Plan Mode (WIP)**: a planning agent UX that transforms your request into a detailed Markdown execution plan, grounded in your local project code.
 
 ### Local API
 

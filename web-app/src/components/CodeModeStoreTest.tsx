@@ -9,13 +9,13 @@ export function CodeModeStoreTest() {
     mode,
     projectDir,
     draftPrompt,
-    permissionMode,
+    attachedImagePath,
     isAgentRunning,
     agentOutput,
     setMode,
     setProjectDir,
     setDraftPrompt,
-    setPermissionMode,
+    setAttachedImagePath,
     setAgentRunning,
     appendOutput,
     clearOutput,
@@ -23,13 +23,13 @@ export function CodeModeStoreTest() {
 
   return (
     <div style={{ padding: '20px', border: '2px solid blue', margin: '10px' }}>
-      <h2>Code Mode Store Test</h2>
+      <h2>Plan Mode Store Test</h2>
 
       <div>
         <h3>Persistent State:</h3>
         <p>
           <strong>Mode:</strong> {mode}{' '}
-          <button onClick={() => setMode(mode === 'chat' ? 'code' : 'chat')}>
+          <button onClick={() => setMode(mode === 'chat' ? 'plan' : 'chat')}>
             Toggle
           </button>
         </p>
@@ -53,13 +53,9 @@ export function CodeModeStoreTest() {
           />
         </p>
         <p>
-          <strong>Permission Mode:</strong> {permissionMode}{' '}
+          <strong>Attached Image Path:</strong> {attachedImagePath || '(empty)'}{' '}
           <button
-            onClick={() =>
-              setPermissionMode(
-                permissionMode === 'ask' ? 'auto_accept' : 'ask'
-              )
-            }
+            onClick={() => setAttachedImagePath(attachedImagePath ? null : '/tmp/example.png')}
           >
             Toggle
           </button>

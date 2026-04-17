@@ -120,16 +120,24 @@ export default class llamacpp_extension extends AIEngine {
   llamacpp_env: string = ''
   readonly providerId: string = 'llamacpp'
 
+  private static isConfiguringBackends = false;
+
   private config: LlamacppConfig
   private providerPath!: string
   private apiSecret: string = 'JustAskNow'
-  private isConfiguringBackends: boolean = false
   private isUpdatingBackend: boolean = false
   private loadingModels = new Map<string, Promise<SessionInfo>>() // Track loading promises
   private unlistenValidationStarted?: () => void
 
   override async onLoad(): Promise<void> {
     super.onLoad() // Calls registerEngine() from AIEngine
+
+    if (llamacpp_extension.isConfiguringBackends) {
+      logger.info(
+        'configureBackends already in progress, skipping duplicate call'
+      )
+      return
+    }
 
     let settings = structuredClone(SETTINGS) // Clone to modify settings definition before registration
 
@@ -175,10 +183,13 @@ export default class llamacpp_extension extends AIEngine {
       events.emit(DownloadEvent.onModelValidationStarted, event.payload)
     })
 
+    llamacpp_extension.isConfiguringBackends = true;
     //* configureBackends может долго качать движок — не await, иначе весь UI ждёт завершения.
     void this.configureBackends().catch((err) => {
       //! Раньше отклонённый промис терялся; без лога сложно понять вечный «loading» в настройках.
       logger.error('configureBackends failed:', err)
+    }).finally(() => {
+      llamacpp_extension.isConfiguringBackends = false;
     })
   }
 
@@ -319,6 +330,7 @@ export default class llamacpp_extension extends AIEngine {
   }
 
   async configureBackends(): Promise<void> {
+    logger.info('Starting configureBackends');
     if (this.isConfiguringBackends) {
       logger.info(
         'configureBackends already in progress, skipping duplicate call'
@@ -330,12 +342,16 @@ export default class llamacpp_extension extends AIEngine {
 
     try {
       // Install bundled backend from app resources if no local backends exist
+      logger.info('Trying to install bundled backend');
       const bundledBackendString = await this.tryInstallBundledBackend()
+      logger.info(`Bundled backend string: ${bundledBackendString}`);
 
       let version_backends: { version: string; backend: string }[] = []
 
       try {
+        logger.info('Listing supported backends');
         version_backends = await listSupportedBackends()
+        logger.info(`Found ${version_backends.length} supported backends`);
         if (version_backends.length === 0) {
           throw new Error(
             'No supported backend binaries found for this system. Backend selection and auto-update will be unavailable.'
@@ -353,11 +369,14 @@ export default class llamacpp_extension extends AIEngine {
 
       // Get stored backend preference
       const storedBackendType = this.getStoredBackendType()
+      logger.info(`Stored backend type: ${storedBackendType}`);
       let bestAvailableBackendString = ''
 
       // Calculate the "best" backend first, as it's used for fallback and defaults
+      logger.info('Determining best backend');
       bestAvailableBackendString =
         await this.determineBestBackend(version_backends)
+      logger.info(`Best available backend: ${bestAvailableBackendString}`);
 
       if (storedBackendType) {
         // Delegate migration check to Rust
@@ -533,6 +552,7 @@ export default class llamacpp_extension extends AIEngine {
       }
     } finally {
       this.isConfiguringBackends = false
+      logger.info('Finished configureBackends');
     }
   }
 

@@ -3,6 +3,10 @@ pub mod app;
 pub mod cli;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub mod code_agent;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub mod plan_agent;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub mod planner_config;
 pub mod downloads;
 pub mod extensions;
 pub mod filesystem;

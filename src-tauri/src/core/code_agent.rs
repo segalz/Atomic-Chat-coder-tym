@@ -9,30 +9,32 @@ use tokio::process::Command;
 use tokio::sync::Mutex;
 use std::time::Duration;
 
-/// State tracking the running code agent process.
-/// Only one agent can run at a time — the UI disables Run while active.
+/// State tracking the running code agent process and plan pipeline.
+/// Only one agent / pipeline can run at a time — the UI disables Run while active.
 #[derive(Default)]
 pub struct CodeAgentState {
-    child: Arc<Mutex<Option<tokio::process::Child>>>,
-    stdin: Arc<Mutex<Option<tokio::process::ChildStdin>>>,
+    pub child:            Arc<Mutex<Option<tokio::process::Child>>>,
+    pub stdin:            Arc<Mutex<Option<tokio::process::ChildStdin>>>,
+    /// True while Stages 1–3 HTTP calls are in-flight (no child process yet).
+    pub pipeline_running: Arc<Mutex<bool>>,
+    /// Cancel token for in-flight pipeline stages; `take` + `cancel` to abort.
+    pub pipeline_cancel:  Arc<Mutex<Option<tokio_util::sync::CancellationToken>>>,
 }
 
 #[derive(Clone, Serialize)]
-#[allow(dead_code)]
-struct CodeAgentOutputEvent {
-    line: String,
+pub struct CodeAgentOutputEvent {
+    pub line: String,
 }
 
 #[derive(Clone, Serialize)]
-struct CodeAgentDoneEvent {
-    exit_code: Option<i32>,
-    success: bool,
+pub struct CodeAgentDoneEvent {
+    pub exit_code: Option<i32>,
+    pub success: bool,
 }
 
 #[derive(Clone, Serialize)]
-#[allow(dead_code)]
-struct CodeAgentErrorEvent {
-    message: String,
+pub struct CodeAgentErrorEvent {
+    pub message: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -121,13 +123,9 @@ fn generate_diff(workspace: &Path, paths: &[String]) -> Result<String, String> {
 }
 
 /// Validate workspace before running agent.
-/// 
-/// Checks:
-/// - Path exists
-/// - Path is a directory
-/// - Path is not root
-/// - Path is canonicalized (symlinks resolved)
-fn validate_workspace(project_dir: &str) -> Result<PathBuf, String> {
+///
+/// Checks: path exists, is a directory, not root, canonicalized.
+pub fn validate_workspace(project_dir: &str) -> Result<PathBuf, String> {
     let path = PathBuf::from(project_dir);
 
     // Must exist
@@ -154,7 +152,7 @@ fn validate_workspace(project_dir: &str) -> Result<PathBuf, String> {
 
 /// Check that process is not running as root (Unix only).
 #[cfg(unix)]
-fn check_not_root() -> Result<(), String> {
+pub fn check_not_root() -> Result<(), String> {
     if unsafe { libc::geteuid() } == 0 {
         return Err("Refusing to run code agent as root".to_string());
     }
@@ -162,8 +160,7 @@ fn check_not_root() -> Result<(), String> {
 }
 
 #[cfg(not(unix))]
-fn check_not_root() -> Result<(), String> {
-    // On Windows, we'd check if running as admin, but for now just pass
+pub fn check_not_root() -> Result<(), String> {
     Ok(())
 }
 
@@ -504,7 +501,33 @@ pub async fn stop_code_agent<R: Runtime>(
             log::info!("[CodeAgent] Stopped by user");
             Ok(())
         }
-        None => Err("No code agent is running".to_string()),
+        None => {
+            // Release child lock before acquiring pipeline locks.
+            drop(child_guard);
+
+            // Check if a pre-stage pipeline (Stages 1–3) is in-flight.
+            let mut running_guard = state.pipeline_running.lock().await;
+            if *running_guard {
+                // Claim the "done" emit — set running to false so the pipeline task skips it.
+                *running_guard = false;
+                drop(running_guard);
+
+                let mut cancel_guard = state.pipeline_cancel.lock().await;
+                if let Some(token) = cancel_guard.take() {
+                    token.cancel();
+                }
+                drop(cancel_guard);
+
+                let _ = app.emit(
+                    "code-agent-done",
+                    CodeAgentDoneEvent { exit_code: None, success: false },
+                );
+                log::info!("[CodeAgent] Pipeline (stages 1–3) cancelled by user");
+                Ok(())
+            } else {
+                Err("No code agent is running".to_string())
+            }
+        }
     }
 }
 
@@ -654,7 +677,7 @@ mod tests {
     }
 }
 
-fn find_ollama_binary() -> Option<PathBuf> {
+pub fn find_ollama_binary() -> Option<PathBuf> {
     if let Some(paths) = env::var_os("PATH") {
         for entry in env::split_paths(&paths) {
             let candidate = entry.join("ollama");
@@ -680,6 +703,33 @@ fn find_ollama_binary() -> Option<PathBuf> {
         let candidate = PathBuf::from(path);
         if candidate.is_file() {
             return Some(candidate);
+        }
+    }
+
+    None
+}
+
+pub fn find_claude_binary() -> Option<PathBuf> {
+    if let Some(paths) = env::var_os("PATH") {
+        for entry in env::split_paths(&paths) {
+            let candidate = entry.join("claude");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    let home = dirs::home_dir().unwrap_or_default();
+    let candidates = [
+        PathBuf::from("/usr/local/bin/claude"),
+        PathBuf::from("/opt/homebrew/bin/claude"),
+        home.join(".volta/bin/claude"),
+        home.join(".nvm/versions/node/v22.13.1/bin/claude"),
+    ];
+
+    for candidate in &candidates {
+        if candidate.is_file() {
+            return Some(candidate.clone());
         }
     }
 

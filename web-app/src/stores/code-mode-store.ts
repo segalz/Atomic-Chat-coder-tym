@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 
-export type AppMode = 'chat' | 'code'
+export type AppMode = 'chat' | 'plan'
 
 export interface AgentOutputLine {
   type:
@@ -14,14 +14,9 @@ export interface AgentOutputLine {
     | 'system'
     | 'error'
     | 'done'
-    | 'diff_snapshot'
+    | 'plan_stage'
   content: string
   toolName?: string
-  patch?: string
-  paths?: string[]
-  toolCallId?: string
-  isTruncated?: boolean
-  note?: string
   timestamp: number
 }
 
@@ -51,8 +46,7 @@ interface CodeModeState {
   mode: AppMode
   projectDir: string
   draftPrompt: string
-  permissionMode: 'ask' | 'auto_accept'
-  codeModel: string
+  attachedImagePath: string | null
   lastVisionResult: {
     bestFile: string
     extractedWords: string[]
@@ -62,19 +56,16 @@ interface CodeModeState {
   // ── Runtime (not persisted via zustand) ──────────
   isAgentRunning: boolean
   agentOutput: AgentOutputLine[]
-  availableCodeModels: string[]
 
   // ── Actions ──────────────────────────────────────
   setMode: (mode: AppMode) => void
   setProjectDir: (dir: string) => void
   setDraftPrompt: (text: string) => void
-  setPermissionMode: (mode: 'ask' | 'auto_accept') => void
-  setCodeModel: (model: string) => void
+  setAttachedImagePath: (path: string | null) => void
   setVisionResult: (r: CodeModeState['lastVisionResult']) => void
   setAgentRunning: (running: boolean) => void
   appendOutput: (line: AgentOutputLine) => void
   clearOutput: () => void
-  setAvailableCodeModels: (models: string[]) => void
   /** Explicitly flush agentOutput to localStorage — call on send + done only */
   persistOutput: () => void
 }
@@ -86,21 +77,18 @@ export const useCodeModeStore = create<CodeModeState>()(
       mode: 'chat',
       projectDir: '',
       draftPrompt: '',
-      permissionMode: 'ask',
-      codeModel: 'qwen3-coder:30b',
+      attachedImagePath: null,
       lastVisionResult: null,
 
       // Runtime
       isAgentRunning: false,
       agentOutput: loadPersistedOutput(),
-      availableCodeModels: [],
 
       // Actions
       setMode: (mode) => set({ mode }),
       setProjectDir: (dir) => set({ projectDir: dir }),
       setDraftPrompt: (text) => set({ draftPrompt: text }),
-      setPermissionMode: (mode) => set({ permissionMode: mode }),
-      setCodeModel: (model) => set({ codeModel: model }),
+      setAttachedImagePath: (path) => set({ attachedImagePath: path }),
       setVisionResult: (r) => set({ lastVisionResult: r }),
       setAgentRunning: (running) => set({ isAgentRunning: running }),
       appendOutput: (line) => {
@@ -111,7 +99,6 @@ export const useCodeModeStore = create<CodeModeState>()(
         set({ agentOutput: [] })
         saveOutputToStorage([])
       },
-      setAvailableCodeModels: (models) => set({ availableCodeModels: models }),
       persistOutput: () => {
         saveOutputToStorage(get().agentOutput)
       },
@@ -122,10 +109,14 @@ export const useCodeModeStore = create<CodeModeState>()(
         mode: state.mode,
         projectDir: state.projectDir,
         draftPrompt: state.draftPrompt,
-        permissionMode: state.permissionMode,
-        codeModel: state.codeModel,
+        attachedImagePath: state.attachedImagePath,
         lastVisionResult: state.lastVisionResult,
       }),
+      onRehydrateStorage: () => (state) => {
+        if (state && (state.mode as string) === 'code') {
+          state.setMode('plan')
+        }
+      },
     }
   )
 )

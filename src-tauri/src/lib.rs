@@ -111,11 +111,14 @@ pub fn run() {
         core::system::commands::clear_claude_code_env,
         // Code Agent commands
         core::code_agent::spawn_code_agent,
+        core::plan_agent::run_plan_pipeline,
+        core::plan_agent::check_ollama_health,
         core::code_agent::stop_code_agent,
         core::code_agent::send_agent_input,
         core::code_agent::pull_ollama_model,
         core::code_agent::check_ollama,
         core::code_agent::list_ollama_models,
+        core::planner_config::get_planner_config,
         // Server commands
         core::server::commands::start_server,
         core::server::commands::stop_server,

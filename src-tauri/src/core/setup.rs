@@ -31,6 +31,8 @@ pub fn install_extensions<R: Runtime>(app: tauri::AppHandle<R>, force: bool) -> 
         return Ok(());
     }
 
+    log::info!("Starting extension installation process.");
+
     let extensions_path = get_jan_extensions_path(app.clone());
     let pre_install_path = app
         .path()
@@ -47,18 +49,21 @@ pub fn install_extensions<R: Runtime>(app: tauri::AppHandle<R>, force: bool) -> 
     }
     log::info!("Installing extensions. Clean up: {clean_up}");
     if !clean_up && extensions_path.exists() {
+        log::info!("Extensions directory already exists and clean_up is false. Skipping installation.");
         return Ok(());
     }
 
     // Attempt to remove extensions folder
     if extensions_path.exists() {
+        log::info!("Removing existing extensions directory: {:?}", extensions_path);
         fs::remove_dir_all(&extensions_path).unwrap_or_else(|_| {
-            log::info!("Failed to remove existing extensions folder, it may not exist.");
+            log::warn!("Failed to remove existing extensions folder, it may not exist or there might be a permission issue.");
         });
     }
 
     // Attempt to create it again
     if !extensions_path.exists() {
+        log::info!("Creating extensions directory: {:?}", extensions_path);
         fs::create_dir_all(&extensions_path).map_err(|e| e.to_string())?;
     }
 
@@ -71,17 +76,21 @@ pub fn install_extensions<R: Runtime>(app: tauri::AppHandle<R>, force: bool) -> 
         vec![]
     };
 
+    log::info!("Reading extensions from pre-install directory: {:?}", pre_install_path);
     for entry in fs::read_dir(&pre_install_path).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path();
+        log::info!("Processing file: {:?}", path);
 
         if path.extension().is_some_and(|ext| ext == "tgz") {
+            log::info!("Found .tgz file: {:?}", path);
             let tar_gz = File::open(&path).map_err(|e| e.to_string())?;
             let gz_decoder = GzDecoder::new(tar_gz);
             let mut archive = Archive::new(gz_decoder);
 
             let mut extension_name = None;
             let mut extension_manifest = None;
+            log::info!("Extracting manifest from: {:?}", path);
             extract_extension_manifest(&mut archive)
                 .map_err(|e| e.to_string())
                 .and_then(|manifest| match manifest {
@@ -94,9 +103,11 @@ pub fn install_extensions<R: Runtime>(app: tauri::AppHandle<R>, force: bool) -> 
                 })?;
 
             let extension_name = extension_name.ok_or("package.json not found in archive")?;
+            log::info!("Found extension: {}", extension_name);
             let extension_dir = extensions_path.join(extension_name.clone());
             fs::create_dir_all(&extension_dir).map_err(|e| e.to_string())?;
 
+            log::info!("Extracting archive to: {:?}", extension_dir);
             let tar_gz = File::open(&path).map_err(|e| e.to_string())?;
             let gz_decoder = GzDecoder::new(tar_gz);
             let mut archive = Archive::new(gz_decoder);
@@ -113,6 +124,7 @@ pub fn install_extensions<R: Runtime>(app: tauri::AppHandle<R>, force: bool) -> 
                     let _result = entry.unpack(&target_path).map_err(|e| e.to_string())?;
                 }
             }
+            log::info!("Finished extracting archive: {:?}", path);
 
             let main_entry = extension_manifest
                 .as_ref()
@@ -144,12 +156,15 @@ pub fn install_extensions<R: Runtime>(app: tauri::AppHandle<R>, force: bool) -> 
             log::info!("Installed extension to {extension_dir:?}");
         }
     }
+    log::info!("Writing extensions.json to: {:?}", extensions_json_path);
     fs::write(
         &extensions_json_path,
         serde_json::to_string_pretty(&extensions_list).map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
+    log::info!("Finished writing extensions.json");
 
+    log::info!("Extension installation process finished.");
     Ok(())
 }
 

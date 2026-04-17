@@ -14,9 +14,7 @@
     "security": {
       "capabilities": [
         "default",
-        "log-app-window",
-        "logs-window",
-        "system-monitor-window"
+        "file-drop"
       ],
       "csp": {
         "default-src": "'self' customprotocol: asset: http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:*",
@@ -63,6 +61,6 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": ["resources/LICENSE", "resources/llamacpp-backend/"]
+    "resources": ["resources/LICENSE", "resources/llamacpp-backend/", "resources/planner-config.toml"]
   }
 }

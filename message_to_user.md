@@ -1,0 +1,1 @@
+The build issue has been resolved. I have modified the `src-tauri/capabilities/file-drop.json` file. The application now builds and runs successfully.

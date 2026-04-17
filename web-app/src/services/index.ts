@@ -118,6 +118,7 @@ class PlatformServiceHub implements ServiceHub {
     try {
       if (isPlatformTauri() && !isPlatformIOS() && !isPlatformAndroid()) {
         // Desktop Tauri
+        console.log('Starting dynamic import of Tauri services');
         const [
           themeModule,
           windowModule,
@@ -147,7 +148,9 @@ class PlatformServiceHub implements ServiceHub {
           import('./core/tauri'),
           import('./deeplink/tauri'),
         ])
+        console.log('Finished dynamic import of Tauri services');
 
+        console.log('Instantiating Tauri services');
         this.themeService = new themeModule.TauriThemeService()
         this.windowService = new windowModule.TauriWindowService()
         this.eventsService = new eventsModule.TauriEventsService()
@@ -161,7 +164,9 @@ class PlatformServiceHub implements ServiceHub {
         this.pathService = new pathModule.TauriPathService()
         this.coreService = new coreModule.TauriCoreService()
         this.deepLinkService = new deepLinkModule.TauriDeepLinkService()
+        console.log('Finished instantiating Tauri services');
       } else if (isPlatformIOS() || isPlatformAndroid()) {
+        console.log('Starting dynamic import of mobile services');
         const [
           themeModule,
           windowModule,
@@ -187,7 +192,9 @@ class PlatformServiceHub implements ServiceHub {
           import('./core/mobile'), // Use mobile-specific core service
           import('./deeplink/tauri'),
         ])
+        console.log('Finished dynamic import of mobile services');
 
+        console.log('Instantiating mobile services');
         this.themeService = new themeModule.TauriThemeService()
         this.windowService = new windowModule.TauriWindowService()
         this.eventsService = new eventsModule.TauriEventsService()
@@ -199,6 +206,7 @@ class PlatformServiceHub implements ServiceHub {
         this.pathService = new pathModule.TauriPathService()
         this.coreService = new coreModule.MobileCoreService() // Mobile service with pre-loaded extensions
         this.deepLinkService = new deepLinkModule.TauriDeepLinkService()
+        console.log('Finished instantiating mobile services');
       }
 
       this.initialized = true
@@ -209,7 +217,6 @@ class PlatformServiceHub implements ServiceHub {
       throw error
     }
   }
-
   private ensureInitialized(): void {
     if (!this.initialized) {
       throw new Error(
