@@ -92,7 +92,7 @@ export function CodeModePanel() {
 
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const [stages, setStages] = useState<StageState>(INITIAL_STAGES)
-  const [stageDetail, setStageDetail] = useState<Partial<Record<StageName, string>>>({})
+  const [_stageDetail, setStageDetail] = useState<Partial<Record<StageName, string>>>({})
   const [copied, setCopied] = useState(false)
   const [ollamaError, setOllamaError] = useState<string | null>(null)
   const [isCheckingOllama, setIsCheckingOllama] = useState(false)
@@ -265,7 +265,7 @@ export function CodeModePanel() {
           if (detail) setStageDetail((prev) => ({ ...prev, [stage]: detail }))
 
           // Append to log for visibility
-          if (status === 'done' || status === 'skipped' || status === 'warning' || status === 'fallback') {
+          if (status === 'done' || status === 'skipped' || status === 'warning') {
             const stageLabel = t(`code-mode:stage${stage.charAt(0).toUpperCase() + stage.slice(1)}` as any)
             const statusKey = status === 'done' ? 'stageDone' : status === 'skipped' ? 'stageSkipped' : status
             const statusLabel = t(`code-mode:${statusKey}` as any) || status

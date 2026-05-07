@@ -19,6 +19,8 @@ pub struct CodeAgentState {
     pub pipeline_running: Arc<Mutex<bool>>,
     /// Cancel token for in-flight pipeline stages; `take` + `cancel` to abort.
     pub pipeline_cancel:  Arc<Mutex<Option<tokio_util::sync::CancellationToken>>>,
+    /// Model name currently loaded in ollama (set on spawn, cleared on stop).
+    pub current_model:    Arc<Mutex<Option<String>>>,
 }
 
 #[derive(Clone, Serialize)]
@@ -191,6 +193,10 @@ pub async fn spawn_code_agent<R: Runtime>(
     // Clone state fields early to avoid lifetime issues with async spawn
     let child_arc = state.child.clone();
     let stdin_arc = state.stdin.clone();
+    let current_model_arc = state.current_model.clone();
+
+    // Record the model so stop_code_agent can unload it from ollama
+    *current_model_arc.lock().await = Some(ollama_model.clone());
 
     // Check if an agent is already running
     {
@@ -498,6 +504,31 @@ pub async fn stop_code_agent<R: Runtime>(
             let mut stdin_guard = state.stdin.lock().await;
             *stdin_guard = None;
 
+            // Unload the model from ollama to free VRAM/RAM.
+            // We spawn this as a background task so it doesn't block the stop response.
+            let model_to_unload = state.current_model.lock().await.take();
+            if let Some(model) = model_to_unload {
+                log::info!("[CodeAgent] Unloading model '{}' from ollama", model);
+                tokio::spawn(async move {
+                    let body = serde_json::json!({ "model": model, "keep_alive": 0 });
+                    match reqwest::Client::new()
+                        .post("http://localhost:11434/api/generate")
+                        .json(&body)
+                        .send()
+                        .await
+                    {
+                        Ok(resp) => {
+                            // Must consume the body so the request completes
+                            let _ = resp.bytes().await;
+                            log::info!("[CodeAgent] Model unloaded from ollama");
+                        }
+                        Err(e) => {
+                            log::warn!("[CodeAgent] Failed to unload model: {}", e);
+                        }
+                    }
+                });
+            }
+
             log::info!("[CodeAgent] Stopped by user");
             Ok(())
         }
@@ -649,6 +680,53 @@ pub async fn list_ollama_models() -> Result<Vec<String>, String> {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         Err(format!("ollama list failed: {}", stderr))
     }
+}
+
+/// Restart Ollama to free GPU/RAM: stop the server then start it again.
+#[tauri::command]
+pub async fn restart_ollama() -> Result<(), String> {
+    let ollama = find_ollama_binary()
+        .ok_or_else(|| "Ollama not found. Install: https://ollama.com".to_string())?;
+
+    // Stop: `ollama stop` unloads all loaded models
+    let _ = tokio::process::Command::new(&ollama)
+        .arg("stop")
+        .output()
+        .await;
+
+    // Also kill any running `ollama serve` process so RAM is fully freed
+    #[cfg(target_os = "macos")]
+    let _ = tokio::process::Command::new("pkill")
+        .args(["-f", "ollama serve"])
+        .output()
+        .await;
+
+    #[cfg(target_os = "windows")]
+    let _ = tokio::process::Command::new("taskkill")
+        .args(["/F", "/IM", "ollama.exe"])
+        .output()
+        .await;
+
+    // Small pause so the port is released
+    tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
+
+    // Start serve again in the background
+    tokio::process::Command::new(&ollama)
+        .arg("serve")
+        .spawn()
+        .map_err(|e| format!("Failed to start ollama serve: {}", e))?;
+
+    // Wait for it to become healthy (up to 5 s)
+    for _ in 0..10 {
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        if let Ok(resp) = reqwest::get("http://localhost:11434").await {
+            if resp.status().is_success() || resp.status().as_u16() == 404 {
+                return Ok(());
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

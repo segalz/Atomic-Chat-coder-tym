@@ -118,7 +118,18 @@ pub fn run() {
         core::code_agent::pull_ollama_model,
         core::code_agent::check_ollama,
         core::code_agent::list_ollama_models,
+        core::code_agent::restart_ollama,
         core::planner_config::get_planner_config,
+        core::planner_config::get_coding_agent_config,
+        // Ollama Agent (S1)
+        core::ollama_agent::start_ollama_agent,
+        core::ollama_agent::stop_ollama_agent,
+        core::ollama_agent::approve_agent_diff,
+        core::ollama_agent::reject_agent_diff,
+        // Vision Simulator Capture (S4)
+        core::sim_capture::sim_capture,
+        // Test Verification & Regression Loop (S5)
+        core::test_runner::run_agent_tests,
         // Server commands
         core::server::commands::start_server,
         core::server::commands::stop_server,
@@ -243,7 +254,10 @@ pub fn run() {
     ]);
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    let app_builder = app_builder.manage(core::code_agent::CodeAgentState::default());
+    let app_builder = app_builder
+        .manage(core::code_agent::CodeAgentState::default())
+        .manage(core::ollama_agent::OllamaAgentState::default())
+        .manage(core::test_runner::TestRunnerState::default());
 
     let app = app_builder
         .manage(AppState {

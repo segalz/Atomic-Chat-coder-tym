@@ -25,6 +25,7 @@ import { useThreads } from '@/hooks/useThreads'
 import DropdownModelProvider from '@/containers/DropdownModelProvider'
 import { useCodeModeStore, type AppMode } from '@/stores/code-mode-store'
 import { CodeModePanel } from '@/containers/CodeModePanel'
+import { CodingAgentPanel } from '@/containers/CodingAgentPanel'
 import { invoke } from '@tauri-apps/api/core'
 
 export const Route = createFileRoute(route.home as any)({
@@ -43,6 +44,7 @@ function ModeToggle() {
   const modes: { key: AppMode; label: string }[] = [
     { key: 'chat', label: t('code-mode:chatMode') },
     { key: 'plan', label: t('code-mode:planMode') },
+    { key: 'coding', label: 'Code Agent' },
   ]
 
   const mode = useCodeModeStore((s) => s.mode)
@@ -51,8 +53,8 @@ function ModeToggle() {
   const clearOutput = useCodeModeStore((s) => s.clearOutput)
 
   const handleModeChange = async (newMode: AppMode) => {
-    // If switching from Plan to Chat, stop the agent
-    if (mode === 'plan' && newMode === 'chat') {
+    // If switching away from agent modes, stop the agent
+    if ((mode === 'plan' || mode === 'coding') && newMode === 'chat') {
       try {
         await invoke('stop_code_agent')
       } catch (err) {
@@ -136,7 +138,7 @@ function Index() {
   }
 
   return (
-    <div className={cn('flex h-full flex-col', mode === 'chat' && 'justify-center')}>
+    <div className={cn('flex h-full flex-col', mode === 'chat' && 'justify-center', mode === 'coding' && 'overflow-hidden')}>
       <HeaderPage>
         <div className="flex items-center gap-2">
           {mode === 'chat' && <DropdownModelProvider model={threadModel} />}
@@ -172,6 +174,8 @@ function Index() {
             </div>
           </div>
         </div>
+      ) : mode === 'coding' ? (
+        <CodingAgentPanel />
       ) : (
         <CodeModePanel />
       )}

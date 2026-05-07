@@ -128,6 +128,9 @@ indicatif = { version = "0.17", optional = true }
 console = { version = "0.15", optional = true }
 tauri-plugin-dialog = "2.2.1"
 toml = "0.8"
+oxc_allocator = "0.68"
+oxc_parser = "0.68"
+oxc_span = "0.68"
 
 [dependencies.tauri]
 version = "2.8.5"

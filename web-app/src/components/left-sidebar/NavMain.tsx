@@ -43,6 +43,7 @@ import { useAgentMode } from '@/hooks/useAgentMode'
 import { TEMPORARY_CHAT_ID } from '@/constants/chat'
 import { PlatformShortcuts, ShortcutAction } from '@/lib/shortcuts'
 import { useCodeModeStore } from '@/stores/code-mode-store'
+import { useCodingAgentStore } from '@/stores/coding-agent-store'
 import { invoke } from '@tauri-apps/api/core'
 
 type AnimatedIconHandle =
@@ -198,6 +199,7 @@ export function NavMain() {
     setMode('chat')
     setAgentRunning(false)
     clearOutput()
+    useCodingAgentStore.getState().clearSession()
     navigate({ to: route.home })
   }
   

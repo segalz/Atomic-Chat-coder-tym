@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 
-export type AppMode = 'chat' | 'plan'
+export type AppMode = 'chat' | 'plan' | 'coding'
 
 export interface AgentOutputLine {
   type:

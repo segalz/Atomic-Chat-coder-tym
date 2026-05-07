@@ -32,11 +32,34 @@ pub struct GeminiConfig {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CodingAgentConfig {
+    pub ollama_url: String,
+    pub code_model: String,
+    pub vision_model: String,
+    pub max_iterations: u32,
+    pub auto_verify: bool,
+}
+
+impl Default for CodingAgentConfig {
+    fn default() -> Self {
+        CodingAgentConfig {
+            ollama_url: "http://localhost:11434".to_string(),
+            code_model: "qwen3-coder-next:latest".to_string(),
+            vision_model: "qwen2.5vl:7b".to_string(),
+            max_iterations: 40,
+            auto_verify: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PlannerConfig {
     pub models: ModelConfig,
     pub ollama: OllamaConfig,
     pub pipeline: PipelineConfig,
     pub gemini: GeminiConfig,
+    #[serde(default)]
+    pub coding_agent: CodingAgentConfig,
 }
 
 impl PlannerConfig {
@@ -65,6 +88,7 @@ impl PlannerConfig {
                 timeout_ms: 300_000,
                 enabled: true,
             },
+            coding_agent: CodingAgentConfig::default(),
         }
     }
 
@@ -115,4 +139,9 @@ impl PlannerConfig {
 #[tauri::command]
 pub fn get_planner_config<R: Runtime>(app: tauri::AppHandle<R>) -> Result<PlannerConfig, String> {
     Ok(PlannerConfig::load(&app))
+}
+
+#[tauri::command]
+pub fn get_coding_agent_config<R: Runtime>(app: tauri::AppHandle<R>) -> Result<CodingAgentConfig, String> {
+    Ok(PlannerConfig::load(&app).coding_agent)
 }

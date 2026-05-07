@@ -49,7 +49,7 @@ export const Tool = memo(
     className,
     state,
     open,
-    defaultOpen = false,
+    defaultOpen = true,
     onOpenChange,
     children,
     ...props

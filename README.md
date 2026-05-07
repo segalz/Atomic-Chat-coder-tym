@@ -1,4 +1,4 @@
-<img src="https://github.com/AtomicBot-ai/Atomic-Chat-HQ/raw/main/assets/logo.png" width="80" alt="Atomic Chat" />
+<img src="https://github.com/AtomicBot-ai/Atomic-Chat-HQ/raw/main/assets/logo2.png" width="80" alt="Atomic Chat" />
 
 # Atomic Chat
 
