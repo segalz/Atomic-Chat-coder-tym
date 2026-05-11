@@ -91,7 +91,7 @@ function HardwareSetup({ ollamaUrl }: { ollamaUrl: string }) {
     setPulling((p) => ({ ...p, [model]: true }))
     setPullProgress((p) => ({ ...p, [model]: 'Starting…' }))
     try {
-      await invoke('pull_ollama_model', { modelId: model, ollamaUrl })
+      await invoke('pull_ollama_model', { modelName: model, ollamaUrl })
       setInstalledModels((prev) => (prev.includes(model) ? prev : [...prev, model]))
       setPullProgress((p) => ({ ...p, [model]: 'Done' }))
     } catch (err) {
@@ -194,13 +194,11 @@ export function CodingAgentPanel() {
     appendPlanText,
     execLog, appendLog,
     addDiff,
-    pendingDiffs,
     startNewSession, loadSession, deleteSession,
     sessions,
   } = useCodingAgentStore()
 
   const textareaRef = useRef<HTMLTextAreaElement>(null)
-  const completionHandledRef = useRef(false)
   const [ollamaError, setOllamaError] = useState<string | null>(null)
   const [isCheckingOllama, setIsCheckingOllama] = useState(false)
   const [isRestartingOllama, setIsRestartingOllama] = useState(false)
@@ -301,21 +299,14 @@ export function CodingAgentPanel() {
         }
       })
 
-      // Parse raw stream-json lines from the backend and surface them in the log.
-      const uRaw = await listen<{ line: string }>('code-agent-output', (e) => {
+      // Parse raw stream-json lines from the backend and surface them in the log
+      const u_raw = await listen<{ line: string }>('code-agent-output', (e) => {
         if (cancelled) return
         const raw = e.payload.line
         try {
           const msg = JSON.parse(raw)
           const type = msg?.type
-          if (type === 'system' && msg?.subtype === 'init') {
-            const model = typeof msg.model === 'string' ? msg.model : 'model'
-            appendLog({
-              type: 'text_delta',
-              content: `Agent initialized with ${model}. Waiting for first response...`,
-              timestamp: Date.now(),
-            })
-          } else if (type === 'assistant') {
+          if (type === 'assistant') {
             const content: unknown[] = msg?.message?.content ?? []
             for (const block of content) {
               const b = block as Record<string, unknown>
@@ -328,8 +319,6 @@ export function CodingAgentPanel() {
                 })
               } else if (b.type === 'text' && typeof b.text === 'string' && b.text.trim()) {
                 appendLog({ type: 'text_delta', content: b.text as string, timestamp: Date.now() })
-              } else if (b.type === 'thinking' && typeof b.thinking === 'string' && b.thinking.trim()) {
-                appendLog({ type: 'text_delta', content: b.thinking as string, timestamp: Date.now() })
               }
             }
           } else if (type === 'user') {
@@ -348,8 +337,6 @@ export function CodingAgentPanel() {
               }
             }
           } else if (type === 'result') {
-            if (completionHandledRef.current) return
-            completionHandledRef.current = true
             setRunning(false)
             appendLog({
               type: 'done',
@@ -361,14 +348,13 @@ export function CodingAgentPanel() {
             invoke('restart_ollama').catch(() => {}).finally(() => setAgentStatus('free'))
           }
         } catch {
-          if (raw.trim()) appendLog({ type: 'text_delta', content: raw, timestamp: Date.now() })
+          // non-JSON line — show as-is
+          appendLog({ type: 'text_delta', content: raw, timestamp: Date.now() })
         }
       })
 
       const u5 = await listen<AgentDoneEvent>('code-agent-done', (e) => {
         if (!cancelled) {
-          if (completionHandledRef.current) return
-          completionHandledRef.current = true
           setRunning(false)
           appendLog({
             type: 'done',
@@ -376,8 +362,7 @@ export function CodingAgentPanel() {
             timestamp: Date.now(),
           })
           useCodingAgentStore.getState().saveCurrentSession()
-          setAgentStatus('restarting')
-          invoke('restart_ollama').catch(() => {}).finally(() => setAgentStatus('free'))
+          invoke('restart_ollama').catch(() => {})
         }
       })
 
@@ -388,9 +373,9 @@ export function CodingAgentPanel() {
       })
 
       if (cancelled) {
-        ;[uRaw, u1, u2, u3, u4, u5, u6].forEach((u) => u())
+        ;[u_raw, u1, u2, u3, u4, u5, u6].forEach((u) => u())
       } else {
-        unlisteners.push(uRaw, u1, u2, u3, u4, u5, u6)
+        unlisteners.push(u_raw, u1, u2, u3, u4, u5, u6)
       }
     }
 
@@ -428,7 +413,6 @@ export function CodingAgentPanel() {
     }
 
     startNewSession(prompt, threadId)
-    completionHandledRef.current = false
     setRunning(true)
     setAgentStatus('running')
     appendLog({ type: 'text_delta', content: `> ${prompt}`, timestamp: Date.now() })
@@ -443,7 +427,6 @@ export function CodingAgentPanel() {
     } catch (err) {
       appendLog({ type: 'error', content: String(err), timestamp: Date.now() })
       setRunning(false)
-      setAgentStatus('idle')
     }
   }, [projectDir, agentConfig, createThread, setRunning, appendLog, startNewSession])
 
@@ -498,24 +481,6 @@ export function CodingAgentPanel() {
     clearTimeout(loopTimerRef.current!)
     clearInterval(loopTickRef.current!)
   }, [setRunning])
-
-  const handleApproveDiff = useCallback(async (id: string) => {
-    try {
-      await invoke('approve_agent_diff', { callId: id })
-      useCodingAgentStore.getState().updateDiffStatus(id, 'approved')
-    } catch (err) {
-      appendLog({ type: 'error', content: String(err), timestamp: Date.now() })
-    }
-  }, [appendLog])
-
-  const handleRejectDiff = useCallback(async (id: string) => {
-    try {
-      await invoke('reject_agent_diff', { callId: id })
-      useCodingAgentStore.getState().updateDiffStatus(id, 'rejected')
-    } catch (err) {
-      appendLog({ type: 'error', content: String(err), timestamp: Date.now() })
-    }
-  }, [appendLog])
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -773,57 +738,6 @@ export function CodingAgentPanel() {
           </div>
         </div>
       </div>
-
-      {/* ── Right: Pending diffs ─────────────────────────── */}
-      {pendingDiffs.length > 0 && (
-        <aside className="w-72 shrink-0 border-l flex flex-col bg-muted/10">
-          <div className="px-3 py-2 border-b flex items-center gap-2">
-            <IconFileCode size={13} className="text-muted-foreground" />
-            <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-              Diffs ({pendingDiffs.filter((d) => d.status === 'pending').length} pending)
-            </span>
-          </div>
-          <div className="flex-1 overflow-y-auto p-2 space-y-2">
-            {pendingDiffs.map((diff) => (
-              <div key={diff.id} className="rounded-lg border bg-background/60 p-2 text-xs">
-                <p className="font-mono text-[10px] text-muted-foreground truncate mb-1" title={diff.filePath}>
-                  {diff.filePath.split('/').slice(-2).join('/')}
-                </p>
-                {diff.search && (
-                  <div className="rounded bg-red-500/10 border border-red-500/20 px-1.5 py-1 mb-1 font-mono text-[10px] text-red-400 max-h-16 overflow-hidden">
-                    -{diff.search.split('\n').slice(0, 3).join('\n')}
-                  </div>
-                )}
-                <div className="rounded bg-green-500/10 border border-green-500/20 px-1.5 py-1 mb-2 font-mono text-[10px] text-green-400 max-h-16 overflow-hidden">
-                  +{diff.replace.split('\n').slice(0, 3).join('\n')}
-                </div>
-                {diff.status === 'pending' ? (
-                  <div className="flex gap-1">
-                    <Button
-                      size="sm" variant="outline"
-                      className="flex-1 h-6 text-[10px] text-green-600 border-green-500/30 hover:bg-green-500/10"
-                      onClick={() => handleApproveDiff(diff.id)}
-                    >
-                      Approve
-                    </Button>
-                    <Button
-                      size="sm" variant="outline"
-                      className="flex-1 h-6 text-[10px] text-destructive border-destructive/30 hover:bg-destructive/10"
-                      onClick={() => handleRejectDiff(diff.id)}
-                    >
-                      Reject
-                    </Button>
-                  </div>
-                ) : (
-                  <p className={`text-[10px] text-center font-medium ${diff.status === 'approved' ? 'text-green-500' : 'text-muted-foreground'}`}>
-                    {diff.status === 'approved' ? '✓ Approved' : '✗ Rejected'}
-                  </p>
-                )}
-              </div>
-            ))}
-          </div>
-        </aside>
-      )}
 
     </div>
   )

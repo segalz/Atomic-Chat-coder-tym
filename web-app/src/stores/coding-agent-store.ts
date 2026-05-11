@@ -168,7 +168,7 @@ export const useCodingAgentStore = create<CodingAgentState>()(
               timestamp: Date.now(),
             }, ...s.sessions]
           }
-          return { sessions, execLog: [], planText: '', pendingDiffs: [], showFree: true }
+          return { sessions, showFree: true }
         })
       },
 
@@ -203,6 +203,14 @@ export const useCodingAgentStore = create<CodingAgentState>()(
         execLog: s.execLog,
         pendingDiffs: s.pendingDiffs,
       }),
+      onRehydrateStorage: () => (state) => {
+        if (state) {
+          state.isRunning = false
+          state.pendingDiffs = state.pendingDiffs.map((d) =>
+            d.status === 'pending' ? { ...d, status: 'rejected' } : d
+          )
+        }
+      },
     }
   )
 )
