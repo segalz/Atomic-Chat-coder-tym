@@ -19,6 +19,7 @@ type ThreadModel = {
 
 type SearchParams = {
   threadModel?: ThreadModel
+  newChatId?: string
 }
 import { useEffect, useState } from 'react'
 import { useThreads } from '@/hooks/useThreads'
@@ -33,6 +34,7 @@ export const Route = createFileRoute(route.home as any)({
   validateSearch: (search: Record<string, unknown>): SearchParams => {
     const result: SearchParams = {
       threadModel: search.threadModel as ThreadModel | undefined,
+      newChatId: search.newChatId as string | undefined,
     }
 
     return result
@@ -92,6 +94,7 @@ function Index() {
   const { providers } = useModelProvider()
   const search = useSearch({ from: route.home as any })
   const threadModel = search.threadModel
+  const newChatId = search.newChatId
   const { setCurrentThreadId } = useThreads()
   const mode = useCodeModeStore((s) => s.mode)
   useTools()
@@ -167,6 +170,7 @@ function Index() {
             </div>
             <div className="flex-1 shrink-0">
               <ChatInput
+                key={newChatId ?? 'new-chat'}
                 showSpeedToken={false}
                 model={threadModel}
                 initialMessage={true}

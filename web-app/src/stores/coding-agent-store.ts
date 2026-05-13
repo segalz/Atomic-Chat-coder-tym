@@ -3,6 +3,7 @@ import { persist } from 'zustand/middleware'
 
 export type ExecLogLineType =
   | 'text_delta'
+  | 'thinking'
   | 'tool_start'
   | 'tool_result'
   | 'error'
@@ -68,6 +69,77 @@ interface CodingAgentState {
   clearSession: () => void
 }
 
+function normalizeExecLog(value: unknown): ExecLogLine[] {
+  return Array.isArray(value) ? value.filter((line) => line && typeof line === 'object') as ExecLogLine[] : []
+}
+
+function normalizePendingDiffs(value: unknown): PendingDiff[] {
+  if (!Array.isArray(value)) return []
+
+  return value
+    .filter((diff) => diff && typeof diff === 'object')
+    .map((diff) => {
+      const d = diff as Partial<PendingDiff>
+      return {
+        id: typeof d.id === 'string' ? d.id : crypto.randomUUID(),
+        filePath: typeof d.filePath === 'string' ? d.filePath : '',
+        search: typeof d.search === 'string' ? d.search : '',
+        replace: typeof d.replace === 'string' ? d.replace : '',
+        status: d.status === 'approved' || d.status === 'rejected' ? d.status : 'rejected',
+      }
+    })
+}
+
+function normalizeSessions(value: unknown): CodingSession[] {
+  if (!Array.isArray(value)) return []
+
+  return value
+    .filter((session) => session && typeof session === 'object')
+    .map((session) => {
+      const s = session as Partial<CodingSession>
+      return {
+        id: typeof s.id === 'string' ? s.id : crypto.randomUUID(),
+        threadId: typeof s.threadId === 'string' ? s.threadId : undefined,
+        prompt: typeof s.prompt === 'string' ? s.prompt : 'Session',
+        projectDir: typeof s.projectDir === 'string' ? s.projectDir : '',
+        planText: typeof s.planText === 'string' ? s.planText : '',
+        execLog: normalizeExecLog(s.execLog),
+        pendingDiffs: normalizePendingDiffs(s.pendingDiffs),
+        timestamp: typeof s.timestamp === 'number' ? s.timestamp : Date.now(),
+      }
+    })
+}
+
+function migrateCodingAgentState(persistedState: unknown): Partial<CodingAgentState> {
+  if (!persistedState || typeof persistedState !== 'object') return {}
+
+  const state = persistedState as Partial<CodingAgentState>
+  return {
+    projectDir: typeof state.projectDir === 'string' ? state.projectDir : '',
+    draftPrompt: typeof state.draftPrompt === 'string' ? state.draftPrompt : '',
+    sessions: normalizeSessions(state.sessions),
+    activeSessionId: typeof state.activeSessionId === 'string' ? state.activeSessionId : null,
+    planText: typeof state.planText === 'string' ? state.planText : '',
+    execLog: normalizeExecLog(state.execLog),
+    pendingDiffs: normalizePendingDiffs(state.pendingDiffs),
+    isRunning: false,
+  }
+}
+
+function updateActiveSession(
+  state: Pick<CodingAgentState, 'activeSessionId' | 'sessions'>,
+  patch: Partial<Pick<CodingSession, 'planText' | 'execLog' | 'pendingDiffs'>>
+): CodingSession[] {
+  if (!state.activeSessionId) return state.sessions
+
+  const index = state.sessions.findIndex((session) => session.id === state.activeSessionId)
+  if (index === -1) return state.sessions
+
+  const sessions = [...state.sessions]
+  sessions[index] = { ...sessions[index], ...patch }
+  return sessions
+}
+
 export const useCodingAgentStore = create<CodingAgentState>()(
   persist(
     (set, get) => ({
@@ -85,13 +157,38 @@ export const useCodingAgentStore = create<CodingAgentState>()(
       setDraftPrompt: (text) => set({ draftPrompt: text }),
       setRunning: (v) => set(v ? { isRunning: true, showFree: false } : { isRunning: false }),
       setShowFree: (v) => set({ showFree: v }),
-      appendPlanText: (text) => set((s) => ({ planText: s.planText + text })),
-      appendLog: (line) => set((s) => ({ execLog: [...s.execLog, line] })),
-      addDiff: (diff) => set((s) => ({ pendingDiffs: [...s.pendingDiffs, diff] })),
+      appendPlanText: (text) =>
+        set((s) => {
+          const planText = s.planText + text
+          return {
+            planText,
+            sessions: updateActiveSession(s, { planText }),
+          }
+        }),
+      appendLog: (line) =>
+        set((s) => {
+          const execLog = [...s.execLog, line]
+          return {
+            execLog,
+            sessions: updateActiveSession(s, { execLog }),
+          }
+        }),
+      addDiff: (diff) =>
+        set((s) => {
+          const pendingDiffs = [...s.pendingDiffs, diff]
+          return {
+            pendingDiffs,
+            sessions: updateActiveSession(s, { pendingDiffs }),
+          }
+        }),
       updateDiffStatus: (id, status) =>
-        set((s) => ({
-          pendingDiffs: s.pendingDiffs.map((d) => (d.id === id ? { ...d, status } : d)),
-        })),
+        set((s) => {
+          const pendingDiffs = s.pendingDiffs.map((d) => (d.id === id ? { ...d, status } : d))
+          return {
+            pendingDiffs,
+            sessions: updateActiveSession(s, { pendingDiffs }),
+          }
+        }),
 
       startNewSession: (prompt, threadId) => {
         const { planText, execLog, pendingDiffs, projectDir, sessions, activeSessionId } = get()
@@ -194,6 +291,8 @@ export const useCodingAgentStore = create<CodingAgentState>()(
     }),
     {
       name: 'coding-agent-store',
+      version: 0,
+      migrate: migrateCodingAgentState,
       partialize: (s) => ({
         projectDir: s.projectDir,
         draftPrompt: s.draftPrompt,

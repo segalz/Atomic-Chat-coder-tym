@@ -1,26 +1,37 @@
-use serde::Serialize;
-use serde_json::Value;
-use std::{env, path::{Path, PathBuf}, sync::Arc};
 #[cfg(unix)]
 use libc;
-use tauri::{AppHandle, Runtime, State, Emitter};
+use serde::Serialize;
+use serde_json::Value;
+use std::{
+    env,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use tauri::{AppHandle, Emitter, Runtime, State};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::Mutex;
-use std::time::Duration;
+
+const LEGACY_AGENT_IDLE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const LEGACY_AGENT_MAX_RUNTIME: Duration = Duration::from_secs(45 * 60);
+const LEGACY_AGENT_WATCHDOG_INTERVAL: Duration = Duration::from_secs(5);
+const LEGACY_AGENT_TERMINATE_GRACE: Duration = Duration::from_secs(2);
 
 /// State tracking the running code agent process and plan pipeline.
 /// Only one agent / pipeline can run at a time — the UI disables Run while active.
 #[derive(Default)]
 pub struct CodeAgentState {
-    pub child:            Arc<Mutex<Option<tokio::process::Child>>>,
-    pub stdin:            Arc<Mutex<Option<tokio::process::ChildStdin>>>,
+    pub child: Arc<Mutex<Option<tokio::process::Child>>>,
+    pub stdin: Arc<Mutex<Option<tokio::process::ChildStdin>>>,
     /// True while Stages 1–3 HTTP calls are in-flight (no child process yet).
     pub pipeline_running: Arc<Mutex<bool>>,
     /// Cancel token for in-flight pipeline stages; `take` + `cancel` to abort.
-    pub pipeline_cancel:  Arc<Mutex<Option<tokio_util::sync::CancellationToken>>>,
+    pub pipeline_cancel: Arc<Mutex<Option<tokio_util::sync::CancellationToken>>>,
     /// Model name currently loaded in ollama (set on spawn, cleared on stop).
-    pub current_model:    Arc<Mutex<Option<String>>>,
+    pub current_model: Arc<Mutex<Option<String>>>,
+    /// Guarantees a single `code-agent-done` emission per run.
+    pub done_emitted: Arc<Mutex<bool>>,
 }
 
 #[derive(Clone, Serialize)]
@@ -55,9 +66,46 @@ struct DiffSnapshotEvent {
     tool_call_id: Option<String>,
 }
 
+#[cfg(unix)]
+fn send_legacy_process_group_signal(child_id: Option<u32>, signal: libc::c_int, action: &str) {
+    let Some(pid) = child_id else {
+        log::warn!("[CodeAgent] Cannot {}; child PID is unavailable", action);
+        return;
+    };
+
+    let result = unsafe { libc::killpg(pid as i32, signal) };
+    if result != 0 {
+        log::warn!(
+            "[CodeAgent] Failed to {} process group {}: {}",
+            action,
+            pid,
+            std::io::Error::last_os_error()
+        );
+    }
+}
+
 fn get_string_field(value: &Value, keys: &[&str]) -> Option<String> {
-    keys.iter()
-        .find_map(|key| value.get(*key).and_then(|v| v.as_str()).map(|s| s.to_string()))
+    keys.iter().find_map(|key| {
+        value
+            .get(*key)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    })
+}
+
+async fn emit_done_once<R: Runtime>(
+    app: &AppHandle<R>,
+    done_emitted: &Arc<Mutex<bool>>,
+    event: CodeAgentDoneEvent,
+) {
+    let mut done_guard = done_emitted.lock().await;
+    if *done_guard {
+        log::debug!("[CodeAgent] Skipping duplicate code-agent-done emission");
+        return;
+    }
+    *done_guard = true;
+    drop(done_guard);
+    let _ = app.emit("code-agent-done", event);
 }
 
 fn get_paths(value: &Value) -> Vec<String> {
@@ -124,6 +172,70 @@ fn generate_diff(workspace: &Path, paths: &[String]) -> Result<String, String> {
     }
 }
 
+async fn terminate_legacy_child_for_timeout(mut child: tokio::process::Child, reason: &str) {
+    let child_id = child.id();
+    log::warn!(
+        "[CodeAgent] Terminating legacy process after {} (PID: {:?})",
+        reason,
+        child_id
+    );
+
+    #[cfg(unix)]
+    {
+        send_legacy_process_group_signal(child_id, libc::SIGTERM, "terminate");
+    }
+
+    #[cfg(not(unix))]
+    {
+        if let Err(e) = child.start_kill() {
+            log::warn!("[CodeAgent] Failed to request process kill: {}", e);
+        }
+    }
+
+    let graceful_wait = tokio::time::timeout(LEGACY_AGENT_TERMINATE_GRACE, child.wait()).await;
+
+    match graceful_wait {
+        Ok(Ok(status)) => {
+            log::info!(
+                "[CodeAgent] Legacy process exited after timeout termination: {}",
+                status
+            );
+        }
+        Ok(Err(e)) => {
+            log::warn!("[CodeAgent] Error waiting for timed-out process: {}", e);
+        }
+        Err(_) => {
+            log::warn!(
+                "[CodeAgent] Legacy process did not exit after {:?}; force killing",
+                LEGACY_AGENT_TERMINATE_GRACE
+            );
+            #[cfg(unix)]
+            {
+                send_legacy_process_group_signal(child_id, libc::SIGKILL, "force kill");
+            }
+
+            #[cfg(not(unix))]
+            {
+                if let Err(e) = child.start_kill() {
+                    log::warn!("[CodeAgent] Failed to force kill timed-out process: {}", e);
+                }
+            }
+
+            match tokio::time::timeout(LEGACY_AGENT_TERMINATE_GRACE, child.wait()).await {
+                Ok(Ok(status)) => {
+                    log::info!("[CodeAgent] Legacy process force killed: {}", status);
+                }
+                Ok(Err(e)) => {
+                    log::warn!("[CodeAgent] Error reaping force-killed process: {}", e);
+                }
+                Err(_) => {
+                    log::warn!("[CodeAgent] Timed-out process was not reaped after force kill");
+                }
+            }
+        }
+    }
+}
+
 /// Validate workspace before running agent.
 ///
 /// Checks: path exists, is a directory, not root, canonicalized.
@@ -141,7 +253,8 @@ pub fn validate_workspace(project_dir: &str) -> Result<PathBuf, String> {
     }
 
     // Canonicalize (resolve symlinks and ..)
-    let canon = path.canonicalize()
+    let canon = path
+        .canonicalize()
         .map_err(|e| format!("Cannot resolve path: {}", e))?;
 
     // Cannot be root directory
@@ -194,6 +307,7 @@ pub async fn spawn_code_agent<R: Runtime>(
     let child_arc = state.child.clone();
     let stdin_arc = state.stdin.clone();
     let current_model_arc = state.current_model.clone();
+    let done_emitted_arc = state.done_emitted.clone();
 
     // Record the model so stop_code_agent can unload it from ollama
     *current_model_arc.lock().await = Some(ollama_model.clone());
@@ -205,6 +319,10 @@ pub async fn spawn_code_agent<R: Runtime>(
             return Err("A code agent is already running. Stop it first.".to_string());
         }
     }
+    {
+        let mut done_guard = done_emitted_arc.lock().await;
+        *done_guard = false;
+    }
 
     // Build the ollama launch command
     log::info!("[CodeAgent] Building ollama launch command:");
@@ -213,8 +331,9 @@ pub async fn spawn_code_agent<R: Runtime>(
     log::info!("  ollama_model: {}", ollama_model);
     log::info!("  permission_mode: {}", permission_mode);
 
-    let ollama_bin = find_ollama_binary()
-        .ok_or_else(|| "Ollama binary not found. Install ollama and ensure it is on PATH.".to_string())?;
+    let ollama_bin = find_ollama_binary().ok_or_else(|| {
+        "Ollama binary not found. Install ollama and ensure it is on PATH.".to_string()
+    })?;
 
     // Build command (Reality Gate validated 2026-04-07):
     //   ollama launch claude --model MODEL -- \
@@ -230,11 +349,11 @@ pub async fn spawn_code_agent<R: Runtime>(
         .arg("claude")
         .arg("--model")
         .arg(&ollama_model)
-        .arg("--")              // separator: everything after goes to claude, not ollama
-        .arg("-p")              // non-interactive / print mode
+        .arg("--") // separator: everything after goes to claude, not ollama
+        .arg("-p") // non-interactive / print mode
         .arg("--output-format")
-        .arg("stream-json")     // NDJSON realtime stream
-        .arg("--verbose");      // required: stream-json fails without this
+        .arg("stream-json") // NDJSON realtime stream
+        .arg("--verbose"); // required: stream-json fails without this
 
     // auto_accept → bypass all permission prompts
     if permission_mode == "auto_accept" {
@@ -278,8 +397,12 @@ pub async fn spawn_code_agent<R: Runtime>(
         .collect::<Vec<_>>()
         .join(":");
     cmd.env("PATH", format!("{}:{}", prepend, current_path));
-    log::info!("  [✓] PATH extended with node/nvm dirs ({} nvm versions found)",
-        extra_paths.iter().filter(|p| p.starts_with(&nvm_versions_dir)).count()
+    log::info!(
+        "  [✓] PATH extended with node/nvm dirs ({} nvm versions found)",
+        extra_paths
+            .iter()
+            .filter(|p| p.starts_with(&nvm_versions_dir))
+            .count()
     );
 
     // Set working directory to project (use validated workspace path)
@@ -289,6 +412,16 @@ pub async fn spawn_code_agent<R: Runtime>(
     cmd.stdin(std::process::Stdio::piped());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
+
+    #[cfg(unix)]
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setpgid(0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
 
     // Spawn the process
     let mut child = cmd.spawn().map_err(|e| {
@@ -319,17 +452,23 @@ pub async fn spawn_code_agent<R: Runtime>(
 
     log::info!("[CodeAgent] Process spawned successfully");
 
+    let last_output_at = Arc::new(Mutex::new(Instant::now()));
+
     // Stream stdout in background task
     let app_for_stdout = app.clone();
+    let stdout_last_output_at = last_output_at.clone();
     tokio::spawn(async move {
         let reader = BufReader::new(stdout);
         let mut lines = reader.lines();
 
         while let Ok(Some(line)) = lines.next_line().await {
+            *stdout_last_output_at.lock().await = Instant::now();
+
             if !line.is_empty() {
-                let _ = app_for_stdout.emit("code-agent-output", CodeAgentOutputEvent {
-                    line: line.clone(),
-                });
+                let _ = app_for_stdout.emit(
+                    "code-agent-output",
+                    CodeAgentOutputEvent { line: line.clone() },
+                );
                 log::debug!("[CodeAgent] stdout: {}", line);
 
                 if let Ok(parsed) = serde_json::from_str::<Value>(&line) {
@@ -338,7 +477,8 @@ pub async fn spawn_code_agent<R: Runtime>(
                             if let Some(tool_name) = extract_tool_name(&parsed) {
                                 if tool_name.to_lowercase().contains("write") {
                                     let paths = get_paths(&parsed);
-                                    let patch = generate_diff(&workspace, &paths).unwrap_or_default();
+                                    let patch =
+                                        generate_diff(&workspace, &paths).unwrap_or_default();
                                     let note = if patch.is_empty() {
                                         Some("Git diff unavailable or clean workspace".to_string())
                                     } else {
@@ -362,60 +502,164 @@ pub async fn spawn_code_agent<R: Runtime>(
             }
         }
 
-        // Wait for process exit.
-        // If child is None here it means stop_code_agent() already took it
-        // and will emit code-agent-done itself — skip to avoid duplicate events.
-        let exit_result = {
-            let mut child_guard = child_arc.lock().await;
-            if let Some(ref mut child) = *child_guard {
-                child.wait().await.ok()
-            } else {
-                None
-            }
-        };
-
-        // Clear the child and stdin from state
-        {
-            let mut child_guard = child_arc.lock().await;
-            *child_guard = None;
-        }
-        {
-            let mut stdin_guard = stdin_arc.lock().await;
-            *stdin_guard = None;
-        }
-
-        // Only emit done if WE waited for the process (not stop_code_agent).
-        // When stop_code_agent takes the child, exit_result is None and
-        // stop_code_agent emits its own code-agent-done.
-        if let Some(status) = exit_result {
-            log::info!(
-                "[CodeAgent] Process finished: exit_code={:?}, success={}",
-                status.code(),
-                status.success()
-            );
-            let _ = app_for_stdout.emit(
-                "code-agent-done",
-                CodeAgentDoneEvent {
-                    exit_code: status.code(),
-                    success: status.success(),
-                },
-            );
-        } else {
-            log::info!("[CodeAgent] Process was stopped externally (stop_code_agent)");
-        }
+        log::debug!("[CodeAgent] stdout stream ended");
     });
 
     // Drain stderr in background — log only, do NOT emit to UI.
     // Ollama and claude write progress/debug info to stderr that is not errors.
     // Only truly fatal messages should surface; for now log them all as warnings.
+    let stderr_last_output_at = last_output_at.clone();
     tokio::spawn(async move {
         let reader = BufReader::new(stderr);
         let mut lines = reader.lines();
 
         while let Ok(Some(line)) = lines.next_line().await {
+            *stderr_last_output_at.lock().await = Instant::now();
+
             if !line.is_empty() {
                 log::warn!("[CodeAgent] stderr: {}", line);
             }
+        }
+    });
+
+    let app_for_watchdog = app.clone();
+    let child_for_watchdog = child_arc.clone();
+    let stdin_for_watchdog = stdin_arc.clone();
+    let done_for_watchdog = done_emitted_arc.clone();
+    tokio::spawn(async move {
+        let started_at = Instant::now();
+
+        loop {
+            tokio::time::sleep(LEGACY_AGENT_WATCHDOG_INTERVAL).await;
+
+            let now = Instant::now();
+            let process_status = {
+                let mut child_guard = child_for_watchdog.lock().await;
+
+                match child_guard.as_mut() {
+                    Some(child) => match child.try_wait() {
+                        Ok(Some(status)) => {
+                            *child_guard = None;
+                            Some(Ok(status))
+                        }
+                        Ok(None) => None,
+                        Err(e) => {
+                            *child_guard = None;
+                            Some(Err(e))
+                        }
+                    },
+                    None => break,
+                }
+            };
+
+            match process_status {
+                Some(Ok(status)) => {
+                    {
+                        let mut stdin_guard = stdin_for_watchdog.lock().await;
+                        *stdin_guard = None;
+                    }
+                    log::info!(
+                        "[CodeAgent] Process finished: exit_code={:?}, success={}",
+                        status.code(),
+                        status.success()
+                    );
+                    emit_done_once(
+                        &app_for_watchdog,
+                        &done_for_watchdog,
+                        CodeAgentDoneEvent {
+                            exit_code: status.code(),
+                            success: status.success(),
+                        },
+                    )
+                    .await;
+                    break;
+                }
+                Some(Err(e)) => {
+                    {
+                        let mut stdin_guard = stdin_for_watchdog.lock().await;
+                        *stdin_guard = None;
+                    }
+                    let message = format!("Failed to read legacy code agent process status: {}", e);
+                    log::warn!("[CodeAgent] {}", message);
+                    let _ =
+                        app_for_watchdog.emit("code-agent-error", CodeAgentErrorEvent { message });
+                    emit_done_once(
+                        &app_for_watchdog,
+                        &done_for_watchdog,
+                        CodeAgentDoneEvent {
+                            exit_code: None,
+                            success: false,
+                        },
+                    )
+                    .await;
+                    break;
+                }
+                None => {}
+            }
+
+            let idle_for = {
+                let last_output_guard = last_output_at.lock().await;
+                now.duration_since(*last_output_guard)
+            };
+            let runtime = now.duration_since(started_at);
+
+            let timeout_message = if idle_for >= LEGACY_AGENT_IDLE_TIMEOUT {
+                Some(format!(
+                    "Legacy code agent timed out after {:?} with no stdout/stderr output",
+                    idle_for
+                ))
+            } else if runtime >= LEGACY_AGENT_MAX_RUNTIME {
+                Some(format!(
+                    "Legacy code agent exceeded maximum runtime of {:?}",
+                    LEGACY_AGENT_MAX_RUNTIME
+                ))
+            } else {
+                None
+            };
+
+            let Some(timeout_message) = timeout_message else {
+                let child_guard = child_for_watchdog.lock().await;
+                if child_guard.is_none() {
+                    break;
+                }
+                continue;
+            };
+
+            let child_to_terminate = {
+                let mut child_guard = child_for_watchdog.lock().await;
+                child_guard.take()
+            };
+
+            let Some(child) = child_to_terminate else {
+                break;
+            };
+
+            log::warn!("[CodeAgent] {}", timeout_message);
+            {
+                let mut stdin_guard = stdin_for_watchdog.lock().await;
+                *stdin_guard = None;
+            }
+
+            let _ = app_for_watchdog.emit(
+                "code-agent-error",
+                CodeAgentErrorEvent {
+                    message: timeout_message.clone(),
+                },
+            );
+
+            terminate_legacy_child_for_timeout(child, &timeout_message).await;
+
+            emit_done_once(
+                &app_for_watchdog,
+                &done_for_watchdog,
+                CodeAgentDoneEvent {
+                    exit_code: None,
+                    success: false,
+                },
+            )
+            .await;
+
+            break;
         }
     });
 
@@ -423,7 +667,7 @@ pub async fn spawn_code_agent<R: Runtime>(
 }
 
 /// Stop the running code agent process with proper cleanup.
-/// 
+///
 /// Termination strategy:
 /// 1. Send SIGTERM to process group (graceful shutdown)
 /// 2. Wait up to 2 seconds for process to exit
@@ -434,24 +678,23 @@ pub async fn stop_code_agent<R: Runtime>(
     app: AppHandle<R>,
     state: State<'_, CodeAgentState>,
 ) -> Result<(), String> {
+    let done_emitted_arc = state.done_emitted.clone();
     let mut child_guard = state.child.lock().await;
 
     match child_guard.take() {
         Some(mut child) => {
             let child_id = child.id();
-            log::info!("[CodeAgent] Stopping process with SIGTERM (PID: {:?})", child_id);
+            log::info!(
+                "[CodeAgent] Stopping process with SIGTERM (PID: {:?})",
+                child_id
+            );
 
             // Step 1: Send SIGTERM to the process group so child processes
             // spawned by ollama (e.g. claude) are also terminated.
             // Using a negative PID signals the whole process group.
             #[cfg(unix)]
             {
-                if let Some(pid) = child_id {
-                    unsafe {
-                        // killpg(pgid, SIGTERM) — targets the whole group
-                        libc::killpg(pid as i32, libc::SIGTERM);
-                    }
-                }
+                send_legacy_process_group_signal(child_id, libc::SIGTERM, "terminate");
             }
 
             #[cfg(not(unix))]
@@ -461,11 +704,7 @@ pub async fn stop_code_agent<R: Runtime>(
             }
 
             // Step 2: Wait up to 2 seconds for graceful shutdown
-            let sigterm_wait = tokio::time::timeout(
-                Duration::from_secs(2),
-                child.wait(),
-            )
-            .await;
+            let sigterm_wait = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
 
             match sigterm_wait {
                 Ok(Ok(status)) => {
@@ -478,8 +717,17 @@ pub async fn stop_code_agent<R: Runtime>(
                 Err(_) => {
                     // Timeout — process did not exit, force kill
                     log::warn!("[CodeAgent] Process did not exit after 2s, sending SIGKILL");
-                    if let Err(e) = child.kill().await {
-                        log::warn!("[CodeAgent] Failed to SIGKILL: {}", e);
+
+                    #[cfg(unix)]
+                    {
+                        send_legacy_process_group_signal(child_id, libc::SIGKILL, "force kill");
+                    }
+
+                    #[cfg(not(unix))]
+                    {
+                        if let Err(e) = child.kill().await {
+                            log::warn!("[CodeAgent] Failed to SIGKILL: {}", e);
+                        }
                     }
 
                     // Wait for it to be reaped
@@ -494,13 +742,15 @@ pub async fn stop_code_agent<R: Runtime>(
                 }
             }
 
-            let _ = app.emit(
-                "code-agent-done",
+            emit_done_once(
+                &app,
+                &done_emitted_arc,
                 CodeAgentDoneEvent {
                     exit_code: None,
                     success: false,
                 },
-            );
+            )
+            .await;
             let mut stdin_guard = state.stdin.lock().await;
             *stdin_guard = None;
 
@@ -549,10 +799,15 @@ pub async fn stop_code_agent<R: Runtime>(
                 }
                 drop(cancel_guard);
 
-                let _ = app.emit(
-                    "code-agent-done",
-                    CodeAgentDoneEvent { exit_code: None, success: false },
-                );
+                emit_done_once(
+                    &app,
+                    &done_emitted_arc,
+                    CodeAgentDoneEvent {
+                        exit_code: None,
+                        success: false,
+                    },
+                )
+                .await;
                 log::info!("[CodeAgent] Pipeline (stages 1–3) cancelled by user");
                 Ok(())
             } else {
@@ -613,7 +868,10 @@ pub async fn pull_ollama_model<R: Runtime>(
     let mut lines = reader.lines();
 
     while let Ok(Some(line)) = lines.next_line().await {
-        let _ = app_handle.emit("ollama-pull-progress", CodeAgentOutputEvent { line: line.clone() });
+        let _ = app_handle.emit(
+            "ollama-pull-progress",
+            CodeAgentOutputEvent { line: line.clone() },
+        );
     }
 
     let status = child
@@ -624,7 +882,10 @@ pub async fn pull_ollama_model<R: Runtime>(
     if status.success() {
         Ok(())
     } else {
-        Err(format!("Ollama pull failed with exit code {:?}", status.code()))
+        Err(format!(
+            "Ollama pull failed with exit code {:?}",
+            status.code()
+        ))
     }
 }
 

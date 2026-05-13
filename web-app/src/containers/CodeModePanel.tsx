@@ -92,7 +92,7 @@ export function CodeModePanel() {
 
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const [stages, setStages] = useState<StageState>(INITIAL_STAGES)
-  const [_stageDetail, setStageDetail] = useState<Partial<Record<StageName, string>>>({})
+  const [, setStageDetail] = useState<Partial<Record<StageName, string>>>({})
   const [copied, setCopied] = useState(false)
   const [ollamaError, setOllamaError] = useState<string | null>(null)
   const [isCheckingOllama, setIsCheckingOllama] = useState(false)

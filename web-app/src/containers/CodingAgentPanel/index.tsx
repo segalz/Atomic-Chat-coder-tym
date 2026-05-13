@@ -25,6 +25,31 @@ import { StickToBottom } from 'use-stick-to-bottom'
 import { ConversationScrollButton } from '@/components/ai-elements/conversation'
 import { Shimmer } from '@/components/ai-elements/shimmer'
 import { Tool, ToolContent, ToolHeader, ToolInput, ToolOutput } from '@/components/ai-elements/tool'
+import { Reasoning, ReasoningContent, ReasoningTrigger } from '@/components/ai-elements/reasoning'
+import {
+  getInitialCodingAgentBackend,
+  normalizeCompatDiffProposed,
+  normalizeCompatToolResult,
+  normalizeCompatToolStart,
+  normalizeDirectDiffProposed,
+  normalizeDirectToolResult,
+  normalizeDirectToolStart,
+  normalizeDone,
+  normalizeError,
+  normalizeLegacyCodeAgentOutput,
+  normalizeTextDelta,
+  type AgentDonePayload,
+  type AgentErrorPayload,
+  type CodingAgentBackend,
+  type CompatDiffProposedPayload,
+  type CompatToolResultPayload,
+  type CompatToolStartPayload,
+  type DirectDiffProposedPayload,
+  type DirectToolResultPayload,
+  type DirectToolStartPayload,
+  type NormalizedAgentEvent,
+  type TextDeltaPayload,
+} from './agent-event-adapter'
 
 // ── S6 types ─────────────────────────────────────────────────
 interface CodingAgentConfig {
@@ -177,13 +202,20 @@ function HardwareSetup({ ollamaUrl }: { ollamaUrl: string }) {
   )
 }
 
-// ── Event shapes from S1 Rust backend ────────────────────────
-interface TextDeltaEvent { text: string }
-interface ToolCallStartEvent { id: string; name: string; input: Record<string, unknown> }
-interface ToolCallResultEvent { id: string; name: string; output: string }
-interface DiffProposedEvent { id: string; file_path: string; search: string; replace: string }
-interface AgentDoneEvent { success: boolean }
-interface AgentErrorEvent { message: string }
+type AgentStatus = 'idle' | 'running' | 'restarting' | 'free' | 'failed'
+
+function formatTerminalMessage(success: boolean, errorMessage?: string | null): string {
+  if (success) return '✓ Agent finished'
+
+  const message = errorMessage?.trim()
+  if (!message) return '✗ Agent stopped'
+
+  if (/idle timeout|max(?:imum)? runtime|timed out|timeout/i.test(message)) {
+    return `✗ Agent stalled: ${message}`
+  }
+
+  return `✗ ${message}`
+}
 
 export function CodingAgentPanel() {
   const createThread = useThreads((s) => s.createThread)
@@ -204,7 +236,9 @@ export function CodingAgentPanel() {
   const [ollamaError, setOllamaError] = useState<string | null>(null)
   const [isCheckingOllama, setIsCheckingOllama] = useState(false)
   const [isRestartingOllama, setIsRestartingOllama] = useState(false)
-  const [agentStatus, setAgentStatus] = useState<'idle' | 'running' | 'restarting' | 'free'>('idle')
+  const [agentStatus, setAgentStatus] = useState<AgentStatus>('idle')
+  const [lastFailureMessage, setLastFailureMessage] = useState<string | null>(null)
+  const lastAgentErrorRef = useRef<string | null>(null)
 
   // ── Loop scheduler ────────────────────────────────────────
   const [loopPopoverOpen, setLoopPopoverOpen] = useState(false)
@@ -217,6 +251,7 @@ export function CodingAgentPanel() {
   const loopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const loopTickRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [agentConfig, setAgentConfig] = useState<CodingAgentConfig | null>(null)
+  const [agentBackend] = useState<CodingAgentBackend>(() => getInitialCodingAgentBackend())
 
   useEffect(() => {
     invoke<CodingAgentConfig>('get_coding_agent_config').then(setAgentConfig).catch(() => {})
@@ -252,145 +287,161 @@ export function CodingAgentPanel() {
 
   useEffect(() => { checkOllama() }, [checkOllama])
 
-  // ── Subscribe to S1 events ────────────────────────────────
+  const clearLoopSchedule = useCallback(() => {
+    clearTimeout(loopTimerRef.current!)
+    clearInterval(loopTickRef.current!)
+    setLoopCountdown(null)
+  }, [])
+
+  const finishAgentRun = useCallback((success: boolean, errorMessage?: string | null) => {
+    const terminalMessage = formatTerminalMessage(success, errorMessage)
+
+    setRunning(false)
+    appendLog({
+      type: success ? 'done' : 'error',
+      content: terminalMessage,
+      timestamp: Date.now(),
+    })
+
+    if (!success) {
+      setLastFailureMessage(terminalMessage)
+      if (loopEnabled) {
+        clearLoopSchedule()
+        setLoopEnabled(false)
+        setLoopPrompt('')
+        appendLog({
+          type: 'error',
+          content: 'Loop stopped after failed agent run.',
+          timestamp: Date.now(),
+        })
+      }
+    }
+
+    useCodingAgentStore.getState().saveCurrentSession()
+    setAgentStatus('restarting')
+    invoke('restart_ollama').catch(() => {}).finally(() => setAgentStatus(success ? 'free' : 'failed'))
+  }, [appendLog, clearLoopSchedule, loopEnabled, setRunning])
+
+  const handleNormalizedAgentEvent = useCallback((event: NormalizedAgentEvent) => {
+    switch (event.type) {
+      case 'text_delta':
+        appendPlanText(event.text)
+        if (event.text.trim()) {
+          appendLog({
+            type: 'text_delta',
+            content: event.text,
+            timestamp: Date.now(),
+          })
+        }
+        break
+      case 'thinking':
+        if (event.text.trim()) {
+          appendLog({
+            type: 'thinking',
+            content: event.text,
+            timestamp: Date.now(),
+          })
+        }
+        break
+      case 'tool_start':
+        appendLog({
+          type: 'tool_start',
+          content: JSON.stringify(event.input),
+          toolName: event.name,
+          timestamp: Date.now(),
+        })
+        break
+      case 'tool_result':
+        appendLog({
+          type: 'tool_result',
+          content: event.isError ? `Error: ${event.output}` : event.output,
+          toolName: event.name,
+          timestamp: Date.now(),
+        })
+        break
+      case 'diff_proposed':
+        addDiff({
+          id: event.id,
+          filePath: event.filePath,
+          search: event.search,
+          replace: event.replace,
+          status: 'pending',
+        })
+        appendLog({
+          type: 'text_delta',
+          content: `Diff proposed for ${event.filePath} — awaiting approval`,
+          timestamp: Date.now(),
+        })
+        break
+      case 'done':
+        if (completionHandledRef.current) return
+        completionHandledRef.current = true
+        finishAgentRun(event.success, event.success ? null : (event.error ?? lastAgentErrorRef.current ?? 'Agent stopped by user'))
+        break
+      case 'error':
+        lastAgentErrorRef.current = event.message
+        appendLog({ type: 'error', content: event.message, timestamp: Date.now() })
+        break
+    }
+  }, [addDiff, appendLog, appendPlanText, finishAgentRun])
+
+  // ── Subscribe to normalized backend events ───────────────
   useEffect(() => {
     let cancelled = false
     const unlisteners: (() => void)[] = []
 
     const setup = async () => {
-      const u1 = await listen<TextDeltaEvent>('coding-agent-text-delta', (e) => {
-        if (!cancelled) appendPlanText(e.payload.text)
+      const u1 = await listen<TextDeltaPayload>('coding-agent-text-delta', (e) => {
+        if (!cancelled) handleNormalizedAgentEvent(normalizeTextDelta(e.payload))
       })
 
-      const u2 = await listen<ToolCallStartEvent>('coding-agent-tool-start', (e) => {
-        if (!cancelled) {
-          appendLog({
-            type: 'tool_start',
-            content: JSON.stringify(e.payload.input ?? {}),
-            toolName: e.payload.name,
-            timestamp: Date.now(),
-          })
-        }
+      const u2 = await listen<CompatToolStartPayload>('coding-agent-tool-start', (e) => {
+        if (!cancelled) handleNormalizedAgentEvent(normalizeCompatToolStart(e.payload))
       })
 
-      const u3 = await listen<ToolCallResultEvent>('coding-agent-tool-result', (e) => {
-        if (!cancelled) {
-          appendLog({
-            type: 'tool_result',
-            content: e.payload.output,
-            toolName: e.payload.name,
-            timestamp: Date.now(),
-          })
-        }
+      const u3 = await listen<CompatToolResultPayload>('coding-agent-tool-result', (e) => {
+        if (!cancelled) handleNormalizedAgentEvent(normalizeCompatToolResult(e.payload))
       })
 
-      const u4 = await listen<DiffProposedEvent>('coding-agent-diff-proposed', (e) => {
-        if (!cancelled) {
-          addDiff({
-            id: e.payload.id,
-            filePath: e.payload.file_path,
-            search: e.payload.search,
-            replace: e.payload.replace,
-            status: 'pending',
-          })
-          appendLog({
-            type: 'text_delta',
-            content: `Diff proposed for ${e.payload.file_path} — awaiting approval`,
-            timestamp: Date.now(),
-          })
-        }
+      const u4 = await listen<CompatDiffProposedPayload>('coding-agent-diff-proposed', (e) => {
+        if (!cancelled) handleNormalizedAgentEvent(normalizeCompatDiffProposed(e.payload))
       })
 
-      // Parse raw stream-json lines from the backend and surface them in the log.
       const uRaw = await listen<{ line: string }>('code-agent-output', (e) => {
         if (cancelled) return
-        const raw = e.payload.line
-        try {
-          const msg = JSON.parse(raw)
-          const type = msg?.type
-          if (type === 'system' && msg?.subtype === 'init') {
-            const model = typeof msg.model === 'string' ? msg.model : 'model'
-            appendLog({
-              type: 'text_delta',
-              content: `Agent initialized with ${model}. Waiting for first response...`,
-              timestamp: Date.now(),
-            })
-          } else if (type === 'assistant') {
-            const content: unknown[] = msg?.message?.content ?? []
-            for (const block of content) {
-              const b = block as Record<string, unknown>
-              if (b.type === 'tool_use') {
-                appendLog({
-                  type: 'tool_start',
-                  toolName: b.name as string,
-                  content: JSON.stringify(b.input ?? {}),
-                  timestamp: Date.now(),
-                })
-              } else if (b.type === 'text' && typeof b.text === 'string' && b.text.trim()) {
-                appendLog({ type: 'text_delta', content: b.text as string, timestamp: Date.now() })
-              } else if (b.type === 'thinking' && typeof b.thinking === 'string' && b.thinking.trim()) {
-                appendLog({ type: 'text_delta', content: b.thinking as string, timestamp: Date.now() })
-              }
-            }
-          } else if (type === 'user') {
-            const content: unknown[] = msg?.message?.content ?? []
-            for (const block of content) {
-              const b = block as Record<string, unknown>
-              if (b.type === 'tool_result') {
-                const output = Array.isArray(b.content)
-                  ? (b.content as Array<Record<string, unknown>>).map((c) => c.text ?? '').join('\n')
-                  : String(b.content ?? '')
-                appendLog({
-                  type: 'tool_result',
-                  content: output,
-                  timestamp: Date.now(),
-                })
-              }
-            }
-          } else if (type === 'result') {
-            if (completionHandledRef.current) return
-            completionHandledRef.current = true
-            setRunning(false)
-            appendLog({
-              type: 'done',
-              content: msg.subtype === 'success' ? '✓ Agent finished' : `✗ ${msg.error ?? 'Agent stopped'}`,
-              timestamp: Date.now(),
-            })
-            useCodingAgentStore.getState().saveCurrentSession()
-            setAgentStatus('restarting')
-            invoke('restart_ollama').catch(() => {}).finally(() => setAgentStatus('free'))
-          }
-        } catch {
-          if (raw.trim()) appendLog({ type: 'text_delta', content: raw, timestamp: Date.now() })
-        }
+        normalizeLegacyCodeAgentOutput(e.payload.line).forEach(handleNormalizedAgentEvent)
       })
 
-      const u5 = await listen<AgentDoneEvent>('code-agent-done', (e) => {
-        if (!cancelled) {
-          if (completionHandledRef.current) return
-          completionHandledRef.current = true
-          setRunning(false)
-          appendLog({
-            type: 'done',
-            content: e.payload.success ? '✓ Agent finished' : '✗ Agent stopped',
-            timestamp: Date.now(),
-          })
-          useCodingAgentStore.getState().saveCurrentSession()
-          setAgentStatus('restarting')
-          invoke('restart_ollama').catch(() => {}).finally(() => setAgentStatus('free'))
-        }
+      const u5 = await listen<AgentDonePayload>('code-agent-done', (e) => {
+        if (!cancelled) handleNormalizedAgentEvent(normalizeDone(e.payload))
       })
 
-      const u6 = await listen<AgentErrorEvent>('coding-agent-error', (e) => {
-        if (!cancelled) {
-          appendLog({ type: 'error', content: e.payload.message, timestamp: Date.now() })
-        }
+      const u6 = await listen<AgentErrorPayload>('coding-agent-error', (e) => {
+        if (!cancelled) handleNormalizedAgentEvent(normalizeError(e.payload))
+      })
+      const u7 = await listen<AgentErrorPayload>('code-agent-error', (e) => {
+        if (!cancelled) handleNormalizedAgentEvent(normalizeError(e.payload))
+      })
+      const u8 = await listen<TextDeltaPayload>('agent-text-delta', (e) => {
+        if (!cancelled) handleNormalizedAgentEvent(normalizeTextDelta(e.payload))
+      })
+      const u9 = await listen<DirectToolStartPayload>('agent-tool-call-start', (e) => {
+        if (!cancelled) handleNormalizedAgentEvent(normalizeDirectToolStart(e.payload))
+      })
+      const u10 = await listen<DirectToolResultPayload>('agent-tool-call-result', (e) => {
+        if (!cancelled) handleNormalizedAgentEvent(normalizeDirectToolResult(e.payload))
+      })
+      const u11 = await listen<DirectDiffProposedPayload>('agent-diff-proposed', (e) => {
+        if (!cancelled) handleNormalizedAgentEvent(normalizeDirectDiffProposed(e.payload))
+      })
+      const u12 = await listen<AgentDonePayload>('agent-done', (e) => {
+        if (!cancelled) handleNormalizedAgentEvent(normalizeDone(e.payload))
       })
 
       if (cancelled) {
-        ;[uRaw, u1, u2, u3, u4, u5, u6].forEach((u) => u())
+        for (const unlisten of [uRaw, u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11, u12]) unlisten()
       } else {
-        unlisteners.push(uRaw, u1, u2, u3, u4, u5, u6)
+        unlisteners.push(uRaw, u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11, u12)
       }
     }
 
@@ -399,9 +450,18 @@ export function CodingAgentPanel() {
       cancelled = true
       unlisteners.forEach((u) => u())
     }
-  }, [appendPlanText, appendLog, addDiff, setRunning])
+  }, [handleNormalizedAgentEvent])
 
   // ── Handlers ─────────────────────────────────────────────
+  const stopSelectedBackend = useCallback(async () => {
+    if (agentBackend === 'direct-ollama') {
+      await invoke('stop_ollama_agent')
+      return
+    }
+
+    await invoke('stop_code_agent')
+  }, [agentBackend])
+
   const handleSelectFolder = useCallback(async () => {
     try {
       const selected = await invoke<string | null>('open_dialog', {
@@ -429,23 +489,49 @@ export function CodingAgentPanel() {
 
     startNewSession(prompt, threadId)
     completionHandledRef.current = false
+    lastAgentErrorRef.current = null
+    setLastFailureMessage(null)
     setRunning(true)
     setAgentStatus('running')
     appendLog({ type: 'text_delta', content: `> ${prompt}`, timestamp: Date.now() })
+    appendLog({ type: 'text_delta', content: `Backend: ${agentBackend}`, timestamp: Date.now() })
+    appendLog({ type: 'text_delta', content: 'Starting agent…', timestamp: Date.now() })
 
     try {
-      await invoke('spawn_code_agent', {
-        projectDir,
-        prompt,
-        ollamaModel: agentConfig?.code_model ?? 'qwen2.5-coder:32b',
-        permissionMode: 'auto_accept',
-      })
+      const model = agentConfig?.code_model ?? 'qwen2.5-coder:32b'
+
+      if (agentBackend === 'direct-ollama') {
+        await invoke('start_ollama_agent', {
+          projectDir,
+          prompt,
+          model,
+          ollamaBaseUrl: agentConfig?.ollama_url ?? 'http://localhost:11434',
+        })
+      } else {
+        await invoke('spawn_code_agent', {
+          projectDir,
+          prompt,
+          ollamaModel: model,
+          permissionMode: 'auto_accept',
+        })
+      }
     } catch (err) {
       appendLog({ type: 'error', content: String(err), timestamp: Date.now() })
       setRunning(false)
+      if (loopEnabled) {
+        clearLoopSchedule()
+        setLoopEnabled(false)
+        setLoopPrompt('')
+        appendLog({
+          type: 'error',
+          content: 'Loop stopped after failed agent run.',
+          timestamp: Date.now(),
+        })
+      }
+      setLastFailureMessage(`✗ ${String(err)}`)
       setAgentStatus('idle')
     }
-  }, [projectDir, agentConfig, createThread, setRunning, appendLog, startNewSession])
+  }, [projectDir, agentConfig, agentBackend, createThread, setRunning, appendLog, startNewSession, loopEnabled, clearLoopSchedule])
 
   const handleSend = useCallback(async () => {
     if (!projectDir || !draftPrompt.trim()) return
@@ -491,13 +577,14 @@ export function CodingAgentPanel() {
   }, [agentStatus]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleStop = useCallback(async () => {
-    try { await invoke('stop_code_agent') } catch { /* ignore */ }
+    try { await stopSelectedBackend() } catch { /* ignore */ }
     setRunning(false)
     setLoopEnabled(false)
     setLoopCountdown(null)
     clearTimeout(loopTimerRef.current!)
     clearInterval(loopTickRef.current!)
-  }, [setRunning])
+    setLastFailureMessage(null)
+  }, [setRunning, stopSelectedBackend])
 
   const handleApproveDiff = useCallback(async (id: string) => {
     try {
@@ -621,6 +708,9 @@ export function CodingAgentPanel() {
           {agentStatus === 'free' && !isRunning && (
             <span className="text-xs text-green-500 font-mono">memory free</span>
           )}
+          {agentStatus === 'failed' && !isRunning && (
+            <span className="text-xs text-destructive font-mono">failed</span>
+          )}
           {loopEnabled && (
             <span className="flex items-center gap-1 ml-1">
               <span className="text-xs text-blue-500 font-mono">
@@ -640,8 +730,9 @@ export function CodingAgentPanel() {
                   setLoopCountdown(null)
                   setLoopTimes(3)
                   setLoopInterval(5)
-                  invoke('stop_code_agent').catch(() => {})
+                  stopSelectedBackend().catch(() => {})
                   setRunning(false)
+                  setLastFailureMessage(null)
                 }}
               >
                 <IconPlayerStop size={11} />
@@ -668,6 +759,14 @@ export function CodingAgentPanel() {
             )}
           </div>
         </div>
+        {lastFailureMessage && !isRunning && (
+          <div className="bg-destructive/10 border-b border-destructive/20 px-4 py-2 flex items-center gap-2 shrink-0">
+            <IconAlertCircle size={15} className="text-destructive shrink-0" />
+            <p className="text-xs text-destructive truncate" title={lastFailureMessage}>
+              {lastFailureMessage}
+            </p>
+          </div>
+        )}
         <div className="relative flex-1 min-h-0">
           <StickToBottom className="absolute inset-0 overflow-y-hidden" initial="smooth" resize="smooth">
             <StickToBottom.Content className="px-4 py-3 space-y-0.5">
@@ -888,6 +987,13 @@ function LogLine({ line }: { line: ExecLogLine }) {
       return <div className="text-destructive text-xs py-0.5 break-words">✗ {line.content}</div>
     case 'done':
       return <div className="text-muted-foreground text-[10px] text-center border-t my-2 pt-2 uppercase tracking-widest font-medium">{line.content}</div>
+    case 'thinking':
+      return (
+        <Reasoning className="my-2" defaultOpen={true}>
+          <ReasoningTrigger className="text-xs" />
+          <ReasoningContent className="mt-2 text-xs">{line.content}</ReasoningContent>
+        </Reasoning>
+      )
     default:
       return <div className="text-muted-foreground text-xs py-0.5 break-words">{line.content}</div>
   }

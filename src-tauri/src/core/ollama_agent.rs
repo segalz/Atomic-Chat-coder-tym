@@ -8,11 +8,7 @@
 //!   - Search/Replace paradigm enforced for all file edits
 //!   - Typed Tauri events: text_delta, tool_call_start, tool_call_result, diff_proposed, done
 
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-    sync::Arc,
-};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use futures_util::StreamExt;
 use reqwest::Client;
@@ -20,19 +16,32 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Runtime, State};
 use tokio::sync::{oneshot, Mutex};
+use tokio::time::{timeout, Duration};
 use tokio_util::sync::CancellationToken;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const MAX_HEAL_RETRIES: u32 = 3;
 const MAX_ITERATIONS: u32 = 40;
+const DIRECT_AGENT_IDLE_TIMEOUT_SECS: u64 = 10 * 60;
+const DIRECT_AGENT_MAX_RUNTIME_SECS: u64 = 45 * 60;
+const DIRECT_AGENT_HTTP_TIMEOUT_SECS: u64 = 120;
 /// Prune when history exceeds this many messages (keeps first system message + recent N)
 const CONTEXT_PRUNE_THRESHOLD: usize = 60;
 const CONTEXT_KEEP_RECENT: usize = 30;
 
 const BLACKLISTED_DIRS: &[&str] = &[
-    "node_modules", "ios/Pods", ".git", "target", "dist", ".expo",
-    ".next", "build", "__pycache__", ".cache", ".turbo",
+    "node_modules",
+    "ios/Pods",
+    ".git",
+    "target",
+    "dist",
+    ".expo",
+    ".next",
+    "build",
+    "__pycache__",
+    ".cache",
+    ".turbo",
 ];
 
 const SYSTEM_PROMPT: &str = "\
@@ -58,6 +67,7 @@ If you must create a new file, use write_file.
 #[derive(Clone, Serialize)]
 pub struct AgentTextDeltaEvent {
     pub text: String,
+    pub kind: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -109,6 +119,112 @@ struct PartialToolCall {
     arguments: String,
 }
 
+fn emit_agent_delta<R: Runtime>(app: &AppHandle<R>, text: impl Into<String>, kind: &str) {
+    let text = text.into();
+    if text.trim().is_empty() {
+        return;
+    }
+
+    let _ = app.emit(
+        "agent-text-delta",
+        AgentTextDeltaEvent {
+            text,
+            kind: kind.to_string(),
+        },
+    );
+}
+
+fn emit_text_delta<R: Runtime>(app: &AppHandle<R>, text: impl Into<String>) {
+    emit_agent_delta(app, text, "text");
+}
+
+fn emit_thinking_delta<R: Runtime>(app: &AppHandle<R>, text: impl Into<String>) {
+    emit_agent_delta(app, text, "thinking");
+}
+
+fn split_content_delta(
+    text: &str,
+    in_think_block: &mut bool,
+    carry: &mut String,
+) -> Vec<(String, &'static str)> {
+    const OPEN_TAG: &str = "<think>";
+    const CLOSE_TAG: &str = "</think>";
+
+    carry.push_str(text);
+    let mut segments = Vec::new();
+
+    loop {
+        if *in_think_block {
+            if let Some(end) = carry.find(CLOSE_TAG) {
+                if end > 0 {
+                    segments.push((carry[..end].to_string(), "thinking"));
+                }
+                carry.drain(..end + CLOSE_TAG.len());
+                *in_think_block = false;
+                continue;
+            }
+
+            let emit_len = safe_emit_len(carry, CLOSE_TAG);
+            if emit_len > 0 {
+                segments.push((carry[..emit_len].to_string(), "thinking"));
+                carry.drain(..emit_len);
+            }
+            break;
+        }
+
+        if let Some(start) = carry.find(OPEN_TAG) {
+            if start > 0 {
+                segments.push((carry[..start].to_string(), "text"));
+            }
+            carry.drain(..start + OPEN_TAG.len());
+            *in_think_block = true;
+            continue;
+        }
+
+        let emit_len = safe_emit_len(carry, OPEN_TAG);
+        if emit_len > 0 {
+            segments.push((carry[..emit_len].to_string(), "text"));
+            carry.drain(..emit_len);
+        }
+        break;
+    }
+
+    segments
+}
+
+fn safe_emit_len(buffer: &str, pending_tag: &str) -> usize {
+    let bytes = buffer.as_bytes();
+    let tag_bytes = pending_tag.as_bytes();
+    let max_keep = tag_bytes.len().saturating_sub(1).min(bytes.len());
+    let mut keep = 0;
+
+    for len in 1..=max_keep {
+        if tag_bytes.starts_with(&bytes[bytes.len() - len..]) {
+            keep = len;
+        }
+    }
+
+    let mut emit_len = buffer.len().saturating_sub(keep);
+    while emit_len > 0 && !buffer.is_char_boundary(emit_len) {
+        emit_len -= 1;
+    }
+    emit_len
+}
+
+fn emit_content_delta<R: Runtime>(
+    app: &AppHandle<R>,
+    text: &str,
+    in_think_block: &mut bool,
+    carry: &mut String,
+) {
+    for (segment, kind) in split_content_delta(text, in_think_block, carry) {
+        match kind {
+            "thinking" => emit_thinking_delta(app, segment),
+            _ => emit_text_delta(app, segment),
+        }
+    }
+}
+
 // ── Tool schemas (OpenAI function calling format) ─────────────────────────────
 
 /// Delegates to agent_bridge so schemas are defined in a single place (S2).
@@ -136,7 +252,8 @@ async fn execute_tool<R: Runtime>(
 
         "write_file" => {
             let path = resolve_path(args, "path", project_dir)?;
-            let content = args["content"].as_str()
+            let content = args["content"]
+                .as_str()
                 .ok_or("write_file: missing 'content'")?
                 .to_string();
 
@@ -151,12 +268,15 @@ async fn execute_tool<R: Runtime>(
                 guard.insert(call_id.to_string(), tx);
             }
 
-            let _ = app.emit("agent-diff-proposed", AgentDiffProposedEvent {
-                call_id: call_id.to_string(),
-                path: path.to_string_lossy().into_owned(),
-                search: String::new(),
-                replace: content.clone(),
-            });
+            let _ = app.emit(
+                "agent-diff-proposed",
+                AgentDiffProposedEvent {
+                    call_id: call_id.to_string(),
+                    path: path.to_string_lossy().into_owned(),
+                    search: String::new(),
+                    replace: content.clone(),
+                },
+            );
 
             let approved = rx.await.unwrap_or(false);
             if !approved {
@@ -171,15 +291,21 @@ async fn execute_tool<R: Runtime>(
             tokio::fs::write(&path, &content)
                 .await
                 .map_err(|e| format!("write_file failed for '{}': {}", path.display(), e))?;
-            Ok(format!("Written {} bytes to {}", content.len(), path.display()))
+            Ok(format!(
+                "Written {} bytes to {}",
+                content.len(),
+                path.display()
+            ))
         }
 
         "edit_file" => {
             let path = resolve_path(args, "path", project_dir)?;
-            let search = args["search"].as_str()
+            let search = args["search"]
+                .as_str()
                 .ok_or("edit_file: missing 'search'")?
                 .to_string();
-            let replace = args["replace"].as_str()
+            let replace = args["replace"]
+                .as_str()
                 .ok_or("edit_file: missing 'replace'")?
                 .to_string();
 
@@ -206,12 +332,15 @@ async fn execute_tool<R: Runtime>(
                 guard.insert(call_id.to_string(), tx);
             }
 
-            let _ = app.emit("agent-diff-proposed", AgentDiffProposedEvent {
-                call_id: call_id.to_string(),
-                path: path.to_string_lossy().into_owned(),
-                search: search.clone(),
-                replace: replace.clone(),
-            });
+            let _ = app.emit(
+                "agent-diff-proposed",
+                AgentDiffProposedEvent {
+                    call_id: call_id.to_string(),
+                    path: path.to_string_lossy().into_owned(),
+                    search: search.clone(),
+                    replace: replace.clone(),
+                },
+            );
 
             let approved = rx.await.unwrap_or(false);
             if !approved {
@@ -246,14 +375,14 @@ async fn execute_tool<R: Runtime>(
         }
 
         "grep" => {
-            let pattern = args["pattern"].as_str()
-                .ok_or("grep: missing 'pattern'")?;
+            let pattern = args["pattern"].as_str().ok_or("grep: missing 'pattern'")?;
             let path = resolve_path(args, "path", project_dir)?;
             let file_glob = args["file_glob"].as_str().unwrap_or("*");
 
             let mut cmd = tokio::process::Command::new("grep");
             cmd.arg("-rn")
-                .arg("--include").arg(file_glob)
+                .arg("--include")
+                .arg(file_glob)
                 .arg("--color=never");
 
             // Exclude blacklisted dirs
@@ -263,7 +392,8 @@ async fn execute_tool<R: Runtime>(
 
             cmd.arg(pattern).arg(&path);
 
-            let output = cmd.output()
+            let output = cmd
+                .output()
                 .await
                 .map_err(|e| format!("grep failed: {}", e))?;
 
@@ -278,7 +408,8 @@ async fn execute_tool<R: Runtime>(
         }
 
         "run_shell" => {
-            let command = args["command"].as_str()
+            let command = args["command"]
+                .as_str()
                 .ok_or("run_shell: missing 'command'")?;
             let cwd = args["cwd"].as_str().unwrap_or(project_dir);
 
@@ -298,14 +429,79 @@ async fn execute_tool<R: Runtime>(
                 result.push_str(&stdout.lines().take(300).collect::<Vec<_>>().join("\n"));
             }
             if !stderr.is_empty() {
-                if !result.is_empty() { result.push('\n'); }
+                if !result.is_empty() {
+                    result.push('\n');
+                }
                 result.push_str("[stderr]\n");
                 result.push_str(&stderr.lines().take(100).collect::<Vec<_>>().join("\n"));
             }
             if !output.status.success() {
                 result.push_str(&format!("\n[exit code: {:?}]", output.status.code()));
             }
-            Ok(if result.is_empty() { "(no output)".to_string() } else { result })
+            Ok(if result.is_empty() {
+                "(no output)".to_string()
+            } else {
+                result
+            })
+        }
+
+        "find_and_analyze_code" => {
+            let query = args["query"]
+                .as_str()
+                .ok_or("find_and_analyze_code: missing 'query'")?;
+            let root = if args["path"].is_string() {
+                resolve_path(args, "path", project_dir)?
+            } else {
+                PathBuf::from(project_dir)
+            };
+
+            let output = tokio::process::Command::new("rg")
+                .arg("--files")
+                .current_dir(&root)
+                .output()
+                .await
+                .map_err(|e| format!("find_and_analyze_code failed to list files: {}", e))?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(format!("find_and_analyze_code failed: {}", stderr.trim()));
+            }
+
+            let query_terms = query
+                .split(|c: char| !c.is_alphanumeric() && c != '_')
+                .filter(|term| term.len() >= 3)
+                .map(|term| term.to_lowercase())
+                .collect::<Vec<_>>();
+
+            let mut matches = String::new();
+            for file in String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter(|file| !path_has_blacklisted_segment(file))
+                .filter(|file| {
+                    if query_terms.is_empty() {
+                        return true;
+                    }
+                    let lower = file.to_lowercase();
+                    query_terms.iter().any(|term| lower.contains(term))
+                })
+                .take(80)
+            {
+                matches.push_str("- ");
+                matches.push_str(file);
+                matches.push('\n');
+            }
+
+            if matches.is_empty() {
+                Ok(format!(
+                    "No filename matches found for query '{}'. Use grep with targeted terms next.",
+                    query
+                ))
+            } else {
+                Ok(format!(
+                    "Relevant files for query '{}':\n{}Use read_file or grep on the most relevant paths before editing.",
+                    query, matches
+                ))
+            }
         }
 
         unknown => Err(format!("Unknown tool: {}", unknown)),
@@ -313,7 +509,8 @@ async fn execute_tool<R: Runtime>(
 }
 
 fn resolve_path(args: &Value, key: &str, project_dir: &str) -> Result<PathBuf, String> {
-    let raw = args[key].as_str()
+    let raw = args[key]
+        .as_str()
         .ok_or_else(|| format!("Missing required argument '{}'", key))?;
     let p = PathBuf::from(raw);
     if p.is_absolute() {
@@ -330,6 +527,10 @@ fn is_blacklisted(name: &str) -> bool {
     })
 }
 
+fn path_has_blacklisted_segment(path: &str) -> bool {
+    path.split('/').any(is_blacklisted)
+}
+
 // ── Context pruning ───────────────────────────────────────────────────────────
 
 /// Drop oldest tool_result messages when history exceeds threshold.
@@ -339,12 +540,14 @@ fn prune_context(messages: &mut Vec<Value>) {
         return;
     }
 
-    let system: Vec<Value> = messages.iter()
+    let system: Vec<Value> = messages
+        .iter()
         .filter(|m| m["role"].as_str() == Some("system"))
         .cloned()
         .collect();
 
-    let non_system: Vec<Value> = messages.iter()
+    let non_system: Vec<Value> = messages
+        .iter()
         .filter(|m| m["role"].as_str() != Some("system"))
         .cloned()
         .collect();
@@ -356,7 +559,10 @@ fn prune_context(messages: &mut Vec<Value>) {
     kept.extend(non_system.into_iter().skip(keep_start));
     *messages = kept;
 
-    log::info!("[OllamaAgent] Context pruned: dropped {} old messages", pruned_count);
+    log::info!(
+        "[OllamaAgent] Context pruned: dropped {} old messages",
+        pruned_count
+    );
 }
 
 // ── SSE streaming ─────────────────────────────────────────────────────────────
@@ -367,6 +573,27 @@ struct StreamResult {
 }
 
 async fn stream_completion<R: Runtime>(
+    app: &AppHandle<R>,
+    client: &Client,
+    ollama_url: &str,
+    model: &str,
+    messages: &[Value],
+    tools: &Value,
+) -> Result<StreamResult, String> {
+    match stream_completion_inner(app, client, ollama_url, model, messages, tools).await {
+        Ok(result) => Ok(result),
+        Err(e) if is_stream_timeout_error(&e) => {
+            log::warn!(
+                "[OllamaAgent] Streaming timed out; retrying current turn without streaming: {}",
+                e
+            );
+            non_stream_completion(app, client, ollama_url, model, messages, tools).await
+        }
+        Err(e) => Err(e),
+    }
+}
+
+async fn stream_completion_inner<R: Runtime>(
     app: &AppHandle<R>,
     client: &Client,
     ollama_url: &str,
@@ -403,8 +630,26 @@ async fn stream_completion<R: Runtime>(
     let mut full_text = String::new();
     // tool_calls_map: index → PartialToolCall
     let mut tool_calls_map: HashMap<usize, PartialToolCall> = HashMap::new();
+    let mut in_think_block = false;
+    let mut content_carry = String::new();
 
-    while let Some(chunk) = stream.next().await {
+    loop {
+        let next_chunk = timeout(
+            Duration::from_secs(DIRECT_AGENT_IDLE_TIMEOUT_SECS),
+            stream.next(),
+        )
+        .await
+        .map_err(|_| {
+            format!(
+                "idle timeout: no Ollama stream output for {} seconds",
+                DIRECT_AGENT_IDLE_TIMEOUT_SECS
+            )
+        })?;
+
+        let Some(chunk) = next_chunk else {
+            break;
+        };
+
         let bytes = chunk.map_err(|e| format!("Stream read error: {}", e))?;
         buffer.push_str(&String::from_utf8_lossy(&bytes));
 
@@ -434,9 +679,13 @@ async fn stream_completion<R: Runtime>(
             if let Some(text) = delta["content"].as_str() {
                 if !text.is_empty() {
                     full_text.push_str(text);
-                    let _ = app.emit("agent-text-delta", AgentTextDeltaEvent {
-                        text: text.to_string(),
-                    });
+                    emit_content_delta(app, text, &mut in_think_block, &mut content_carry);
+                }
+            }
+
+            for key in ["reasoning_content", "reasoning", "thinking"] {
+                if let Some(text) = delta[key].as_str() {
+                    emit_thinking_delta(app, text.to_string());
                 }
             }
 
@@ -464,10 +713,112 @@ async fn stream_completion<R: Runtime>(
         }
     }
 
+    if !content_carry.is_empty() {
+        if in_think_block {
+            emit_thinking_delta(app, std::mem::take(&mut content_carry));
+        } else {
+            emit_text_delta(app, std::mem::take(&mut content_carry));
+        }
+    }
+
     let mut tool_calls: Vec<PartialToolCall> = tool_calls_map.into_values().collect();
     tool_calls.sort_by_key(|tc| tc.id.clone());
 
-    Ok(StreamResult { text: full_text, tool_calls })
+    Ok(StreamResult {
+        text: full_text,
+        tool_calls,
+    })
+}
+
+async fn non_stream_completion<R: Runtime>(
+    app: &AppHandle<R>,
+    client: &Client,
+    ollama_url: &str,
+    model: &str,
+    messages: &[Value],
+    tools: &Value,
+) -> Result<StreamResult, String> {
+    let body = json!({
+        "model": model,
+        "messages": messages,
+        "tools": tools,
+        "stream": false,
+        "options": {
+            "num_ctx": 32768,
+        }
+    });
+
+    let response = client
+        .post(ollama_url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("HTTP request to Ollama failed: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        return Err(format!("Ollama returned HTTP {}: {}", status, text));
+    }
+
+    let response_value: Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse Ollama response: {}", e))?;
+    let message = &response_value["choices"][0]["message"];
+
+    let text = message["content"].as_str().unwrap_or_default().to_string();
+    if !text.is_empty() {
+        let mut in_think_block = false;
+        let mut content_carry = String::new();
+        emit_content_delta(app, &text, &mut in_think_block, &mut content_carry);
+        if !content_carry.is_empty() {
+            if in_think_block {
+                emit_thinking_delta(app, content_carry);
+            } else {
+                emit_text_delta(app, content_carry);
+            }
+        }
+    }
+
+    for key in ["reasoning_content", "reasoning", "thinking"] {
+        if let Some(reasoning) = message[key].as_str() {
+            emit_thinking_delta(app, reasoning.to_string());
+        }
+    }
+
+    let tool_calls = message["tool_calls"]
+        .as_array()
+        .map(|calls| {
+            calls
+                .iter()
+                .enumerate()
+                .filter_map(|(index, call)| {
+                    let name = call["function"]["name"].as_str()?.to_string();
+                    let arguments = call["function"]["arguments"]
+                        .as_str()
+                        .unwrap_or("{}")
+                        .to_string();
+                    let id = call["id"]
+                        .as_str()
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| format!("call_{}", index));
+
+                    Some(PartialToolCall {
+                        id,
+                        name,
+                        arguments,
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Ok(StreamResult { text, tool_calls })
+}
+
+fn is_stream_timeout_error(error: &str) -> bool {
+    error.contains("idle timeout") || error.contains("timed out") || error.contains("deadline")
 }
 
 // ── Agent loop ────────────────────────────────────────────────────────────────
@@ -504,7 +855,18 @@ async fn run_agent_loop<R: Runtime>(
         // Context protection: prune if needed
         prune_context(&mut messages);
 
-        log::info!("[OllamaAgent] Iteration {} — {} messages in context", iteration, messages.len());
+        log::info!(
+            "[OllamaAgent] Iteration {} — {} messages in context",
+            iteration,
+            messages.len()
+        );
+        emit_text_delta(
+            app,
+            format!(
+                "Agent iteration {}: asking Ollama model {}…",
+                iteration, model
+            ),
+        );
 
         // Stream from Ollama
         let stream_result = tokio::select! {
@@ -519,9 +881,17 @@ async fn run_agent_loop<R: Runtime>(
             }
             Err(e) => {
                 heal_retries += 1;
-                log::warn!("[OllamaAgent] Stream error (attempt {}/{}): {}", heal_retries, MAX_HEAL_RETRIES, e);
+                log::warn!(
+                    "[OllamaAgent] Stream error (attempt {}/{}): {}",
+                    heal_retries,
+                    MAX_HEAL_RETRIES,
+                    e
+                );
                 if heal_retries >= MAX_HEAL_RETRIES {
-                    return Err(format!("Ollama stream failed after {} retries: {}", MAX_HEAL_RETRIES, e));
+                    return Err(format!(
+                        "Ollama stream failed after {} retries: {}",
+                        MAX_HEAL_RETRIES, e
+                    ));
                 }
                 // Inject corrective message and retry
                 messages.push(json!({
@@ -540,11 +910,16 @@ async fn run_agent_loop<R: Runtime>(
             return Ok(());
         } else {
             // Build assistant message with tool_calls array
-            let tc_json: Vec<Value> = tool_calls.iter().map(|tc| json!({
-                "id": tc.id,
-                "type": "function",
-                "function": { "name": tc.name, "arguments": tc.arguments }
-            })).collect();
+            let tc_json: Vec<Value> = tool_calls
+                .iter()
+                .map(|tc| {
+                    json!({
+                        "id": tc.id,
+                        "type": "function",
+                        "function": { "name": tc.name, "arguments": tc.arguments }
+                    })
+                })
+                .collect();
 
             messages.push(json!({
                 "role": "assistant",
@@ -568,7 +943,12 @@ async fn run_agent_loop<R: Runtime>(
                         "Failed to parse arguments for tool '{}': {}. Raw: {}",
                         tc.name, e, tc.arguments
                     );
-                    log::warn!("[OllamaAgent] JSON parse error (heal {}/{}): {}", heal_retries, MAX_HEAL_RETRIES, err_msg);
+                    log::warn!(
+                        "[OllamaAgent] JSON parse error (heal {}/{}): {}",
+                        heal_retries,
+                        MAX_HEAL_RETRIES,
+                        err_msg
+                    );
 
                     messages.push(json!({
                         "role": "tool",
@@ -577,17 +957,23 @@ async fn run_agent_loop<R: Runtime>(
                     }));
 
                     if heal_retries >= MAX_HEAL_RETRIES {
-                        return Err(format!("Self-healing exhausted after {} retries", MAX_HEAL_RETRIES));
+                        return Err(format!(
+                            "Self-healing exhausted after {} retries",
+                            MAX_HEAL_RETRIES
+                        ));
                     }
                     continue;
                 }
             };
 
             // Emit tool_call_start
-            let _ = app.emit("agent-tool-call-start", AgentToolCallStartEvent {
-                id: tc.id.clone(),
-                name: tc.name.clone(),
-            });
+            let _ = app.emit(
+                "agent-tool-call-start",
+                AgentToolCallStartEvent {
+                    id: tc.id.clone(),
+                    name: tc.name.clone(),
+                },
+            );
 
             log::info!("[OllamaAgent] Executing tool '{}' (id={})", tc.name, tc.id);
 
@@ -599,7 +985,8 @@ async fn run_agent_loop<R: Runtime>(
                 &args,
                 project_dir,
                 pending_diffs.clone(),
-            ).await;
+            )
+            .await;
 
             let (result_content, is_error) = match exec_result {
                 Ok(output) => {
@@ -608,8 +995,13 @@ async fn run_agent_loop<R: Runtime>(
                 }
                 Err(e) => {
                     heal_retries += 1;
-                    log::warn!("[OllamaAgent] Tool '{}' error (heal {}/{}): {}",
-                        tc.name, heal_retries, MAX_HEAL_RETRIES, e);
+                    log::warn!(
+                        "[OllamaAgent] Tool '{}' error (heal {}/{}): {}",
+                        tc.name,
+                        heal_retries,
+                        MAX_HEAL_RETRIES,
+                        e
+                    );
 
                     if heal_retries >= MAX_HEAL_RETRIES {
                         return Err(format!(
@@ -622,12 +1014,15 @@ async fn run_agent_loop<R: Runtime>(
             };
 
             // Emit tool_call_result
-            let _ = app.emit("agent-tool-call-result", AgentToolCallResultEvent {
-                id: tc.id.clone(),
-                name: tc.name.clone(),
-                result: result_content.clone(),
-                is_error,
-            });
+            let _ = app.emit(
+                "agent-tool-call-result",
+                AgentToolCallResultEvent {
+                    id: tc.id.clone(),
+                    name: tc.name.clone(),
+                    result: result_content.clone(),
+                    is_error,
+                },
+            );
 
             // Append tool result to message history
             messages.push(json!({
@@ -669,26 +1064,50 @@ pub async fn start_ollama_agent<R: Runtime>(
     }
 
     let pending_diffs = state.pending_diffs.clone();
+    let pending_diffs_for_cleanup = state.pending_diffs.clone();
     let running_arc = state.running.clone();
     let cancel_arc = state.cancel.clone();
     let app_clone = app.clone();
 
+    emit_text_delta(
+        &app,
+        format!(
+            "Ollama agent started with model {} in {}",
+            model, project_dir
+        ),
+    );
+
     tokio::spawn(async move {
         let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
+            .timeout(Duration::from_secs(DIRECT_AGENT_HTTP_TIMEOUT_SECS))
             .build()
             .expect("Failed to build HTTP client");
 
-        let result = run_agent_loop(
-            &app_clone,
-            &client,
-            &ollama_url,
-            &model,
-            &project_dir,
-            &prompt,
-            pending_diffs,
-            cancel,
-        ).await;
+        let loop_cancel = cancel.clone();
+        let result = match timeout(
+            Duration::from_secs(DIRECT_AGENT_MAX_RUNTIME_SECS),
+            run_agent_loop(
+                &app_clone,
+                &client,
+                &ollama_url,
+                &model,
+                &project_dir,
+                &prompt,
+                pending_diffs,
+                loop_cancel,
+            ),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                cancel.cancel();
+                Err(format!(
+                    "max runtime timeout: direct Ollama agent exceeded {} seconds",
+                    DIRECT_AGENT_MAX_RUNTIME_SECS
+                ))
+            }
+        };
 
         // Cleanup state
         {
@@ -699,22 +1118,41 @@ pub async fn start_ollama_agent<R: Runtime>(
             let mut g = cancel_arc.lock().await;
             *g = None;
         }
+        {
+            let mut g = pending_diffs_for_cleanup.lock().await;
+            g.clear();
+        }
 
         match result {
             Ok(()) => {
                 log::info!("[OllamaAgent] Completed successfully");
-                let _ = app_clone.emit("agent-done", AgentDoneEvent { success: true, error: None });
+                let _ = app_clone.emit(
+                    "agent-done",
+                    AgentDoneEvent {
+                        success: true,
+                        error: None,
+                    },
+                );
             }
             Err(ref e) if e == "cancelled" => {
                 log::info!("[OllamaAgent] Cancelled by user");
-                let _ = app_clone.emit("agent-done", AgentDoneEvent { success: false, error: None });
+                let _ = app_clone.emit(
+                    "agent-done",
+                    AgentDoneEvent {
+                        success: false,
+                        error: None,
+                    },
+                );
             }
             Err(e) => {
                 log::error!("[OllamaAgent] Error: {}", e);
-                let _ = app_clone.emit("agent-done", AgentDoneEvent {
-                    success: false,
-                    error: Some(e),
-                });
+                let _ = app_clone.emit(
+                    "agent-done",
+                    AgentDoneEvent {
+                        success: false,
+                        error: Some(e),
+                    },
+                );
             }
         }
     });
@@ -723,12 +1161,21 @@ pub async fn start_ollama_agent<R: Runtime>(
 }
 
 #[tauri::command]
-pub async fn stop_ollama_agent(
-    state: State<'_, OllamaAgentState>,
-) -> Result<(), String> {
+pub async fn stop_ollama_agent(state: State<'_, OllamaAgentState>) -> Result<(), String> {
     let guard = state.cancel.lock().await;
     if let Some(token) = guard.as_ref() {
         token.cancel();
+        drop(guard);
+
+        let pending = {
+            let mut guard = state.pending_diffs.lock().await;
+            guard.drain().map(|(_, tx)| tx).collect::<Vec<_>>()
+        };
+
+        for tx in pending {
+            let _ = tx.send(false);
+        }
+
         Ok(())
     } else {
         Err("No Ollama agent is running.".to_string())
@@ -773,9 +1220,7 @@ mod tests {
 
     #[test]
     fn test_prune_context_leaves_system_and_recent() {
-        let mut messages: Vec<Value> = vec![
-            json!({"role": "system", "content": "sys"}),
-        ];
+        let mut messages: Vec<Value> = vec![json!({"role": "system", "content": "sys"})];
         for i in 0..80 {
             messages.push(json!({"role": "user", "content": format!("msg {}", i)}));
         }
@@ -806,6 +1251,45 @@ mod tests {
         assert!(is_blacklisted("Pods"));
         assert!(!is_blacklisted("src"));
         assert!(!is_blacklisted("components"));
+    }
+
+    #[test]
+    fn test_split_content_delta_extracts_thinking_block() {
+        let mut in_think_block = false;
+        let mut carry = String::new();
+
+        let segments = split_content_delta(
+            "before <think>hidden</think> after",
+            &mut in_think_block,
+            &mut carry,
+        );
+
+        assert_eq!(
+            segments,
+            vec![
+                ("before ".to_string(), "text"),
+                ("hidden".to_string(), "thinking"),
+                (" after".to_string(), "text"),
+            ]
+        );
+        assert!(!in_think_block);
+        assert!(carry.is_empty());
+    }
+
+    #[test]
+    fn test_split_content_delta_handles_split_think_tags() {
+        let mut in_think_block = false;
+        let mut carry = String::new();
+
+        let first = split_content_delta("alpha <thi", &mut in_think_block, &mut carry);
+        let second = split_content_delta("nk>beta</thi", &mut in_think_block, &mut carry);
+        let third = split_content_delta("nk> gamma", &mut in_think_block, &mut carry);
+
+        assert_eq!(first, vec![("alpha ".to_string(), "text")]);
+        assert_eq!(second, vec![("beta".to_string(), "thinking")]);
+        assert_eq!(third, vec![(" gamma".to_string(), "text")]);
+        assert!(!in_think_block);
+        assert!(carry.is_empty());
     }
 
     #[test]

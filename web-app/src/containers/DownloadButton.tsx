@@ -141,7 +141,7 @@ export function DownloadButtonPlaceholder({
       .pullModelWithMetadata(modelId, modelUrl, mmprojPath, huggingfaceToken)
   }
 
-  const handleDeleteModel = useCallback(async () => {
+  const handleDeleteModel = async () => {
     setIsDeleting(true)
     try {
       await serviceHub.models().deleteModel(downloadedModelId, 'llamacpp')
@@ -158,7 +158,7 @@ export function DownloadButtonPlaceholder({
     } finally {
       setIsDeleting(false)
     }
-  }, [serviceHub, downloadedModelId, t])
+  }
 
   return (
     <div
