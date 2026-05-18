@@ -56,6 +56,11 @@ For every file edit, use the edit_file tool with EXACT search/replace blocks:
 If a change spans multiple locations, call edit_file once per location.
 If you must create a new file, use write_file.
 
+## Calculations & Non-AI Tasks
+For any task that does not require reasoning — math, unit conversions, data transformations, \
+sorting, counting — use the run_python tool instead of answering in text. \
+Always print the result with print().
+
 ## Context Hygiene
 - Never read the same file twice unless its content has changed.
 - Prefer grep and list_dir to orient yourself before reading full files.
@@ -543,6 +548,35 @@ async fn execute_tool<R: Runtime>(
             } else {
                 result
             })
+        }
+
+        "run_python" => {
+            let code = args["code"]
+                .as_str()
+                .ok_or("run_python: missing 'code'")?;
+
+            let output = tokio::process::Command::new("python3")
+                .arg("-c")
+                .arg(code)
+                .output()
+                .await
+                .map_err(|e| format!("run_python: failed to launch python3: {}", e))?;
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+
+            if output.status.success() {
+                Ok(if stdout.is_empty() {
+                    "(no output)".to_string()
+                } else {
+                    stdout.trim_end().to_string()
+                })
+            } else {
+                Err(format!(
+                    "run_python error:\n{}",
+                    if stderr.is_empty() { stdout } else { stderr }
+                ))
+            }
         }
 
         "find_and_analyze_code" => {

@@ -151,6 +151,23 @@ pub fn tool_schemas() -> Value {
                     "required": ["query"]
                 }
             }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "run_python",
+                "description": "Execute a Python 3 snippet and return its stdout. Use for calculations, data transformations, and any task that does not require AI reasoning — math, unit conversions, sorting, JSON manipulation, etc. Do NOT use for file edits (use edit_file) or shell operations (use run_shell).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "code": {
+                            "type": "string",
+                            "description": "Valid Python 3 code. Must print the result to stdout."
+                        }
+                    },
+                    "required": ["code"]
+                }
+            }
         }
     ])
 }
