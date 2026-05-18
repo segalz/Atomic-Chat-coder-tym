@@ -1,6 +1,6 @@
 <img src="https://github.com/AtomicBot-ai/Atomic-Chat-HQ/raw/main/assets/logo.png" width="80" alt="Atomic Chat" />
 
-# Atomic Chat
+# Atomic Chat an ollama coder by zvi segal
 
 Open-source ChatGPT alternative. Run local LLMs or connect cloud models — with full control and privacy.
 
