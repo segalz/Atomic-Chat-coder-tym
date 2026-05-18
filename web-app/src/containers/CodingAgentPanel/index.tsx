@@ -1,9 +1,17 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
-import { useCodingAgentStore, type ExecLogLine } from '@/stores/coding-agent-store'
+import { useCodingAgentStore, type CodingSessionSource, type ExecLogLine } from '@/stores/coding-agent-store'
 import { useThreads } from '@/hooks/useThreads'
 import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import {
   IconFolderOpen,
   IconPlayerStop,
@@ -45,11 +53,15 @@ import {
   type CompatToolResultPayload,
   type CompatToolStartPayload,
   type DirectDiffProposedPayload,
+  type DirectEditIntentRequestPayload,
   type DirectToolResultPayload,
   type DirectToolStartPayload,
   type NormalizedAgentEvent,
   type TextDeltaPayload,
 } from './agent-event-adapter'
+import { CodeModelSelector } from './CodeModelSelector'
+import { buildCodingAgentPrompt } from './conversation-context'
+import { getEditPermissionForPrompt, type EditPermission } from './edit-permission'
 
 // ── S6 types ─────────────────────────────────────────────────
 interface CodingAgentConfig {
@@ -58,6 +70,72 @@ interface CodingAgentConfig {
   vision_model: string
   max_iterations: number
   auto_verify: boolean
+}
+
+interface PendingEditIntent {
+  id: string
+  toolName: string
+  filePath: string
+}
+
+const CODING_AGENT_CODE_MODEL_STORAGE_KEY = 'coding-agent-code-model'
+const CODE_AGENT_DEFAULT_MODEL = 'qwen3-coder:30b'
+
+const CODE_AGENT_INCOMPATIBLE_MODEL_PREFIXES = [
+  'deepseek-r1',
+  'qwen-vl',
+  'qwen2-vl',
+  'qwen2.5-vl',
+  'qwen2.5vl',
+  'llama3.2-vision',
+  'granite3.2-vision',
+  'llava',
+  'bakllava',
+  'moondream',
+  'minicpm-v',
+  'minicpm-o',
+]
+
+function isCodeAgentToolCompatible(model: string): boolean {
+  const normalized = model.trim().toLowerCase().replace(/:latest$/, '')
+  const family = normalized.split('/').pop() ?? normalized
+  return !CODE_AGENT_INCOMPATIBLE_MODEL_PREFIXES.some((prefix) => family.startsWith(prefix))
+}
+
+function getStoredCodeModel(): string | null {
+  if (typeof window === 'undefined') return null
+
+  try {
+    const value = window.localStorage.getItem(CODING_AGENT_CODE_MODEL_STORAGE_KEY)?.trim()
+    if (!value) return null
+    if (isCodeAgentToolCompatible(value)) return value
+
+    window.localStorage.removeItem(CODING_AGENT_CODE_MODEL_STORAGE_KEY)
+    return null
+  } catch {
+    return null
+  }
+}
+
+function isOllamaModelInstalled(model: string, installedModels: string[]): boolean {
+  const trimmed = model.trim()
+  if (!trimmed) return false
+
+  return installedModels.some((installed) => {
+    if (installed === trimmed) return true
+    if (trimmed.includes(':')) return false
+    return installed.startsWith(`${trimmed}:`)
+  })
+}
+
+function withLegacyEditInstruction(prompt: string, editPermission: EditPermission): string {
+  if (editPermission === 'allowed') return prompt
+
+  const instruction = editPermission === 'denied'
+    ? 'For this request, answer in text only. Do not create, edit, delete, or write files.'
+    : 'If this request requires creating, editing, deleting, or writing files, ask the user for confirmation before making changes.'
+
+  return `${instruction}\n\n${prompt}`
 }
 
 interface GpuInfo {
@@ -72,6 +150,8 @@ interface SystemInfo {
 
 // Minimum VRAM requirements in GiB for known model families
 const MODEL_VRAM_GIB: Record<string, number> = {
+  'qwen3-coder-next': 52,
+  'qwen3-coder:30b': 20,
   'qwen2.5-coder:32b': 20,
   'deepseek-coder-v2:16b': 9,
   'qwen2.5-coder:14b': 9,
@@ -91,18 +171,34 @@ function vramRequiredGib(model: string): number {
 }
 
 // ── HardwareSetup component ───────────────────────────────────
-function HardwareSetup({ ollamaUrl }: { ollamaUrl: string }) {
+interface HardwareSetupProps {
+  ollamaUrl: string
+  selectedCodeModel: string
+  disabled?: boolean
+  onCodeModelChange: (model: string) => void
+}
+
+function HardwareSetup({
+  ollamaUrl,
+  selectedCodeModel,
+  disabled = false,
+  onCodeModelChange,
+}: HardwareSetupProps) {
   const [config, setConfig] = useState<CodingAgentConfig | null>(null)
   const [sysInfo, setSysInfo] = useState<SystemInfo | null>(null)
   const [installedModels, setInstalledModels] = useState<string[]>([])
   const [pulling, setPulling] = useState<Record<string, boolean>>({})
   const [pullProgress, setPullProgress] = useState<Record<string, string>>({})
 
+  const refreshInstalledModels = useCallback(() => {
+    invoke<string[]>('list_ollama_models').then(setInstalledModels).catch(() => {})
+  }, [])
+
   useEffect(() => {
     invoke<CodingAgentConfig>('get_coding_agent_config').then(setConfig).catch(() => {})
     invoke<SystemInfo>('plugin:hardware|get_system_info').then(setSysInfo).catch(() => {})
-    invoke<string[]>('list_ollama_models').then(setInstalledModels).catch(() => {})
-  }, [])
+    refreshInstalledModels()
+  }, [refreshInstalledModels])
 
   const effectiveVramMib = sysInfo
     ? sysInfo.gpus.length > 0
@@ -118,19 +214,20 @@ function HardwareSetup({ ollamaUrl }: { ollamaUrl: string }) {
     try {
       await invoke('pull_ollama_model', { modelId: model, ollamaUrl })
       setInstalledModels((prev) => (prev.includes(model) ? prev : [...prev, model]))
+      refreshInstalledModels()
       setPullProgress((p) => ({ ...p, [model]: 'Done' }))
     } catch (err) {
       setPullProgress((p) => ({ ...p, [model]: `Error: ${err}` }))
     } finally {
       setPulling((p) => ({ ...p, [model]: false }))
     }
-  }, [ollamaUrl])
+  }, [ollamaUrl, refreshInstalledModels])
 
   if (!config) return null
 
   const modelsToCheck = [
-    { label: 'Code model', name: config.code_model },
-    { label: 'Vision model', name: config.vision_model },
+    { label: 'Code model', name: selectedCodeModel || config.code_model, kind: 'code' as const },
+    { label: 'Vision model', name: config.vision_model, kind: 'vision' as const },
   ]
 
   return (
@@ -159,8 +256,8 @@ function HardwareSetup({ ollamaUrl }: { ollamaUrl: string }) {
       )}
 
       <div className="space-y-1.5">
-        {modelsToCheck.map(({ label, name }) => {
-          const installed = installedModels.some((m) => m === name || m.startsWith(name.split(':')[0]))
+        {modelsToCheck.map(({ label, name, kind }) => {
+          const installed = isOllamaModelInstalled(name, installedModels)
           const required = vramRequiredGib(name)
           const tooLarge = required > 0 && effectiveVramGib > 0 && required > effectiveVramGib
           const progress = pullProgress[name]
@@ -171,14 +268,27 @@ function HardwareSetup({ ollamaUrl }: { ollamaUrl: string }) {
                 <span className="text-[10px] text-muted-foreground/70">{label}</span>
                 {installed && <IconCircleCheck size={11} className="text-green-500 ml-auto" />}
               </div>
-              <div className="font-mono text-[10px] text-foreground/80 truncate" title={name}>{name}</div>
+              {kind === 'code' ? (
+                <CodeModelSelector
+                  value={name}
+                  installedModels={installedModels}
+                  disabled={disabled}
+                  isPulling={pulling[name]}
+                  pullProgress={progress}
+                  onChange={onCodeModelChange}
+                  onPull={handlePull}
+                  onRefresh={refreshInstalledModels}
+                />
+              ) : (
+                <div className="font-mono text-[10px] text-foreground/80 truncate" title={name}>{name}</div>
+              )}
               {tooLarge && (
                 <div className="flex items-center gap-1 text-[10px] text-amber-600 dark:text-amber-400">
                   <IconAlertCircle size={11} />
                   Needs ~{required} GB — you have {effectiveVramGib.toFixed(0)} GB
                 </div>
               )}
-              {!installed && (
+              {!installed && kind === 'vision' && (
                 <Button
                   size="sm"
                   variant="outline"
@@ -227,7 +337,7 @@ export function CodingAgentPanel() {
     execLog, appendLog,
     addDiff,
     pendingDiffs,
-    startNewSession, loadSession, deleteSession,
+    startNewSession, continueSession, loadSession, deleteSession,
     sessions,
   } = useCodingAgentStore()
 
@@ -238,6 +348,7 @@ export function CodingAgentPanel() {
   const [isRestartingOllama, setIsRestartingOllama] = useState(false)
   const [agentStatus, setAgentStatus] = useState<AgentStatus>('idle')
   const [lastFailureMessage, setLastFailureMessage] = useState<string | null>(null)
+  const [pendingEditIntent, setPendingEditIntent] = useState<PendingEditIntent | null>(null)
   const lastAgentErrorRef = useRef<string | null>(null)
 
   // ── Loop scheduler ────────────────────────────────────────
@@ -251,10 +362,30 @@ export function CodingAgentPanel() {
   const loopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const loopTickRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [agentConfig, setAgentConfig] = useState<CodingAgentConfig | null>(null)
+  const [selectedCodeModel, setSelectedCodeModel] = useState(() => getStoredCodeModel() ?? '')
   const [agentBackend] = useState<CodingAgentBackend>(() => getInitialCodingAgentBackend())
 
   useEffect(() => {
-    invoke<CodingAgentConfig>('get_coding_agent_config').then(setAgentConfig).catch(() => {})
+    invoke<CodingAgentConfig>('get_coding_agent_config')
+      .then((config) => {
+        setAgentConfig(config)
+        setSelectedCodeModel((current) => {
+          const candidate = current || getStoredCodeModel() || config.code_model
+          return isCodeAgentToolCompatible(candidate) ? candidate : CODE_AGENT_DEFAULT_MODEL
+        })
+      })
+      .catch(() => {})
+  }, [])
+
+  const handleCodeModelChange = useCallback((model: string) => {
+    if (!isCodeAgentToolCompatible(model)) return
+
+    setSelectedCodeModel(model)
+    try {
+      window.localStorage.setItem(CODING_AGENT_CODE_MODEL_STORAGE_KEY, model)
+    } catch {
+      // Ignore storage failures; the current selection still applies for this session.
+    }
   }, [])
 
   // ── Pre-flight Ollama check ───────────────────────────────
@@ -437,11 +568,19 @@ export function CodingAgentPanel() {
       const u12 = await listen<AgentDonePayload>('agent-done', (e) => {
         if (!cancelled) handleNormalizedAgentEvent(normalizeDone(e.payload))
       })
+      const u13 = await listen<DirectEditIntentRequestPayload>('agent-edit-intent-request', (e) => {
+        if (cancelled) return
+        setPendingEditIntent({
+          id: e.payload.call_id,
+          toolName: e.payload.tool_name,
+          filePath: e.payload.path,
+        })
+      })
 
       if (cancelled) {
-        for (const unlisten of [uRaw, u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11, u12]) unlisten()
+        for (const unlisten of [uRaw, u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11, u12, u13]) unlisten()
       } else {
-        unlisteners.push(uRaw, u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11, u12)
+        unlisteners.push(uRaw, u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11, u12, u13)
       }
     }
 
@@ -473,21 +612,46 @@ export function CodingAgentPanel() {
     }
   }, [setProjectDir])
 
-  const sendPrompt = useCallback(async (prompt: string) => {
+  const sendPrompt = useCallback(async (
+    prompt: string,
+    options: { source?: CodingSessionSource; includeConversationContext?: boolean } = {}
+  ) => {
     if (!projectDir || !prompt.trim()) return
 
+    const source = options.source ?? 'manual'
+    const includeConversationContext = options.includeConversationContext ?? source === 'manual'
+    const editPermission: EditPermission = getEditPermissionForPrompt(prompt, source)
+    const storeState = useCodingAgentStore.getState()
+    const activeSession = storeState.sessions.find((session) => session.id === storeState.activeSessionId)
+    const shouldStartNewSession = !activeSession || activeSession.projectDir !== projectDir || activeSession.source !== source
+    const candidateModel = selectedCodeModel || agentConfig?.code_model || CODE_AGENT_DEFAULT_MODEL
+    const model = isCodeAgentToolCompatible(candidateModel) ? candidateModel : CODE_AGENT_DEFAULT_MODEL
+    const promptForAgent = buildCodingAgentPrompt({
+      prompt,
+      projectDir,
+      sessions: storeState.sessions,
+      activeSessionId: shouldStartNewSession ? null : storeState.activeSessionId,
+      includeHistory: includeConversationContext,
+    })
     let threadId: string | undefined
-    try {
-      const newThread = await createThread(
-        { id: agentConfig?.code_model ?? 'qwen2.5-coder:32b', provider: 'ollama' },
-        prompt
-      )
-      threadId = newThread.id
-    } catch (err) {
-      console.warn('Failed to create thread for code agent session:', err)
+
+    if (shouldStartNewSession) {
+      try {
+        const newThread = await createThread(
+          { id: model, provider: 'ollama' },
+          prompt
+        )
+        threadId = newThread.id
+      } catch (err) {
+        console.warn('Failed to create thread for code agent session:', err)
+      }
     }
 
-    startNewSession(prompt, threadId)
+    if (shouldStartNewSession) {
+      startNewSession(prompt, threadId, source)
+    } else {
+      continueSession(prompt, source)
+    }
     completionHandledRef.current = false
     lastAgentErrorRef.current = null
     setLastFailureMessage(null)
@@ -495,22 +659,22 @@ export function CodingAgentPanel() {
     setAgentStatus('running')
     appendLog({ type: 'text_delta', content: `> ${prompt}`, timestamp: Date.now() })
     appendLog({ type: 'text_delta', content: `Backend: ${agentBackend}`, timestamp: Date.now() })
+    appendLog({ type: 'text_delta', content: `Model: ${model}`, timestamp: Date.now() })
     appendLog({ type: 'text_delta', content: 'Starting agent…', timestamp: Date.now() })
 
     try {
-      const model = agentConfig?.code_model ?? 'qwen2.5-coder:32b'
-
       if (agentBackend === 'direct-ollama') {
         await invoke('start_ollama_agent', {
           projectDir,
-          prompt,
+          prompt: promptForAgent,
           model,
           ollamaBaseUrl: agentConfig?.ollama_url ?? 'http://localhost:11434',
+          editPermission,
         })
       } else {
         await invoke('spawn_code_agent', {
           projectDir,
-          prompt,
+          prompt: withLegacyEditInstruction(promptForAgent, editPermission),
           ollamaModel: model,
           permissionMode: 'auto_accept',
         })
@@ -531,7 +695,13 @@ export function CodingAgentPanel() {
       setLastFailureMessage(`✗ ${String(err)}`)
       setAgentStatus('idle')
     }
-  }, [projectDir, agentConfig, agentBackend, createThread, setRunning, appendLog, startNewSession, loopEnabled, clearLoopSchedule])
+  }, [projectDir, selectedCodeModel, agentConfig, agentBackend, createThread, setRunning, appendLog, startNewSession, continueSession, loopEnabled, clearLoopSchedule])
+
+  const sendPromptRef = useRef(sendPrompt)
+
+  useEffect(() => {
+    sendPromptRef.current = sendPrompt
+  }, [sendPrompt])
 
   const handleSend = useCallback(async () => {
     if (!projectDir || !draftPrompt.trim()) return
@@ -541,7 +711,7 @@ export function CodingAgentPanel() {
       setLoopCount(1)
       setLoopPrompt(prompt)
     }
-    await sendPrompt(prompt)
+    await sendPrompt(prompt, { source: loopEnabled ? 'loop' : 'manual' })
   }, [projectDir, draftPrompt, loopEnabled, setDraftPrompt, sendPrompt])
 
   // ── Loop trigger ──────────────────────────────────────────
@@ -567,7 +737,7 @@ export function CodingAgentPanel() {
       clearInterval(loopTickRef.current!)
       setLoopCountdown(null)
       setLoopCount((c) => c + 1)
-      await sendPrompt(loopPrompt)
+      await sendPromptRef.current(loopPrompt, { source: 'loop', includeConversationContext: false })
     }, seconds * 1000)
 
     return () => {
@@ -604,6 +774,24 @@ export function CodingAgentPanel() {
     }
   }, [appendLog])
 
+  const handleEditIntentDecision = useCallback(async (approved: boolean) => {
+    if (!pendingEditIntent) return
+
+    const intent = pendingEditIntent
+    setPendingEditIntent(null)
+
+    try {
+      await invoke(approved ? 'approve_agent_edit_intent' : 'reject_agent_edit_intent', { callId: intent.id })
+      appendLog({
+        type: 'text_delta',
+        content: approved ? 'File edits approved for this request.' : 'Answer-only selected for this request.',
+        timestamp: Date.now(),
+      })
+    } catch (err) {
+      appendLog({ type: 'error', content: String(err), timestamp: Date.now() })
+    }
+  }, [appendLog, pendingEditIntent])
+
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() }
@@ -612,6 +800,7 @@ export function CodingAgentPanel() {
   )
 
   const folderName = projectDir ? projectDir.split('/').pop() : null
+  const displayLog = useMemo(() => mergeStreamingLog(execLog), [execLog])
 
   return (
     <div className="flex h-full overflow-hidden">
@@ -633,7 +822,12 @@ export function CodingAgentPanel() {
             </p>
           )}
         </div>
-        <HardwareSetup ollamaUrl="http://localhost:11434" />
+        <HardwareSetup
+          ollamaUrl={agentConfig?.ollama_url ?? 'http://localhost:11434'}
+          selectedCodeModel={selectedCodeModel}
+          disabled={isRunning}
+          onCodeModelChange={handleCodeModelChange}
+        />
         <div className="flex-1 overflow-auto flex flex-col min-h-0">
           {/* Session history */}
           {sessions.length > 0 && (
@@ -775,7 +969,7 @@ export function CodingAgentPanel() {
                   {projectDir ? 'Describe what to build or fix below.' : 'Select a project folder to begin.'}
                 </p>
               )}
-              {execLog.map((line, i) => (
+              {displayLog.map((line, i) => (
                 <LogLine key={i} line={line} />
               ))}
               {isRunning && (
@@ -924,6 +1118,32 @@ export function CodingAgentPanel() {
         </aside>
       )}
 
+      <Dialog open={Boolean(pendingEditIntent)} onOpenChange={(open) => {
+        if (!open && pendingEditIntent) void handleEditIntentDecision(false)
+      }}>
+        <DialogContent showCloseButton={false} className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Allow File Edits?</DialogTitle>
+            <DialogDescription>
+              The agent wants to use {pendingEditIntent?.toolName ?? 'a file edit tool'} for this request.
+            </DialogDescription>
+          </DialogHeader>
+          {pendingEditIntent?.filePath && (
+            <p className="rounded border bg-muted/40 px-3 py-2 font-mono text-xs text-muted-foreground break-all">
+              {pendingEditIntent.filePath}
+            </p>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => void handleEditIntentDecision(false)}>
+              Answer only
+            </Button>
+            <Button onClick={() => void handleEditIntentDecision(true)}>
+              Approve edits
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
     </div>
   )
 }
@@ -953,6 +1173,49 @@ function ProjectFileTree({ projectDir }: { projectDir: string }) {
       ))}
     </ul>
   )
+}
+
+const TEXT_DELTA_STATUS_PREFIXES = [
+  '>',
+  'Backend:',
+  'Model:',
+  'Starting agent',
+  'Ollama agent started',
+  'Agent iteration',
+  'Diff proposed for',
+]
+
+function isMergeableTextDelta(line: ExecLogLine): boolean {
+  if (line.type !== 'text_delta' && line.type !== 'thinking') return false
+
+  const content = line.content.trimStart()
+  if (!content) return false
+
+  if (line.type === 'thinking') return true
+
+  return !TEXT_DELTA_STATUS_PREFIXES.some((prefix) => content.startsWith(prefix))
+}
+
+function mergeStreamingLog(lines: ExecLogLine[]): ExecLogLine[] {
+  return lines.reduce<ExecLogLine[]>((merged, line) => {
+    if (!isMergeableTextDelta(line)) {
+      merged.push(line)
+      return merged
+    }
+
+    const last = merged.at(-1)
+    if (last && isMergeableTextDelta(last) && last.type === line.type) {
+      merged[merged.length - 1] = {
+        ...last,
+        content: `${last.content}${line.content}`,
+        timestamp: line.timestamp,
+      }
+    } else {
+      merged.push(line)
+    }
+
+    return merged
+  }, [])
 }
 
 // ── Execution log line ────────────────────────────────────────
@@ -995,7 +1258,7 @@ function LogLine({ line }: { line: ExecLogLine }) {
         </Reasoning>
       )
     default:
-      return <div className="text-muted-foreground text-xs py-0.5 break-words">{line.content}</div>
+      return <div className="text-muted-foreground text-xs py-0.5 break-words whitespace-pre-wrap">{line.content}</div>
   }
 }
 

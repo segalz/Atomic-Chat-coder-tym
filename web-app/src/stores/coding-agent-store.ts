@@ -24,10 +24,13 @@ export interface PendingDiff {
   status: 'pending' | 'approved' | 'rejected'
 }
 
+export type CodingSessionSource = 'manual' | 'loop'
+
 export interface CodingSession {
   id: string
   threadId?: string
   prompt: string
+  source: CodingSessionSource
   projectDir: string
   planText: string
   execLog: ExecLogLine[]
@@ -59,7 +62,9 @@ interface CodingAgentState {
   addDiff: (diff: PendingDiff) => void
   updateDiffStatus: (id: string, status: PendingDiff['status']) => void
   /** Save current session to history then clear runtime state */
-  startNewSession: (prompt: string, threadId?: string) => void
+  startNewSession: (prompt: string, threadId?: string, source?: CodingSessionSource) => void
+  /** Continue the active session without clearing visible output */
+  continueSession: (prompt: string, source?: CodingSessionSource) => void
   /** Persist the current running session into history (call when agent finishes) */
   saveCurrentSession: () => void
   /** Load a past session into the view (read-only) */
@@ -101,6 +106,7 @@ function normalizeSessions(value: unknown): CodingSession[] {
         id: typeof s.id === 'string' ? s.id : crypto.randomUUID(),
         threadId: typeof s.threadId === 'string' ? s.threadId : undefined,
         prompt: typeof s.prompt === 'string' ? s.prompt : 'Session',
+        source: s.source === 'loop' ? 'loop' : 'manual',
         projectDir: typeof s.projectDir === 'string' ? s.projectDir : '',
         planText: typeof s.planText === 'string' ? s.planText : '',
         execLog: normalizeExecLog(s.execLog),
@@ -190,7 +196,7 @@ export const useCodingAgentStore = create<CodingAgentState>()(
           }
         }),
 
-      startNewSession: (prompt, threadId) => {
+      startNewSession: (prompt, threadId, source = 'manual') => {
         const { planText, execLog, pendingDiffs, projectDir, sessions, activeSessionId } = get()
         const newId = crypto.randomUUID()
 
@@ -207,6 +213,7 @@ export const useCodingAgentStore = create<CodingAgentState>()(
               id: crypto.randomUUID(),
               prompt: prevPrompt,
               threadId: undefined,
+              source: 'manual',
               projectDir,
               planText,
               execLog,
@@ -221,6 +228,7 @@ export const useCodingAgentStore = create<CodingAgentState>()(
           id: newId,
           threadId,
           prompt,
+          source,
           projectDir,
           planText: '',
           execLog: [],
@@ -235,6 +243,25 @@ export const useCodingAgentStore = create<CodingAgentState>()(
           execLog: [],
           pendingDiffs: [],
           isRunning: false,
+        })
+      },
+
+      continueSession: (prompt, source = 'manual') => {
+        set((s) => {
+          if (!s.activeSessionId) return {}
+
+          const idx = s.sessions.findIndex((session) => session.id === s.activeSessionId)
+          if (idx === -1) return {}
+
+          const sessions = [...s.sessions]
+          sessions[idx] = {
+            ...sessions[idx],
+            prompt: sessions[idx].prompt || prompt,
+            source,
+            timestamp: Date.now(),
+          }
+
+          return { sessions, showFree: false }
         })
       },
 
@@ -258,6 +285,7 @@ export const useCodingAgentStore = create<CodingAgentState>()(
               id: activeSessionId ?? crypto.randomUUID(),
               threadId: undefined,
               prompt,
+              source: 'manual',
               projectDir,
               planText,
               execLog,

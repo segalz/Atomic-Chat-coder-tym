@@ -66,6 +66,12 @@ export interface DirectDiffProposedPayload {
   replace: string
 }
 
+export interface DirectEditIntentRequestPayload {
+  call_id: string
+  tool_name: string
+  path: string
+}
+
 export interface AgentDonePayload {
   success: boolean
   error?: string | null

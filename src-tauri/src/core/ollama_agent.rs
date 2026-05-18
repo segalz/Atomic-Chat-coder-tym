@@ -95,6 +95,13 @@ pub struct AgentDiffProposedEvent {
 }
 
 #[derive(Clone, Serialize)]
+pub struct AgentEditIntentRequestEvent {
+    pub call_id: String,
+    pub tool_name: String,
+    pub path: String,
+}
+
+#[derive(Clone, Serialize)]
 pub struct AgentDoneEvent {
     pub success: bool,
     pub error: Option<String>,
@@ -107,6 +114,8 @@ pub struct OllamaAgentState {
     pub cancel: Arc<Mutex<Option<CancellationToken>>>,
     /// Pending diff approvals: call_id → oneshot sender (true = approved, false = rejected)
     pub pending_diffs: Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>,
+    /// Pending early edit intent approvals: call_id → oneshot sender.
+    pub pending_edit_intents: Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>,
     pub running: Arc<Mutex<bool>>,
 }
 
@@ -234,6 +243,75 @@ fn tool_definitions() -> Value {
 
 // ── Tool execution ────────────────────────────────────────────────────────────
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FileEditPermission {
+    Allowed,
+    Ask,
+    Denied,
+}
+
+impl FileEditPermission {
+    fn from_option(value: Option<String>) -> Self {
+        match value.as_deref() {
+            Some("allowed") => Self::Allowed,
+            Some("ask") => Self::Ask,
+            Some("denied") => Self::Denied,
+            _ => Self::Ask,
+        }
+    }
+}
+
+async fn ensure_file_edit_allowed<R: Runtime>(
+    app: &AppHandle<R>,
+    call_id: &str,
+    tool_name: &str,
+    path: &std::path::Path,
+    edit_permission: Arc<Mutex<FileEditPermission>>,
+    pending_edit_intents: Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>,
+) -> Result<(), String> {
+    let current_permission = *edit_permission.lock().await;
+
+    match current_permission {
+        FileEditPermission::Allowed => Ok(()),
+        FileEditPermission::Denied => Err(
+            "File edits are disabled for this request because it looks like a question, calculation, or explanation. Answer in text only unless the user explicitly asks to modify files or code."
+                .to_string(),
+        ),
+        FileEditPermission::Ask => {
+            let (tx, rx) = oneshot::channel::<bool>();
+            {
+                let mut guard = pending_edit_intents.lock().await;
+                guard.insert(call_id.to_string(), tx);
+            }
+
+            let _ = app.emit(
+                "agent-edit-intent-request",
+                AgentEditIntentRequestEvent {
+                    call_id: call_id.to_string(),
+                    tool_name: tool_name.to_string(),
+                    path: path.to_string_lossy().into_owned(),
+                },
+            );
+
+            let approved = rx.await.unwrap_or(false);
+            {
+                let mut guard = edit_permission.lock().await;
+                *guard = if approved {
+                    FileEditPermission::Allowed
+                } else {
+                    FileEditPermission::Denied
+                };
+            }
+
+            if approved {
+                Ok(())
+            } else {
+                Err("User chose answer-only for this request; do not edit files.".to_string())
+            }
+        }
+    }
+}
+
 async fn execute_tool<R: Runtime>(
     app: &AppHandle<R>,
     call_id: &str,
@@ -241,6 +319,8 @@ async fn execute_tool<R: Runtime>(
     args: &Value,
     project_dir: &str,
     pending_diffs: Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>,
+    pending_edit_intents: Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>,
+    edit_permission: Arc<Mutex<FileEditPermission>>,
 ) -> Result<String, String> {
     match name {
         "read_file" => {
@@ -256,6 +336,16 @@ async fn execute_tool<R: Runtime>(
                 .as_str()
                 .ok_or("write_file: missing 'content'")?
                 .to_string();
+
+            ensure_file_edit_allowed(
+                app,
+                call_id,
+                name,
+                &path,
+                edit_permission.clone(),
+                pending_edit_intents,
+            )
+            .await?;
 
             // S2: Validate JS/TS AST before the diff reaches the UI.
             // Errors are returned to the S1 self-healing loop, not the user.
@@ -308,6 +398,16 @@ async fn execute_tool<R: Runtime>(
                 .as_str()
                 .ok_or("edit_file: missing 'replace'")?
                 .to_string();
+
+            ensure_file_edit_allowed(
+                app,
+                call_id,
+                name,
+                &path,
+                edit_permission.clone(),
+                pending_edit_intents,
+            )
+            .await?;
 
             let current = tokio::fs::read_to_string(&path)
                 .await
@@ -831,6 +931,8 @@ async fn run_agent_loop<R: Runtime>(
     project_dir: &str,
     user_prompt: &str,
     pending_diffs: Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>,
+    pending_edit_intents: Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>,
+    edit_permission: Arc<Mutex<FileEditPermission>>,
     cancel: CancellationToken,
 ) -> Result<(), String> {
     let tools = tool_definitions();
@@ -985,6 +1087,8 @@ async fn run_agent_loop<R: Runtime>(
                 &args,
                 project_dir,
                 pending_diffs.clone(),
+                pending_edit_intents.clone(),
+                edit_permission.clone(),
             )
             .await;
 
@@ -1044,6 +1148,7 @@ pub async fn start_ollama_agent<R: Runtime>(
     prompt: String,
     model: String,
     ollama_base_url: Option<String>,
+    edit_permission: Option<String>,
 ) -> Result<(), String> {
     // Guard: only one agent at a time
     {
@@ -1065,9 +1170,12 @@ pub async fn start_ollama_agent<R: Runtime>(
 
     let pending_diffs = state.pending_diffs.clone();
     let pending_diffs_for_cleanup = state.pending_diffs.clone();
+    let pending_edit_intents = state.pending_edit_intents.clone();
+    let pending_edit_intents_for_cleanup = state.pending_edit_intents.clone();
     let running_arc = state.running.clone();
     let cancel_arc = state.cancel.clone();
     let app_clone = app.clone();
+    let edit_permission = Arc::new(Mutex::new(FileEditPermission::from_option(edit_permission)));
 
     emit_text_delta(
         &app,
@@ -1094,6 +1202,8 @@ pub async fn start_ollama_agent<R: Runtime>(
                 &project_dir,
                 &prompt,
                 pending_diffs,
+                pending_edit_intents,
+                edit_permission,
                 loop_cancel,
             ),
         )
@@ -1120,6 +1230,10 @@ pub async fn start_ollama_agent<R: Runtime>(
         }
         {
             let mut g = pending_diffs_for_cleanup.lock().await;
+            g.clear();
+        }
+        {
+            let mut g = pending_edit_intents_for_cleanup.lock().await;
             g.clear();
         }
 
@@ -1171,14 +1285,51 @@ pub async fn stop_ollama_agent(state: State<'_, OllamaAgentState>) -> Result<(),
             let mut guard = state.pending_diffs.lock().await;
             guard.drain().map(|(_, tx)| tx).collect::<Vec<_>>()
         };
+        let pending_edit_intents = {
+            let mut guard = state.pending_edit_intents.lock().await;
+            guard.drain().map(|(_, tx)| tx).collect::<Vec<_>>()
+        };
 
         for tx in pending {
+            let _ = tx.send(false);
+        }
+        for tx in pending_edit_intents {
             let _ = tx.send(false);
         }
 
         Ok(())
     } else {
         Err("No Ollama agent is running.".to_string())
+    }
+}
+
+/// Called by the UI to approve early file-edit intent for ambiguous requests.
+#[tauri::command]
+pub async fn approve_agent_edit_intent(
+    state: State<'_, OllamaAgentState>,
+    call_id: String,
+) -> Result<(), String> {
+    let mut guard = state.pending_edit_intents.lock().await;
+    if let Some(tx) = guard.remove(&call_id) {
+        let _ = tx.send(true);
+        Ok(())
+    } else {
+        Err(format!("No pending edit intent with id '{}'", call_id))
+    }
+}
+
+/// Called by the UI to reject early file-edit intent for ambiguous requests.
+#[tauri::command]
+pub async fn reject_agent_edit_intent(
+    state: State<'_, OllamaAgentState>,
+    call_id: String,
+) -> Result<(), String> {
+    let mut guard = state.pending_edit_intents.lock().await;
+    if let Some(tx) = guard.remove(&call_id) {
+        let _ = tx.send(false);
+        Ok(())
+    } else {
+        Err(format!("No pending edit intent with id '{}'", call_id))
     }
 }
 

@@ -1,6 +1,5 @@
 pub mod core;
 
-
 #[cfg(not(feature = "cli"))]
 use core::{
     app::commands::get_jan_data_folder_path,
@@ -124,6 +123,8 @@ pub fn run() {
         // Ollama Agent (S1)
         core::ollama_agent::start_ollama_agent,
         core::ollama_agent::stop_ollama_agent,
+        core::ollama_agent::approve_agent_edit_intent,
+        core::ollama_agent::reject_agent_edit_intent,
         core::ollama_agent::approve_agent_diff,
         core::ollama_agent::reject_agent_diff,
         // Vision Simulator Capture (S4)
@@ -411,7 +412,6 @@ pub fn run() {
                             log::info!("MLX processes cleaned up successfully");
                         }
                     }
-
 
                     #[cfg(feature = "foundation-models")]
                     {
