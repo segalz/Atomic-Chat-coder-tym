@@ -131,3 +131,6 @@ Built on the shoulders of giants:
 <p align="center">
   <sub>© 2026 Atomic Chat · Built with ❤️ · <a href="https://atomic.chat">atomic.chat</a></sub>
 </p>
+
+###ollama coder by zvi segal
+By mcp server and ollama llms in crated a coder and a timer for multi stage code stapes
