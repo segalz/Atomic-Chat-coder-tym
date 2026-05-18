@@ -1,6 +1,6 @@
 <img src="https://github.com/AtomicBot-ai/Atomic-Chat-HQ/raw/main/assets/logo.png" width="80" alt="Atomic Chat" />
 
-# Atomic Chat and code mose be ollama 
+# Atomic Chat and code mode be ollama llm added bt zvi segal
 
 Open-source ChatGPT alternative. Run local LLMs or connect cloud models — with full control and privacy.
 
