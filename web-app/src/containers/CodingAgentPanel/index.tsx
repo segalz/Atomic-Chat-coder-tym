@@ -349,6 +349,9 @@ export function CodingAgentPanel() {
   const [agentStatus, setAgentStatus] = useState<AgentStatus>('idle')
   const [lastFailureMessage, setLastFailureMessage] = useState<string | null>(null)
   const [pendingEditIntent, setPendingEditIntent] = useState<PendingEditIntent | null>(null)
+  const [autoApprove, setAutoApprove] = useState(true)
+  const autoApproveRef = useRef(true)
+  useEffect(() => { autoApproveRef.current = autoApprove }, [autoApprove])
   const lastAgentErrorRef = useRef<string | null>(null)
 
   // ── Loop scheduler ────────────────────────────────────────
@@ -498,11 +501,22 @@ export function CodingAgentPanel() {
           replace: event.replace,
           status: 'pending',
         })
-        appendLog({
-          type: 'text_delta',
-          content: `Diff proposed for ${event.filePath} — awaiting approval`,
-          timestamp: Date.now(),
-        })
+        if (autoApproveRef.current) {
+          void invoke('approve_agent_diff', { callId: event.id })
+            .then(() => useCodingAgentStore.getState().updateDiffStatus(event.id, 'approved'))
+            .catch((err) => appendLog({ type: 'error', content: String(err), timestamp: Date.now() }))
+          appendLog({
+            type: 'text_delta',
+            content: `Diff auto-approved for ${event.filePath}`,
+            timestamp: Date.now(),
+          })
+        } else {
+          appendLog({
+            type: 'text_delta',
+            content: `Diff proposed for ${event.filePath} — awaiting approval`,
+            timestamp: Date.now(),
+          })
+        }
         break
       case 'done':
         if (completionHandledRef.current) return
@@ -1049,6 +1063,22 @@ export function CodingAgentPanel() {
                   )}
                 </div>
               )}
+              <button
+                type="button"
+                onClick={() => {
+                  setAutoApprove((v) => {
+                    const next = !v
+                    if (next) {
+                      pendingDiffs.filter((d) => d.status === 'pending').forEach((d) => void handleApproveDiff(d.id))
+                    }
+                    return next
+                  })
+                }}
+                title={autoApprove ? 'Auto-approve ON — click to disable' : 'Auto-approve OFF — click to enable'}
+                className={`h-7 px-2 text-[10px] rounded-md border cursor-pointer select-none font-medium ${autoApprove ? 'bg-foreground text-background border-foreground hover:bg-foreground/80' : 'bg-background text-foreground border-border hover:bg-muted/40'}`}
+              >
+                {autoApprove ? '✓ Auto' : '✗ Auto'}
+              </button>
               {isRunning ? (
                 <Button size="icon-sm" variant="destructive" className="rounded-full" onClick={handleStop} title="Stop agent">
                   <IconPlayerStop size={15} />
@@ -1068,8 +1098,8 @@ export function CodingAgentPanel() {
       </div>
 
       {/* ── Right: Pending diffs ─────────────────────────── */}
-      {pendingDiffs.length > 0 && (
-        <aside className="w-72 shrink-0 border-l flex flex-col bg-muted/10">
+      {pendingDiffs.filter((d) => d.status === 'pending').length > 0 && (
+        <aside className="w-96 shrink-0 border-l flex flex-col bg-muted/10">
           <div className="px-3 py-2 border-b flex items-center gap-2">
             <IconFileCode size={13} className="text-muted-foreground" />
             <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
@@ -1077,41 +1107,35 @@ export function CodingAgentPanel() {
             </span>
           </div>
           <div className="flex-1 overflow-y-auto p-2 space-y-2">
-            {pendingDiffs.map((diff) => (
+            {pendingDiffs.filter((d) => d.status === 'pending').map((diff) => (
               <div key={diff.id} className="rounded-lg border bg-background/60 p-2 text-xs">
                 <p className="font-mono text-[10px] text-muted-foreground truncate mb-1" title={diff.filePath}>
                   {diff.filePath.split('/').slice(-2).join('/')}
                 </p>
                 {diff.search && (
-                  <div className="rounded bg-red-500/10 border border-red-500/20 px-1.5 py-1 mb-1 font-mono text-[10px] text-red-400 max-h-16 overflow-hidden">
-                    -{diff.search.split('\n').slice(0, 3).join('\n')}
+                  <div className="rounded bg-red-500/10 border border-red-500/20 px-1.5 py-1 mb-1 font-mono text-[10px] text-red-400 max-h-32 overflow-auto whitespace-pre-wrap">
+                    -{diff.search.split('\n').slice(0, 8).join('\n')}
                   </div>
                 )}
-                <div className="rounded bg-green-500/10 border border-green-500/20 px-1.5 py-1 mb-2 font-mono text-[10px] text-green-400 max-h-16 overflow-hidden">
-                  +{diff.replace.split('\n').slice(0, 3).join('\n')}
+                <div className="rounded bg-green-500/10 border border-green-500/20 px-1.5 py-1 mb-2 font-mono text-[10px] text-green-400 max-h-32 overflow-auto whitespace-pre-wrap">
+                  +{diff.replace.split('\n').slice(0, 8).join('\n')}
                 </div>
-                {diff.status === 'pending' ? (
-                  <div className="flex gap-1">
-                    <Button
-                      size="sm" variant="outline"
-                      className="flex-1 h-6 text-[10px] text-green-600 border-green-500/30 hover:bg-green-500/10"
-                      onClick={() => handleApproveDiff(diff.id)}
-                    >
-                      Approve
-                    </Button>
-                    <Button
-                      size="sm" variant="outline"
-                      className="flex-1 h-6 text-[10px] text-destructive border-destructive/30 hover:bg-destructive/10"
-                      onClick={() => handleRejectDiff(diff.id)}
-                    >
-                      Reject
-                    </Button>
-                  </div>
-                ) : (
-                  <p className={`text-[10px] text-center font-medium ${diff.status === 'approved' ? 'text-green-500' : 'text-muted-foreground'}`}>
-                    {diff.status === 'approved' ? '✓ Approved' : '✗ Rejected'}
-                  </p>
-                )}
+                <div className="flex gap-1">
+                  <Button
+                    size="sm" variant="outline"
+                    className="flex-1 h-6 text-[10px] text-green-600 border-green-500/30 hover:bg-green-500/10"
+                    onClick={() => handleApproveDiff(diff.id)}
+                  >
+                    Approve
+                  </Button>
+                  <Button
+                    size="sm" variant="outline"
+                    className="flex-1 h-6 text-[10px] text-destructive border-destructive/30 hover:bg-destructive/10"
+                    onClick={() => handleRejectDiff(diff.id)}
+                  >
+                    Reject
+                  </Button>
+                </div>
               </div>
             ))}
           </div>

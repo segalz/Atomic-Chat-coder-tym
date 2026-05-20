@@ -8,7 +8,11 @@
 //!   - Search/Replace paradigm enforced for all file edits
 //!   - Typed Tauri events: text_delta, tool_call_start, tool_call_result, diff_proposed, done
 
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use futures_util::StreamExt;
 use reqwest::Client;
@@ -29,6 +33,15 @@ const DIRECT_AGENT_HTTP_TIMEOUT_SECS: u64 = 120;
 /// Prune when history exceeds this many messages (keeps first system message + recent N)
 const CONTEXT_PRUNE_THRESHOLD: usize = 60;
 const CONTEXT_KEEP_RECENT: usize = 30;
+const TOOL_RESULT_CONTEXT_MAX_BYTES: usize = 12 * 1024;
+const CODE_PLAN_MAX_RELEVANT_FILES: usize = 40;
+const CODE_PLAN_MAX_SKELETON_FILES: usize = 20;
+const CODE_PLAN_MAX_SYMBOLS_PER_FILE: usize = 20;
+const CODE_PLAN_MAX_DEPENDENCY_FILES: usize = 20;
+const CODE_PLAN_MAX_DEPENDENCIES_PER_FILE: usize = 12;
+const CODE_PLAN_MAX_CONTENT_SCAN_FILES: usize = 400;
+const CODE_PLAN_MAX_FILE_BYTES: u64 = 256 * 1024;
+const CODE_PLAN_MAX_OUTPUT_BYTES: usize = 20 * 1024;
 
 const BLACKLISTED_DIRS: &[&str] = &[
     "node_modules",
@@ -244,6 +257,1046 @@ fn emit_content_delta<R: Runtime>(
 /// Delegates to agent_bridge so schemas are defined in a single place (S2).
 fn tool_definitions() -> Value {
     crate::core::mcp::agent_bridge::tool_schemas()
+}
+
+fn code_planner_enabled() -> bool {
+    matches!(
+        std::env::var("ATOMIC_CODE_PLANNER").ok().as_deref(),
+        Some("1") | Some("true") | Some("TRUE") | Some("on") | Some("ON")
+    )
+}
+
+// ── CodePlanner ──────────────────────────────────────────────────────────────
+
+#[derive(Clone, Debug)]
+struct CodePlanCandidate {
+    path: String,
+    score: usize,
+    reasons: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CodePlanDependency {
+    hint: String,
+    target: Option<String>,
+}
+
+async fn build_code_plan(project_dir: &str, user_prompt: &str) -> Result<String, String> {
+    let root = PathBuf::from(project_dir);
+    let output = tokio::process::Command::new("rg")
+        .arg("--files")
+        .current_dir(&root)
+        .output()
+        .await
+        .map_err(|e| format!("CodePlanner failed to run rg --files: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("CodePlanner file scan failed: {}", stderr.trim()));
+    }
+
+    let all_files = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .filter(|path| !path_has_blacklisted_segment(path))
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let all_file_set = all_files.iter().cloned().collect::<HashSet<_>>();
+
+    let keywords = extract_task_keywords(user_prompt);
+    let relevant_files = rank_code_plan_files_with_content(&root, &all_files, &keywords).await?;
+    let high_confidence_count = relevant_files
+        .iter()
+        .filter(|candidate| candidate.score > 0)
+        .count();
+
+    let mut dependency_sections = Vec::new();
+    let mut skeleton_sections = Vec::new();
+
+    for candidate in relevant_files
+        .iter()
+        .filter(|candidate| is_text_code_file(&candidate.path))
+        .take(CODE_PLAN_MAX_DEPENDENCY_FILES)
+    {
+        let Some(content) = read_plan_file_if_small(&root, &candidate.path).await? else {
+            continue;
+        };
+
+        let dependencies =
+            build_dependency_lines(&root, &all_file_set, &candidate.path, &content).await?;
+        if !dependencies.is_empty() {
+            dependency_sections.push(format!(
+                "- `{}`\n{}",
+                candidate.path,
+                dependencies
+                    .into_iter()
+                    .take(CODE_PLAN_MAX_DEPENDENCIES_PER_FILE)
+                    .map(|dep| format!("  - {}", dep))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ));
+        }
+    }
+
+    for candidate in relevant_files
+        .iter()
+        .filter(|candidate| is_skeleton_supported_file(&candidate.path))
+        .take(CODE_PLAN_MAX_SKELETON_FILES)
+    {
+        let Some(content) = read_plan_file_if_small(&root, &candidate.path).await? else {
+            continue;
+        };
+
+        let symbols = unique_limited(
+            extract_file_skeleton(&candidate.path, &content),
+            CODE_PLAN_MAX_SYMBOLS_PER_FILE,
+        );
+        if !symbols.is_empty() {
+            skeleton_sections.push(format!(
+                "#### `{}`\n{}",
+                candidate.path,
+                symbols
+                    .into_iter()
+                    .take(CODE_PLAN_MAX_SYMBOLS_PER_FILE)
+                    .map(|symbol| format!("- {}", symbol))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ));
+        }
+    }
+
+    let recommended_scope = relevant_files
+        .iter()
+        .take(12)
+        .map(|candidate| format!("- `{}`", candidate.path))
+        .collect::<Vec<_>>();
+
+    let mut plan = String::new();
+    plan.push_str("## CodePlanner Context Pack\n\n");
+    plan.push_str("### Task\n");
+    plan.push_str(&truncate_for_plan(user_prompt.trim(), 1600));
+    plan.push_str("\n\n");
+
+    plan.push_str("### Keywords\n");
+    if keywords.is_empty() {
+        plan.push_str("- No strong task keywords extracted.\n");
+    } else {
+        plan.push_str(
+            &keywords
+                .iter()
+                .map(|keyword| format!("- `{}`", keyword))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        plan.push('\n');
+    }
+    plan.push('\n');
+
+    plan.push_str("### Relevant Files\n");
+    if relevant_files.is_empty() {
+        plan.push_str("- No project files found by `rg --files` after directory filtering.\n");
+    } else {
+        if high_confidence_count == 0 {
+            plan.push_str(
+                "- No high-confidence filename matches; these are general source candidates.\n",
+            );
+        }
+        for candidate in relevant_files.iter().take(CODE_PLAN_MAX_RELEVANT_FILES) {
+            let reason_text = if candidate.reasons.is_empty() {
+                "general source candidate".to_string()
+            } else {
+                candidate.reasons.join("; ")
+            };
+            plan.push_str(&format!(
+                "- `{}` (score {}; {})\n",
+                candidate.path, candidate.score, reason_text
+            ));
+        }
+    }
+    plan.push('\n');
+
+    plan.push_str("### Dependency Tree\n");
+    if dependency_sections.is_empty() {
+        plan.push_str("- No shallow local dependency hints found in the relevant files.\n");
+    } else {
+        plan.push_str(&dependency_sections.join("\n"));
+        plan.push('\n');
+    }
+    plan.push('\n');
+
+    plan.push_str("### Skeleton\n");
+    if skeleton_sections.is_empty() {
+        plan.push_str("- No supported skeleton symbols found in the relevant files.\n");
+    } else {
+        plan.push_str(&skeleton_sections.join("\n\n"));
+        plan.push('\n');
+    }
+    plan.push('\n');
+
+    plan.push_str("### Risk Areas\n");
+    for risk in build_risk_areas(&relevant_files, high_confidence_count) {
+        plan.push_str(&format!("- {}\n", risk));
+    }
+    plan.push('\n');
+
+    plan.push_str("### Recommended Read Scope\n");
+    if recommended_scope.is_empty() {
+        plan.push_str(
+            "- Use `grep` or `code_plan` with narrower terms before reading full files.\n",
+        );
+    } else {
+        plan.push_str(&recommended_scope.join("\n"));
+        plan.push('\n');
+    }
+
+    Ok(truncate_plan_output(plan))
+}
+
+fn extract_task_keywords(prompt: &str) -> Vec<String> {
+    const STOP_WORDS: &[&str] = &[
+        "about",
+        "after",
+        "again",
+        "agent",
+        "allow",
+        "also",
+        "before",
+        "build",
+        "change",
+        "check",
+        "code",
+        "could",
+        "create",
+        "direct",
+        "does",
+        "done",
+        "edit",
+        "file",
+        "files",
+        "find",
+        "first",
+        "from",
+        "have",
+        "implement",
+        "inside",
+        "into",
+        "make",
+        "model",
+        "modify",
+        "need",
+        "only",
+        "phase",
+        "please",
+        "project",
+        "read",
+        "request",
+        "should",
+        "stage",
+        "task",
+        "that",
+        "this",
+        "tool",
+        "update",
+        "use",
+        "user",
+        "using",
+        "what",
+        "when",
+        "where",
+        "with",
+        "without",
+        "would",
+        "your",
+    ];
+
+    let mut seen = HashSet::new();
+    let mut keywords = Vec::new();
+
+    for raw in prompt.split(|c: char| !c.is_ascii_alphanumeric()) {
+        let term = raw
+            .trim_matches(|c: char| c == '_' || c == '-')
+            .to_ascii_lowercase();
+
+        if term.len() < 3 || STOP_WORDS.contains(&term.as_str()) || !seen.insert(term.clone()) {
+            continue;
+        }
+
+        keywords.push(term);
+    }
+
+    keywords
+}
+
+#[cfg(test)]
+fn rank_code_plan_files(files: &[String], keywords: &[String]) -> Vec<CodePlanCandidate> {
+    let mut candidates = files
+        .iter()
+        .map(|path| candidate_from_path(path, keywords))
+        .collect::<Vec<_>>();
+
+    filter_sort_and_limit_candidates(&mut candidates);
+    candidates
+}
+
+async fn rank_code_plan_files_with_content(
+    root: &Path,
+    files: &[String],
+    keywords: &[String],
+) -> Result<Vec<CodePlanCandidate>, String> {
+    let mut candidates_by_path = files
+        .iter()
+        .map(|path| (path.clone(), candidate_from_path(path, keywords)))
+        .collect::<HashMap<_, _>>();
+
+    let mut scan_paths = files
+        .iter()
+        .filter(|path| is_text_code_file(path))
+        .collect::<Vec<_>>();
+    scan_paths.sort_by(|a, b| {
+        general_source_priority(b)
+            .cmp(&general_source_priority(a))
+            .then_with(|| a.cmp(b))
+    });
+
+    for path in scan_paths
+        .into_iter()
+        .take(CODE_PLAN_MAX_CONTENT_SCAN_FILES)
+    {
+        let Some(content) = read_plan_file_if_small(root, path).await? else {
+            continue;
+        };
+
+        let (content_score, content_reasons) = score_code_plan_content(path, &content, keywords);
+        if content_score == 0 {
+            continue;
+        }
+
+        let candidate = candidates_by_path
+            .entry(path.clone())
+            .or_insert_with(|| candidate_from_path(path, keywords));
+        candidate.score += content_score;
+        for reason in content_reasons {
+            push_unique(&mut candidate.reasons, reason);
+        }
+    }
+
+    let mut candidates = candidates_by_path.into_values().collect::<Vec<_>>();
+    filter_sort_and_limit_candidates(&mut candidates);
+    Ok(candidates)
+}
+
+fn candidate_from_path(path: &str, keywords: &[String]) -> CodePlanCandidate {
+    let (score, reasons) = score_code_plan_file_with_reasons(path, keywords);
+    CodePlanCandidate {
+        path: path.to_string(),
+        score,
+        reasons,
+    }
+}
+
+fn filter_sort_and_limit_candidates(candidates: &mut Vec<CodePlanCandidate>) {
+    let has_positive_scores = candidates.iter().any(|candidate| candidate.score > 0);
+    if has_positive_scores {
+        candidates.retain(|candidate| candidate.score > 0);
+    } else {
+        for candidate in candidates.iter_mut() {
+            if general_source_priority(&candidate.path) > 0 {
+                push_unique(
+                    &mut candidate.reasons,
+                    "fallback source file when no keyword match is available".to_string(),
+                );
+            }
+        }
+        candidates.retain(|candidate| general_source_priority(&candidate.path) > 0);
+    }
+
+    candidates.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| general_source_priority(&b.path).cmp(&general_source_priority(&a.path)))
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    candidates.truncate(CODE_PLAN_MAX_RELEVANT_FILES);
+}
+
+fn score_code_plan_file_with_reasons(path: &str, keywords: &[String]) -> (usize, Vec<String>) {
+    let lower_path = path.to_ascii_lowercase();
+    let file_name = Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(path)
+        .to_ascii_lowercase();
+    let stem = Path::new(path)
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let path_tokens = lower_path
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+
+    let mut score = 0usize;
+    let mut reasons = Vec::new();
+    for keyword in keywords {
+        if stem == *keyword || file_name == *keyword {
+            score += 18;
+            push_unique(
+                &mut reasons,
+                format!("filename exactly matches `{}`", keyword),
+            );
+        } else if stem.contains(keyword) || file_name.contains(keyword) {
+            score += 12;
+            push_unique(&mut reasons, format!("filename contains `{}`", keyword));
+        }
+
+        if path_tokens.iter().any(|token| token == keyword) {
+            score += 10;
+            push_unique(&mut reasons, format!("path segment matches `{}`", keyword));
+        } else if lower_path.contains(keyword) {
+            score += 5;
+            push_unique(&mut reasons, format!("path contains `{}`", keyword));
+        }
+    }
+
+    if score > 0 {
+        score += general_source_priority(path);
+    }
+
+    (score, reasons)
+}
+
+fn score_code_plan_content(path: &str, content: &str, keywords: &[String]) -> (usize, Vec<String>) {
+    if keywords.is_empty() {
+        return (0, Vec::new());
+    }
+
+    let mut score = 0usize;
+    let mut reasons = Vec::new();
+
+    for symbol in extract_file_skeleton(path, content) {
+        let lower = symbol.to_ascii_lowercase();
+        for keyword in keywords {
+            if lower.contains(keyword) {
+                score += 14;
+                push_unique(
+                    &mut reasons,
+                    format!("symbol `{}` matches `{}`", symbol, keyword),
+                );
+            }
+        }
+    }
+
+    for dependency in extract_dependency_hints(path, content) {
+        let lower = dependency.hint.to_ascii_lowercase();
+        for keyword in keywords {
+            if lower.contains(keyword) {
+                score += 8;
+                push_unique(
+                    &mut reasons,
+                    format!("dependency hint matches `{}`", keyword),
+                );
+            }
+        }
+    }
+
+    for line in content.lines().take(240) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.len() > 240 {
+            continue;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        for keyword in keywords {
+            if lower.contains(keyword) {
+                score += 2;
+                push_unique(&mut reasons, format!("content mentions `{}`", keyword));
+            }
+        }
+
+        if reasons.len() >= 8 {
+            break;
+        }
+    }
+
+    (score, reasons.into_iter().take(8).collect())
+}
+
+fn general_source_priority(path: &str) -> usize {
+    let lower = path.to_ascii_lowercase();
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("");
+
+    let mut score = match extension {
+        "rs" | "ts" | "tsx" | "js" | "jsx" | "py" => 4,
+        "md" | "toml" | "json" | "yaml" | "yml" => 2,
+        _ => 0,
+    };
+
+    if lower.starts_with("src/") || lower.starts_with("src-tauri/") || lower.contains("/src/") {
+        score += 3;
+    }
+    if lower.contains("test") || lower.contains("spec") {
+        score += 1;
+    }
+
+    score
+}
+
+async fn read_plan_file_if_small(root: &Path, rel_path: &str) -> Result<Option<String>, String> {
+    let path = root.join(rel_path);
+    let metadata = match tokio::fs::metadata(&path).await {
+        Ok(metadata) => metadata,
+        Err(_) => return Ok(None),
+    };
+
+    if !metadata.is_file() || metadata.len() > CODE_PLAN_MAX_FILE_BYTES {
+        return Ok(None);
+    }
+
+    match tokio::fs::read_to_string(&path).await {
+        Ok(content) => Ok(Some(content)),
+        Err(_) => Ok(None),
+    }
+}
+
+fn is_text_code_file(path: &str) -> bool {
+    matches!(
+        Path::new(path).extension().and_then(|ext| ext.to_str()),
+        Some(
+            "rs" | "ts"
+                | "tsx"
+                | "js"
+                | "jsx"
+                | "mjs"
+                | "cjs"
+                | "py"
+                | "md"
+                | "toml"
+                | "json"
+                | "yaml"
+                | "yml"
+        )
+    )
+}
+
+fn is_skeleton_supported_file(path: &str) -> bool {
+    matches!(
+        Path::new(path).extension().and_then(|ext| ext.to_str()),
+        Some("rs" | "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "py")
+    )
+}
+
+async fn build_dependency_lines(
+    root: &Path,
+    all_files: &HashSet<String>,
+    source_path: &str,
+    content: &str,
+) -> Result<Vec<String>, String> {
+    let direct_dependencies = extract_dependency_hints(source_path, content)
+        .into_iter()
+        .map(|dependency| resolve_dependency_target(source_path, dependency, all_files))
+        .collect::<Vec<_>>();
+    let mut lines = Vec::new();
+    let mut seen = HashSet::new();
+    let mut nested_targets = Vec::new();
+
+    for dependency in direct_dependencies
+        .iter()
+        .take(CODE_PLAN_MAX_DEPENDENCIES_PER_FILE)
+    {
+        let line = match &dependency.target {
+            Some(target) => {
+                nested_targets.push(target.clone());
+                format!("{} -> `{}`", dependency.hint, target)
+            }
+            None => dependency.hint.clone(),
+        };
+
+        if seen.insert(line.clone()) {
+            lines.push(line);
+        }
+    }
+
+    for target in nested_targets {
+        if lines.len() >= CODE_PLAN_MAX_DEPENDENCIES_PER_FILE {
+            break;
+        }
+
+        let Some(target_content) = read_plan_file_if_small(root, &target).await? else {
+            continue;
+        };
+
+        for dependency in extract_dependency_hints(&target, &target_content)
+            .into_iter()
+            .map(|dependency| resolve_dependency_target(&target, dependency, all_files))
+        {
+            let Some(nested_target) = dependency.target else {
+                continue;
+            };
+
+            let line = format!("`{}` -> `{}`", target, nested_target);
+            if seen.insert(line.clone()) {
+                lines.push(line);
+            }
+
+            if lines.len() >= CODE_PLAN_MAX_DEPENDENCIES_PER_FILE {
+                break;
+            }
+        }
+    }
+
+    Ok(lines)
+}
+
+fn extract_dependency_hints(path: &str, content: &str) -> Vec<CodePlanDependency> {
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("");
+    let mut deps = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with('#') {
+            continue;
+        }
+
+        let dependency = match extension {
+            "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => {
+                if (trimmed.starts_with("import ")
+                    || trimmed.starts_with("export ")
+                    || trimmed.contains("import("))
+                    && extract_quoted_local_spec(trimmed).is_some()
+                {
+                    Some(CodePlanDependency {
+                        hint: truncate_for_plan(trimmed, 180),
+                        target: None,
+                    })
+                } else {
+                    None
+                }
+            }
+            "rs" => {
+                if trimmed.starts_with("mod ")
+                    || trimmed.starts_with("pub mod ")
+                    || trimmed.starts_with("use crate::")
+                    || trimmed.starts_with("pub use crate::")
+                {
+                    Some(CodePlanDependency {
+                        hint: truncate_for_plan(trimmed, 180),
+                        target: None,
+                    })
+                } else {
+                    None
+                }
+            }
+            "py" => {
+                if trimmed.starts_with("from .") {
+                    Some(CodePlanDependency {
+                        hint: truncate_for_plan(trimmed, 180),
+                        target: None,
+                    })
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+
+        if let Some(dependency) = dependency {
+            deps.push(dependency);
+        }
+
+        if deps.len() >= CODE_PLAN_MAX_DEPENDENCIES_PER_FILE {
+            break;
+        }
+    }
+
+    deps
+}
+
+fn resolve_dependency_target(
+    source_path: &str,
+    mut dependency: CodePlanDependency,
+    all_files: &HashSet<String>,
+) -> CodePlanDependency {
+    dependency.target = resolve_dependency_hint_target(source_path, &dependency.hint, all_files);
+    dependency
+}
+
+fn resolve_dependency_hint_target(
+    source_path: &str,
+    hint: &str,
+    all_files: &HashSet<String>,
+) -> Option<String> {
+    let extension = Path::new(source_path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("");
+
+    match extension {
+        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => {
+            let spec = extract_quoted_local_spec(hint)?;
+            resolve_js_ts_dependency(source_path, spec, all_files)
+        }
+        "rs" => resolve_rust_dependency(source_path, hint, all_files),
+        "py" => resolve_python_dependency(source_path, hint, all_files),
+        _ => None,
+    }
+}
+
+fn extract_quoted_local_spec(line: &str) -> Option<&str> {
+    for quote in ['"', '\''] {
+        let mut rest = line;
+        while let Some(start) = rest.find(quote) {
+            let after_start = &rest[start + 1..];
+            let Some(end) = after_start.find(quote) else {
+                break;
+            };
+            let spec = &after_start[..end];
+            if spec.starts_with("./") || spec.starts_with("../") {
+                return Some(spec);
+            }
+            rest = &after_start[end + 1..];
+        }
+    }
+
+    None
+}
+
+fn resolve_js_ts_dependency(
+    source_path: &str,
+    spec: &str,
+    all_files: &HashSet<String>,
+) -> Option<String> {
+    let source_dir = Path::new(source_path).parent().unwrap_or(Path::new(""));
+    let base = normalize_project_path(source_dir.join(spec));
+    find_existing_dependency_path(
+        &base,
+        &["ts", "tsx", "js", "jsx", "mjs", "cjs", "json"],
+        all_files,
+    )
+}
+
+fn resolve_rust_dependency(
+    source_path: &str,
+    hint: &str,
+    all_files: &HashSet<String>,
+) -> Option<String> {
+    let trimmed = hint
+        .trim()
+        .trim_end_matches(';')
+        .trim_start_matches("pub ")
+        .trim_start_matches("use ")
+        .trim_start_matches("mod ");
+
+    if hint.trim_start().starts_with("mod ") || hint.trim_start().starts_with("pub mod ") {
+        let module = trimmed
+            .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+            .find(|part| !part.is_empty())?;
+        let source_dir = Path::new(source_path).parent().unwrap_or(Path::new(""));
+        let base = normalize_project_path(source_dir.join(module));
+        return find_existing_dependency_path(&base, &["rs"], all_files);
+    }
+
+    let crate_path = trimmed
+        .strip_prefix("crate::")
+        .or_else(|| trimmed.strip_prefix("use crate::"))
+        .or_else(|| trimmed.strip_prefix("pub use crate::"))?;
+    let prefix = if source_path.starts_with("src-tauri/src/") {
+        "src-tauri/src"
+    } else {
+        "src"
+    };
+    let base = format!("{}/{}", prefix, crate_path.replace("::", "/"));
+    find_existing_dependency_path(&base, &["rs"], all_files)
+}
+
+fn resolve_python_dependency(
+    source_path: &str,
+    hint: &str,
+    all_files: &HashSet<String>,
+) -> Option<String> {
+    let trimmed = hint.trim();
+    let rest = trimmed.strip_prefix("from ")?;
+    let module = rest.split_whitespace().next()?;
+    if !module.starts_with('.') {
+        return None;
+    }
+
+    let dot_count = module.chars().take_while(|c| *c == '.').count();
+    let module_tail = module.trim_start_matches('.');
+    let mut base_dir = Path::new(source_path)
+        .parent()
+        .unwrap_or(Path::new(""))
+        .to_path_buf();
+    for _ in 1..dot_count {
+        base_dir.pop();
+    }
+    let base = if module_tail.is_empty() {
+        normalize_project_path(base_dir)
+    } else {
+        normalize_project_path(base_dir.join(module_tail.replace('.', "/")))
+    };
+
+    find_existing_dependency_path(&base, &["py"], all_files)
+}
+
+fn find_existing_dependency_path(
+    base: &str,
+    extensions: &[&str],
+    all_files: &HashSet<String>,
+) -> Option<String> {
+    if all_files.contains(base) {
+        return Some(base.to_string());
+    }
+
+    for ext in extensions {
+        let candidate = format!("{}.{}", base, ext);
+        if all_files.contains(&candidate) {
+            return Some(candidate);
+        }
+
+        let index_candidate = format!("{}/index.{}", base, ext);
+        if all_files.contains(&index_candidate) {
+            return Some(index_candidate);
+        }
+
+        let mod_candidate = format!("{}/mod.{}", base, ext);
+        if all_files.contains(&mod_candidate) {
+            return Some(mod_candidate);
+        }
+
+        let init_candidate = format!("{}/__init__.{}", base, ext);
+        if all_files.contains(&init_candidate) {
+            return Some(init_candidate);
+        }
+    }
+
+    None
+}
+
+fn normalize_project_path(path: PathBuf) -> String {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            std::path::Component::Normal(part) => normalized.push(part),
+            _ => {}
+        }
+    }
+    normalized.to_string_lossy().replace('\\', "/")
+}
+
+fn extract_file_skeleton(path: &str, content: &str) -> Vec<String> {
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("");
+    let mut symbols = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        let symbol = match extension {
+            "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => extract_js_ts_symbol(trimmed),
+            "rs" => extract_rust_symbol(trimmed),
+            "py" => extract_python_symbol(trimmed),
+            _ => None,
+        };
+
+        if let Some(symbol) = symbol {
+            symbols.push(symbol);
+        }
+
+        if symbols.len() >= CODE_PLAN_MAX_SYMBOLS_PER_FILE {
+            break;
+        }
+    }
+
+    symbols
+}
+
+fn extract_js_ts_symbol(line: &str) -> Option<String> {
+    let line = line
+        .strip_prefix("export default ")
+        .or_else(|| line.strip_prefix("export "))
+        .unwrap_or(line);
+    let line = line.strip_prefix("async ").unwrap_or(line);
+
+    if let Some(rest) = line.strip_prefix("function ") {
+        return extract_identifier(rest).map(|name| format!("function {}", name));
+    }
+    if let Some(rest) = line.strip_prefix("class ") {
+        return extract_identifier(rest).map(|name| format!("class {}", name));
+    }
+    if let Some(rest) = line.strip_prefix("interface ") {
+        return extract_identifier(rest).map(|name| format!("interface {}", name));
+    }
+    if let Some(rest) = line.strip_prefix("type ") {
+        return extract_identifier(rest).map(|name| format!("type {}", name));
+    }
+
+    for prefix in ["const ", "let ", "var "] {
+        if let Some(rest) = line.strip_prefix(prefix) {
+            if rest.contains("=>") || rest.contains("= (") || rest.contains("= async (") {
+                return extract_identifier(rest).map(|name| format!("const {}", name));
+            }
+        }
+    }
+
+    None
+}
+
+fn extract_rust_symbol(line: &str) -> Option<String> {
+    let line = line
+        .strip_prefix("pub(crate) ")
+        .or_else(|| line.strip_prefix("pub "))
+        .unwrap_or(line);
+    let line = line.strip_prefix("async ").unwrap_or(line);
+
+    if let Some(rest) = line.strip_prefix("fn ") {
+        return extract_identifier(rest).map(|name| format!("fn {}", name));
+    }
+    if let Some(rest) = line.strip_prefix("struct ") {
+        return extract_identifier(rest).map(|name| format!("struct {}", name));
+    }
+    if let Some(rest) = line.strip_prefix("enum ") {
+        return extract_identifier(rest).map(|name| format!("enum {}", name));
+    }
+
+    None
+}
+
+fn extract_python_symbol(line: &str) -> Option<String> {
+    let line = line.strip_prefix("async ").unwrap_or(line);
+
+    if let Some(rest) = line.strip_prefix("def ") {
+        return extract_identifier(rest).map(|name| format!("def {}", name));
+    }
+    if let Some(rest) = line.strip_prefix("class ") {
+        return extract_identifier(rest).map(|name| format!("class {}", name));
+    }
+
+    None
+}
+
+fn extract_identifier(input: &str) -> Option<String> {
+    let identifier = input
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '$')
+        .collect::<String>();
+
+    if identifier.is_empty() {
+        None
+    } else {
+        Some(identifier)
+    }
+}
+
+fn build_risk_areas(
+    relevant_files: &[CodePlanCandidate],
+    high_confidence_count: usize,
+) -> Vec<String> {
+    let mut risks = Vec::new();
+    let joined = relevant_files
+        .iter()
+        .map(|candidate| candidate.path.to_ascii_lowercase())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if high_confidence_count == 0 {
+        risks.push(
+            "No high-confidence filename match; use targeted grep before editing.".to_string(),
+        );
+    }
+    if joined.contains("ollama_agent.rs") {
+        risks.push(
+            "Direct agent loop changes can affect streaming, tool execution, cancellation, and edit approval."
+                .to_string(),
+        );
+    }
+    if joined.contains("agent_bridge.rs") {
+        risks.push("Tool schemas must stay in sync with execute_tool behavior.".to_string());
+    }
+    if joined.contains("codingagentpanel") {
+        risks.push(
+            "Frontend event handling should keep existing direct-agent event contracts."
+                .to_string(),
+        );
+    }
+
+    risks.push("Read the recommended files before editing; this plan is heuristic.".to_string());
+    risks
+}
+
+fn truncate_for_plan(value: &str, max_chars: usize) -> String {
+    let mut output = value.chars().take(max_chars).collect::<String>();
+    if value.chars().count() > max_chars {
+        output.push_str("...");
+    }
+    output
+}
+
+fn truncate_plan_output(mut plan: String) -> String {
+    if plan.len() <= CODE_PLAN_MAX_OUTPUT_BYTES {
+        return plan;
+    }
+
+    let marker = "\n\n[CodePlanner truncated low-confidence entries.]\n";
+    let max_len = CODE_PLAN_MAX_OUTPUT_BYTES.saturating_sub(marker.len());
+    let mut truncate_at = max_len.min(plan.len());
+    while truncate_at > 0 && !plan.is_char_boundary(truncate_at) {
+        truncate_at -= 1;
+    }
+    plan.truncate(truncate_at);
+    plan.push_str(marker);
+    plan
+}
+
+fn truncate_tool_result_for_context(mut result: String) -> String {
+    if result.len() <= TOOL_RESULT_CONTEXT_MAX_BYTES {
+        return result;
+    }
+
+    let marker =
+        "\n\n[Tool result truncated for model context. Full result was shown in the app log.]\n";
+    let max_len = TOOL_RESULT_CONTEXT_MAX_BYTES.saturating_sub(marker.len());
+    let mut truncate_at = max_len.min(result.len());
+    while truncate_at > 0 && !result.is_char_boundary(truncate_at) {
+        truncate_at -= 1;
+    }
+    result.truncate(truncate_at);
+    result.push_str(marker);
+    result
+}
+
+fn push_unique(values: &mut Vec<String>, value: String) {
+    if !values.contains(&value) {
+        values.push(value);
+    }
+}
+
+fn unique_limited(values: Vec<String>, limit: usize) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut result = Vec::new();
+
+    for value in values {
+        if seen.insert(value.clone()) {
+            result.push(value);
+        }
+        if result.len() >= limit {
+            break;
+        }
+    }
+
+    result
 }
 
 // ── Tool execution ────────────────────────────────────────────────────────────
@@ -551,9 +1604,7 @@ async fn execute_tool<R: Runtime>(
         }
 
         "run_python" => {
-            let code = args["code"]
-                .as_str()
-                .ok_or("run_python: missing 'code'")?;
+            let code = args["code"].as_str().ok_or("run_python: missing 'code'")?;
 
             let output = tokio::process::Command::new("python3")
                 .arg("-c")
@@ -970,11 +2021,34 @@ async fn run_agent_loop<R: Runtime>(
     cancel: CancellationToken,
 ) -> Result<(), String> {
     let tools = tool_definitions();
+    let mut messages: Vec<Value> = vec![json!({ "role": "system", "content": SYSTEM_PROMPT })];
 
-    let mut messages: Vec<Value> = vec![
-        json!({ "role": "system", "content": SYSTEM_PROMPT }),
-        json!({ "role": "user", "content": user_prompt }),
-    ];
+    if code_planner_enabled() {
+        emit_text_delta(
+            app,
+            "CodePlanner: preparing compact code context...".to_string(),
+        );
+        let code_plan = match build_code_plan(project_dir, user_prompt).await {
+            Ok(plan) => {
+                emit_text_delta(app, "CodePlanner: context pack ready.".to_string());
+                plan
+            }
+            Err(e) => {
+                let warning = format!("CodePlanner failed: {e}\nProceed with targeted search.");
+                emit_text_delta(app, warning.clone());
+                warning
+            }
+        };
+        messages.push(json!({
+            "role": "system",
+            "content": format!(
+                "Use this CodePlanner context before exploring files. Avoid broad repository scans unless necessary.\n\n{}",
+                code_plan
+            )
+        }));
+    }
+
+    messages.push(json!({ "role": "user", "content": user_prompt }));
 
     let mut iteration = 0u32;
     let mut heal_retries = 0u32;
@@ -1166,7 +2240,7 @@ async fn run_agent_loop<R: Runtime>(
             messages.push(json!({
                 "role": "tool",
                 "tool_call_id": tc.id,
-                "content": result_content
+                "content": truncate_tool_result_for_context(result_content)
             }));
         }
     }
@@ -1436,6 +2510,124 @@ mod tests {
         assert!(is_blacklisted("Pods"));
         assert!(!is_blacklisted("src"));
         assert!(!is_blacklisted("components"));
+    }
+
+    #[test]
+    fn test_code_plan_keywords_split_identifiers() {
+        let keywords = extract_task_keywords("Use start_ollama_agent for CodePlanner");
+        assert!(keywords.contains(&"start".to_string()));
+        assert!(keywords.contains(&"ollama".to_string()));
+        assert!(keywords.contains(&"codeplanner".to_string()));
+        assert!(!keywords.contains(&"agent".to_string()));
+    }
+
+    #[test]
+    fn test_code_plan_ranking_matches_identifier_parts() {
+        let files = vec![
+            "README.md".to_string(),
+            "src-tauri/src/core/ollama_agent.rs".to_string(),
+            "web-app/src/containers/CodingAgentPanel/index.tsx".to_string(),
+        ];
+        let keywords = extract_task_keywords("start_ollama_agent");
+        let ranked = rank_code_plan_files(&files, &keywords);
+
+        assert_eq!(ranked[0].path, "src-tauri/src/core/ollama_agent.rs");
+    }
+
+    #[test]
+    fn test_code_plan_content_scoring_reports_reasons() {
+        let keywords = extract_task_keywords("start ollama backend");
+        let (score, reasons) = score_code_plan_content(
+            "src-tauri/src/core/ollama_agent.rs",
+            "use crate::core::ollama_backend;\npub fn start_ollama_backend() {}\n",
+            &keywords,
+        );
+
+        assert!(score > 0);
+        assert!(reasons.iter().any(|reason| reason.contains("symbol")));
+        assert!(reasons
+            .iter()
+            .any(|reason| reason.contains("dependency hint")));
+    }
+
+    #[test]
+    fn test_code_plan_resolves_local_dependencies() {
+        let files = [
+            "src/App.tsx",
+            "src/components/Button.tsx",
+            "src/components/theme/index.ts",
+            "src-tauri/src/core/mcp/agent_bridge.rs",
+            "src-tauri/src/core/tools.rs",
+        ]
+        .into_iter()
+        .map(ToString::to_string)
+        .collect::<HashSet<_>>();
+
+        assert_eq!(
+            resolve_dependency_hint_target(
+                "src/App.tsx",
+                "import Button from './components/Button'",
+                &files,
+            ),
+            Some("src/components/Button.tsx".to_string())
+        );
+        assert_eq!(
+            resolve_dependency_hint_target(
+                "src/App.tsx",
+                "import theme from './components/theme'",
+                &files,
+            ),
+            Some("src/components/theme/index.ts".to_string())
+        );
+        assert_eq!(
+            resolve_dependency_hint_target(
+                "src-tauri/src/core/ollama_agent.rs",
+                "use crate::core::mcp::agent_bridge;",
+                &files,
+            ),
+            Some("src-tauri/src/core/mcp/agent_bridge.rs".to_string())
+        );
+        assert_eq!(
+            resolve_dependency_hint_target("src-tauri/src/core/mod.rs", "pub mod tools;", &files),
+            Some("src-tauri/src/core/tools.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn test_code_plan_truncation_preserves_marker() {
+        let plan = "x".repeat(CODE_PLAN_MAX_OUTPUT_BYTES + 100);
+        let truncated = truncate_plan_output(plan);
+
+        assert!(truncated.len() <= CODE_PLAN_MAX_OUTPUT_BYTES);
+        assert!(truncated.contains("CodePlanner truncated"));
+    }
+
+    #[test]
+    fn test_tool_result_context_truncation_preserves_marker() {
+        let result = "x".repeat(TOOL_RESULT_CONTEXT_MAX_BYTES + 100);
+        let truncated = truncate_tool_result_for_context(result);
+
+        assert!(truncated.len() <= TOOL_RESULT_CONTEXT_MAX_BYTES);
+        assert!(truncated.contains("Tool result truncated"));
+    }
+
+    #[test]
+    fn test_code_plan_extracts_simple_skeletons() {
+        let ts_symbols = extract_file_skeleton(
+            "component.tsx",
+            "export function Panel() {}\nconst useThing = () => null;\nclass Widget {}\n",
+        );
+        assert!(ts_symbols.contains(&"function Panel".to_string()));
+        assert!(ts_symbols.contains(&"const useThing".to_string()));
+        assert!(ts_symbols.contains(&"class Widget".to_string()));
+
+        let rust_symbols = extract_file_skeleton(
+            "agent.rs",
+            "pub fn start_agent() {}\nstruct AgentState {}\nenum AgentEvent {}\n",
+        );
+        assert!(rust_symbols.contains(&"fn start_agent".to_string()));
+        assert!(rust_symbols.contains(&"struct AgentState".to_string()));
+        assert!(rust_symbols.contains(&"enum AgentEvent".to_string()));
     }
 
     #[test]
