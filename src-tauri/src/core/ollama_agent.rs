@@ -453,6 +453,122 @@ async fn build_code_plan(project_dir: &str, user_prompt: &str) -> Result<String,
     Ok(truncate_plan_output(plan))
 }
 
+async fn locate_code(
+    project_dir: &str,
+    query: &str,
+    max_results: Option<usize>,
+) -> Result<String, String> {
+    match locate_code_inner(project_dir, query, max_results).await {
+        Ok(result) => Ok(result),
+        Err(e) => Ok(format!(
+            "locate_code unavailable: {}.\nFallback: continue with targeted grep/list_dir/read_file. Do not stop the coding task because locate_code failed.",
+            e
+        )),
+    }
+}
+
+async fn locate_code_inner(
+    project_dir: &str,
+    query: &str,
+    max_results: Option<usize>,
+) -> Result<String, String> {
+    let root = PathBuf::from(project_dir);
+    let output = tokio::process::Command::new("rg")
+        .arg("--files")
+        .current_dir(&root)
+        .output()
+        .await
+        .map_err(|e| format!("locate_code failed to run rg --files: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("locate_code file scan failed: {}", stderr.trim()));
+    }
+
+    let all_files = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .filter(|path| !path_has_blacklisted_segment(path))
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let all_file_set = all_files.iter().cloned().collect::<HashSet<_>>();
+    let keywords = extract_task_keywords(query);
+    let relevant_files = rank_code_plan_files_with_content(&root, &all_files, &keywords).await?;
+    let limit = max_results.unwrap_or(10).clamp(1, 20);
+
+    let mut output = String::new();
+    output.push_str("## locate_code results\n\n");
+    output.push_str("Query: ");
+    output.push_str(&truncate_for_plan(query.trim(), 500));
+    output.push_str("\n\n");
+
+    output.push_str("Keywords:");
+    if keywords.is_empty() {
+        output.push_str(" none\n\n");
+    } else {
+        output.push('\n');
+        for keyword in &keywords {
+            output.push_str(&format!("- `{}`\n", keyword));
+        }
+        output.push('\n');
+    }
+
+    if relevant_files.is_empty() {
+        output.push_str(
+            "No relevant files found. Try a narrower query or use grep with exact symbols.\n",
+        );
+        return Ok(output);
+    }
+
+    output.push_str("Relevant files:\n");
+    for (index, candidate) in relevant_files.iter().take(limit).enumerate() {
+        let reason_text = if candidate.reasons.is_empty() {
+            "general source candidate".to_string()
+        } else {
+            candidate.reasons.join("; ")
+        };
+        output.push_str(&format!(
+            "{}. `{}`\n   score: {}\n   reasons: {}\n",
+            index + 1,
+            candidate.path,
+            candidate.score,
+            reason_text
+        ));
+
+        if is_skeleton_supported_file(&candidate.path) {
+            if let Some(content) = read_plan_file_if_small(&root, &candidate.path).await? {
+                let symbols = unique_limited(extract_file_skeleton(&candidate.path, &content), 8);
+                if !symbols.is_empty() {
+                    output.push_str("   symbols:");
+                    for symbol in symbols {
+                        output.push_str(&format!(" `{}`", symbol));
+                    }
+                    output.push('\n');
+                }
+
+                let dependencies = build_dependency_lines(
+                    &root,
+                    &all_file_set,
+                    &candidate.path,
+                    &content,
+                )
+                .await?;
+                if !dependencies.is_empty() {
+                    output.push_str("   dependency hints:");
+                    for dependency in dependencies.into_iter().take(4) {
+                        output.push_str(&format!(" `{}`", dependency));
+                    }
+                    output.push('\n');
+                }
+            }
+        }
+    }
+
+    output.push_str("\nNext step: read only the top matching files or grep exact symbols if confidence is low.\n");
+    Ok(truncate_plan_output(output))
+}
+
 fn extract_task_keywords(prompt: &str) -> Vec<String> {
     const STOP_WORDS: &[&str] = &[
         "about",
@@ -1630,6 +1746,27 @@ async fn execute_tool<R: Runtime>(
             }
         }
 
+        "locate_code" => {
+            let query = args["query"]
+                .as_str()
+                .ok_or("locate_code: missing 'query'")?;
+            let root = if args["path"].is_string() {
+                resolve_path(args, "path", project_dir)?
+            } else {
+                PathBuf::from(project_dir)
+            };
+            let max_results = args["max_results"]
+                .as_u64()
+                .map(|value| value as usize);
+
+            locate_code(
+                root.to_string_lossy().as_ref(),
+                query,
+                max_results,
+            )
+            .await
+        }
+
         "find_and_analyze_code" => {
             let query = args["query"]
                 .as_str()
@@ -2532,6 +2669,35 @@ mod tests {
         let ranked = rank_code_plan_files(&files, &keywords);
 
         assert_eq!(ranked[0].path, "src-tauri/src/core/ollama_agent.rs");
+    }
+
+    #[tokio::test]
+    async fn test_locate_code_reports_ranked_files() {
+        let output = locate_code(
+            env!("CARGO_MANIFEST_DIR"),
+            "ollama agent tool schemas",
+            Some(5),
+        )
+        .await
+        .unwrap();
+
+        assert!(output.contains("## locate_code results"));
+        assert!(output.contains("Relevant files:"));
+        assert!(output.contains("ollama_agent.rs") || output.contains("agent_bridge.rs"));
+    }
+
+    #[tokio::test]
+    async fn test_locate_code_failure_returns_fallback() {
+        let output = locate_code(
+            "/definitely/not/a/project/root",
+            "anything",
+            Some(5),
+        )
+        .await
+        .unwrap();
+
+        assert!(output.contains("locate_code unavailable"));
+        assert!(output.contains("Fallback: continue"));
     }
 
     #[test]

@@ -134,6 +134,31 @@ pub fn tool_schemas() -> Value {
         {
             "type": "function",
             "function": {
+                "name": "locate_code",
+                "description": "Locate relevant project files, symbols, dependency hints, and suggested read targets for a coding task. This is a lightweight deterministic code locator; prefer it before broad grep/read_file exploration. If it reports low confidence, no matches, or an internal error, fall back to targeted grep/read_file and continue.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Natural-language description of the code area, symbol, behavior, or bug to locate"
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Optional root directory to search under (defaults to project root)"
+                        },
+                        "max_results": {
+                            "type": "integer",
+                            "description": "Maximum number of ranked files to return (default 10, max 20)"
+                        }
+                    },
+                    "required": ["query"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "find_and_analyze_code",
                 "description": "Search the codebase for relevant files and symbols related to a task, returning a structured analysis. Prefer this over multiple read_file + grep calls when you need broader context.",
                 "parameters": {
@@ -260,6 +285,7 @@ mod tests {
         assert!(names.contains(&"list_dir"));
         assert!(names.contains(&"grep"));
         assert!(names.contains(&"run_shell"));
+        assert!(names.contains(&"locate_code"));
         assert!(names.contains(&"find_and_analyze_code"));
     }
 }
