@@ -1,3 +1,4 @@
+use crate::core::lsp::commands::LspToolsState;
 use std::{collections::HashMap, sync::Arc};
 
 use crate::core::{downloads::models::DownloadManagerState, mcp::models::McpSettings};
@@ -47,8 +48,8 @@ pub struct AppState {
     pub mcp_monitoring_tasks: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
     pub background_cleanup_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     pub mcp_server_pids: Arc<Mutex<HashMap<String, u32>>>,
-    /// Remote provider configurations (e.g., Anthropic, OpenAI, etc.)
     pub provider_configs: Arc<Mutex<HashMap<String, ProviderConfig>>>,
+    pub lsp_tools: LspToolsState,
 }
 
 impl RunningServiceEnum {

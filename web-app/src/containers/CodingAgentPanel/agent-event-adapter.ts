@@ -60,15 +60,18 @@ export interface CompatDiffProposedPayload {
 }
 
 export interface DirectDiffProposedPayload {
-  call_id: string
+  call_id?: string
+  callId?: string
   path: string
   search: string
   replace: string
 }
 
 export interface DirectEditIntentRequestPayload {
-  call_id: string
-  tool_name: string
+  call_id?: string
+  callId?: string
+  tool_name?: string
+  toolName?: string
   path: string
 }
 
@@ -146,7 +149,7 @@ export function normalizeCompatDiffProposed(payload: CompatDiffProposedPayload):
 export function normalizeDirectDiffProposed(payload: DirectDiffProposedPayload): NormalizedAgentEvent {
   return {
     type: 'diff_proposed',
-    id: payload.call_id,
+    id: payload.call_id ?? payload.callId ?? '',
     filePath: payload.path,
     search: payload.search,
     replace: payload.replace,

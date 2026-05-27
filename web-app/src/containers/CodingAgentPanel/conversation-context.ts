@@ -3,6 +3,7 @@ import type { CodingSession } from '@/stores/coding-agent-store'
 const MAX_CONTEXT_CHARS = 6000
 const MAX_PROMPT_CHARS = 400
 const MAX_SESSION_SUMMARY_CHARS = 800
+const MAX_STORED_SUMMARY_CHARS = 2400
 
 const STATUS_PREFIXES = [
   '>',
@@ -20,6 +21,7 @@ interface BuildCodingAgentPromptOptions {
   sessions: CodingSession[]
   activeSessionId?: string | null
   includeHistory?: boolean
+  includeSummaryContext?: boolean
 }
 
 function normalizeText(value: string): string {
@@ -86,12 +88,33 @@ export function buildCodingAgentPrompt({
   sessions,
   activeSessionId,
   includeHistory = true,
+  includeSummaryContext = includeHistory,
 }: BuildCodingAgentPromptOptions): string {
   const currentPrompt = normalizeText(prompt)
-  if (!includeHistory) return currentPrompt
+  if (!includeHistory && !includeSummaryContext) return currentPrompt
 
   const activeSession = getActiveContextSession(sessions, projectDir, activeSessionId)
   if (!activeSession) return currentPrompt
+
+  const storedSummary = normalizeText(activeSession.conversationSummary ?? '')
+  if (includeSummaryContext && storedSummary) {
+    const contextText = truncate([
+      'Coding-agent summary context from the active conversation follows.',
+      'Use it only as background. The current request is authoritative.',
+      '',
+      'Saved conversation summary:',
+      truncate(storedSummary, MAX_STORED_SUMMARY_CHARS),
+    ].join('\n'), MAX_CONTEXT_CHARS)
+
+    return [
+      contextText,
+      '',
+      'Current request:',
+      currentPrompt,
+    ].join('\n')
+  }
+
+  if (!includeHistory) return currentPrompt
 
   const summary = summarizeSession(activeSession)
   const contextBlock = [

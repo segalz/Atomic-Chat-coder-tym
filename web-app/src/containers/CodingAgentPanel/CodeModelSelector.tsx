@@ -27,6 +27,7 @@ const recommendedById = new Map(RECOMMENDED_CODE_MODELS.map((model) => [model.id
 
 const CODE_AGENT_INCOMPATIBLE_MODEL_PREFIXES = [
   'deepseek-r1',
+  'deepseek-coder-v2',
   'qwen-vl',
   'qwen2-vl',
   'qwen2.5-vl',
@@ -43,6 +44,7 @@ const CODE_AGENT_INCOMPATIBLE_MODEL_PREFIXES = [
 function isCodeAgentToolCompatible(model: string): boolean {
   const normalized = model.trim().toLowerCase().replace(/:latest$/, '')
   const family = normalized.split('/').pop() ?? normalized
+  if (family.includes('-mlx')) return false
   return !CODE_AGENT_INCOMPATIBLE_MODEL_PREFIXES.some((prefix) => family.startsWith(prefix))
 }
 
@@ -93,13 +95,9 @@ export function CodeModelSelector({
   const installed = normalizeModels(installedModels)
   const compatibleInstalled = installed.filter(isCodeAgentToolCompatible)
   const incompatibleInstalled = installed.filter((model) => !isCodeAgentToolCompatible(model))
-  const recommendedMissing = RECOMMENDED_CODE_MODELS.filter(
-    (model) => isCodeAgentToolCompatible(model.id) && !isOllamaModelInstalled(model.id, installed)
-  )
   const hasValueInOptions =
     !value ||
-    installed.includes(value) ||
-    RECOMMENDED_CODE_MODELS.some((model) => model.id === value)
+    installed.includes(value)
   const selectedInstalled = isOllamaModelInstalled(value, installed)
   const selectedCompatible = isCodeAgentToolCompatible(value)
   const selectedMetadata = recommendedById.get(value)
@@ -116,6 +114,11 @@ export function CodeModelSelector({
           aria-label="Code model"
         >
           {!value && <option value="">Select model</option>}
+          {value && !selectedInstalled && selectedCompatible && (
+            <option value={value}>
+              {value} (not installed)
+            </option>
+          )}
           {compatibleInstalled.length > 0 && (
             <optgroup label="Installed">
               {compatibleInstalled.map((model) => (
@@ -125,14 +128,10 @@ export function CodeModelSelector({
               ))}
             </optgroup>
           )}
-          {recommendedMissing.length > 0 && (
-            <optgroup label="Recommended">
-              {recommendedMissing.map((model) => (
-                <option key={model.id} value={model.id}>
-                  {formatModelOption(model.id)}
-                </option>
-              ))}
-            </optgroup>
+          {compatibleInstalled.length === 0 && (
+            <option value="" disabled>
+              No installed code models
+            </option>
           )}
           {incompatibleInstalled.length > 0 && (
             <optgroup label="Not compatible">

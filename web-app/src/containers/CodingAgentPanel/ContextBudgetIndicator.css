@@ -1,0 +1,64 @@
+.context-budget-indicator {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  color: var(--muted-foreground);
+  font-size: 10px;
+  line-height: 1.2;
+}
+
+.context-budget-indicator__track {
+  height: 3px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--muted);
+}
+
+.context-budget-indicator__bar {
+  height: 100%;
+  border-radius: inherit;
+  background: oklch(0.62 0.08 170);
+  transition: width 160ms ease;
+}
+
+.context-budget-indicator__text {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 6px;
+}
+
+.context-budget-indicator__value {
+  flex: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-weight: 600;
+  color: var(--foreground);
+}
+
+.context-budget-indicator__detail {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-budget-indicator--warning .context-budget-indicator__bar {
+  background: oklch(0.72 0.14 75);
+}
+
+.context-budget-indicator--recommend .context-budget-indicator__bar {
+  background: oklch(0.68 0.16 55);
+}
+
+.context-budget-indicator--critical .context-budget-indicator__bar {
+  background: var(--destructive);
+}
+
+.context-budget-indicator--critical .context-budget-indicator__value {
+  color: var(--destructive);
+}
+
+.context-budget-indicator--muted .context-budget-indicator__bar {
+  background: var(--muted-foreground);
+  opacity: 0.45;
+}

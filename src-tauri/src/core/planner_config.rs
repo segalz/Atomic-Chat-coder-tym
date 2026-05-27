@@ -119,7 +119,10 @@ impl PlannerConfig {
                 if let Ok(raw) = std::fs::read_to_string(&bundled_path) {
                     match toml::from_str::<PlannerConfig>(&raw) {
                         Ok(cfg) => {
-                            log::info!("[PlannerConfig] Loaded bundled config from {:?}", bundled_path);
+                            log::info!(
+                                "[PlannerConfig] Loaded bundled config from {:?}",
+                                bundled_path
+                            );
                             return cfg;
                         }
                         Err(e) => {
@@ -142,6 +145,8 @@ pub fn get_planner_config<R: Runtime>(app: tauri::AppHandle<R>) -> Result<Planne
 }
 
 #[tauri::command]
-pub fn get_coding_agent_config<R: Runtime>(app: tauri::AppHandle<R>) -> Result<CodingAgentConfig, String> {
+pub fn get_coding_agent_config<R: Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<CodingAgentConfig, String> {
     Ok(PlannerConfig::load(&app).coding_agent)
 }

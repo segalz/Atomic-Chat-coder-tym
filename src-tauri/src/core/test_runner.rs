@@ -8,9 +8,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Runtime, State};
 use tokio::sync::Mutex;
-use std::sync::Arc;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -70,7 +70,12 @@ async fn detect_runner(project_dir: &Path) -> Option<(TestRunner, String)> {
     }
 
     // 2. Check for jest config files
-    for name in &["jest.config.ts", "jest.config.js", "jest.config.mjs", "jest.config.cjs"] {
+    for name in &[
+        "jest.config.ts",
+        "jest.config.js",
+        "jest.config.mjs",
+        "jest.config.cjs",
+    ] {
         if project_dir.join(name).exists() {
             return Some((TestRunner::Jest, "test".to_string()));
         }
@@ -172,7 +177,12 @@ async fn run_tests(
     };
     cmd_args.extend(runner_args[flags_start..].iter().cloned());
 
-    log::info!("[TestRunner] {} {:?} in {}", program, cmd_args, project_dir.display());
+    log::info!(
+        "[TestRunner] {} {:?} in {}",
+        program,
+        cmd_args,
+        project_dir.display()
+    );
 
     let output = tokio::process::Command::new(program)
         .args(&cmd_args)
@@ -199,7 +209,9 @@ fn parse_jest_json(json_str: &str) -> Option<(u32, u32, u64, Vec<FailedTest>)> {
         .as_array()
         .map(|results| {
             results.iter().fold(0u64, |acc, r| {
-                acc + r["endTime"].as_u64().unwrap_or(0)
+                acc + r["endTime"]
+                    .as_u64()
+                    .unwrap_or(0)
                     .saturating_sub(r["startTime"].as_u64().unwrap_or(0))
             })
         })
@@ -225,7 +237,11 @@ fn parse_jest_json(json_str: &str) -> Option<(u32, u32, u64, Vec<FailedTest>)> {
                                     .join("\n")
                             })
                             .unwrap_or_default();
-                        failures.push(FailedTest { suite: suite_name.clone(), name, message });
+                        failures.push(FailedTest {
+                            suite: suite_name.clone(),
+                            name,
+                            message,
+                        });
                     }
                 }
             }
@@ -239,9 +255,10 @@ fn parse_vitest_json(json_str: &str) -> Option<(u32, u32, u64, Vec<FailedTest>)>
     let v: Value = serde_json::from_str(json_str).ok()?;
 
     // Vitest JSON reporter top-level keys
-    let total = (v["numTotalTests"].as_u64()
+    let total = (v["numTotalTests"]
+        .as_u64()
         .or_else(|| v["testResults"].as_array().map(|a| a.len() as u64)))
-        .unwrap_or(0) as u32;
+    .unwrap_or(0) as u32;
     let failed = v["numFailedTests"].as_u64().unwrap_or(0) as u32;
     let duration_ms = v["testResults"]
         .as_array()
@@ -269,7 +286,11 @@ fn parse_vitest_json(json_str: &str) -> Option<(u32, u32, u64, Vec<FailedTest>)>
                                     .join("\n")
                             })
                             .unwrap_or_default();
-                        failures.push(FailedTest { suite: suite_name.clone(), name, message });
+                        failures.push(FailedTest {
+                            suite: suite_name.clone(),
+                            name,
+                            message,
+                        });
                     }
                 }
             }
@@ -302,8 +323,7 @@ fn parse_test_output(
         format!("{}\n[stderr]\n{}", stdout, stderr)
     };
 
-    let json_src = extract_json(stdout)
-        .or_else(|| extract_json(stderr));
+    let json_src = extract_json(stdout).or_else(|| extract_json(stderr));
 
     let parsed = json_src.and_then(|s| match runner {
         TestRunner::Jest => parse_jest_json(s),
@@ -350,10 +370,7 @@ fn build_heal_prompt(result: &TestRunResult, changed_files: &[String]) -> String
         result.failed, result.total
     );
 
-    prompt.push_str(&format!(
-        "Changed files: {}\n\n",
-        changed_files.join(", ")
-    ));
+    prompt.push_str(&format!("Changed files: {}\n\n", changed_files.join(", ")));
 
     for (i, f) in result.failures.iter().enumerate() {
         prompt.push_str(&format!(
@@ -402,7 +419,9 @@ pub async fn run_agent_tests<R: Runtime>(
                 failed: 0,
                 duration_ms: 0,
                 failures: vec![],
-                raw_output: "No test runner detected (no jest/vitest config or package.json script).".to_string(),
+                raw_output:
+                    "No test runner detected (no jest/vitest config or package.json script)."
+                        .to_string(),
             });
         };
 
@@ -417,16 +436,20 @@ pub async fn run_agent_tests<R: Runtime>(
             None
         };
 
-        let _ = app.emit("agent-test-result", AgentTestResultEvent {
-            passed: test_result.passed,
-            failed: test_result.failed,
-            total: test_result.total,
-            failures: test_result.failures.clone(),
-            heal_prompt,
-        });
+        let _ = app.emit(
+            "agent-test-result",
+            AgentTestResultEvent {
+                passed: test_result.passed,
+                failed: test_result.failed,
+                total: test_result.total,
+                failures: test_result.failures.clone(),
+                heal_prompt,
+            },
+        );
 
         Ok(test_result)
-    }.await;
+    }
+    .await;
 
     {
         let mut running = state.running.lock().await;

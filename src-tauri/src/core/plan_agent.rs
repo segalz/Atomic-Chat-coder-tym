@@ -159,7 +159,12 @@ async fn run_stage4_gemini<R: Runtime>(
                 "type": "assistant",
                 "message": { "content": [{ "type": "text", "text": format!("{}\n", line) }] }
             });
-            let _ = app_clone.emit("code-agent-output", CodeAgentOutputEvent { line: synthetic_json.to_string() });
+            let _ = app_clone.emit(
+                "code-agent-output",
+                CodeAgentOutputEvent {
+                    line: synthetic_json.to_string(),
+                },
+            );
         }
 
         let mut guard = child_arc_clone.lock().await;
@@ -168,7 +173,9 @@ async fn run_stage4_gemini<R: Runtime>(
         } else {
             None
         }
-    }).await.map_err(|e| format!("Gemini stream task failed: {}", e))?;
+    })
+    .await
+    .map_err(|e| format!("Gemini stream task failed: {}", e))?;
 
     // Cleanup state
     {
@@ -196,23 +203,27 @@ async fn run_stage4_ollama<R: Runtime>(
     config: &PlannerConfig,
 ) -> Result<(), String> {
     // Locate ollama binary
-    let ollama_bin = find_ollama_binary()
-        .ok_or_else(|| "Ollama binary not found".to_string())?;
+    let ollama_bin = find_ollama_binary().ok_or_else(|| "Ollama binary not found".to_string())?;
 
     // ── Check for Claude Code CLI ─────────────────────────
     if find_claude_binary().is_none() {
-        return Err("Claude Code CLI not found. Run: npm i -g @anthropic-ai/claude-code".to_string());
+        return Err(
+            "Claude Code CLI not found. Run: npm i -g @anthropic-ai/claude-code".to_string(),
+        );
     }
 
     let mut cmd = Command::new(&ollama_bin);
     cmd.arg("launch")
         .arg("claude")
-        .arg("--model").arg(&config.models.architect)
+        .arg("--model")
+        .arg(&config.models.architect)
         .arg("--")
         .arg("-p")
-        .arg("--output-format").arg("stream-json")
+        .arg("--output-format")
+        .arg("stream-json")
         .arg("--verbose")
-        .arg("--allowedTools").arg("Read,LS,Glob,Grep")
+        .arg("--allowedTools")
+        .arg("Read,LS,Glob,Grep")
         .arg("--disallowedTools")
         .arg("Write,Edit,MultiEdit,NotebookEdit,Bash,WebFetch,WebSearch")
         .arg(mega_prompt);
@@ -249,7 +260,9 @@ async fn run_stage4_ollama<R: Runtime>(
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
 
-    let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn architect: {}", e))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to spawn architect: {}", e))?;
     let stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
     let stderr = child.stderr.take().ok_or("Failed to capture stderr")?;
 
@@ -283,7 +296,9 @@ async fn run_stage4_ollama<R: Runtime>(
         } else {
             None
         }
-    }).await.map_err(|e| format!("Ollama stream task failed: {}", e))?;
+    })
+    .await
+    .map_err(|e| format!("Ollama stream task failed: {}", e))?;
 
     {
         let mut guard = child_arc.lock().await;
@@ -310,15 +325,27 @@ async fn run_stage4_architect<R: Runtime>(
     config: &PlannerConfig,
 ) -> Result<(), String> {
     if config.gemini.enabled {
-        match run_stage4_gemini(app, child_arc.clone(), stdin_arc.clone(), mega_prompt, project_dir, config).await {
+        match run_stage4_gemini(
+            app,
+            child_arc.clone(),
+            stdin_arc.clone(),
+            mega_prompt,
+            project_dir,
+            config,
+        )
+        .await
+        {
             Ok(()) => return Ok(()),
             Err(e) => {
                 log::warn!("[PlanAgent] Gemini failed, falling back to Ollama: {}", e);
-                let _ = app.emit("plan-stage-progress", PlanStageProgressEvent {
-                    stage: "architect".to_string(),
-                    status: "fallback".to_string(),
-                    detail: Some(format!("Gemini failed: {}. Using Ollama.", e)),
-                });
+                let _ = app.emit(
+                    "plan-stage-progress",
+                    PlanStageProgressEvent {
+                        stage: "architect".to_string(),
+                        status: "fallback".to_string(),
+                        detail: Some(format!("Gemini failed: {}. Using Ollama.", e)),
+                    },
+                );
             }
         }
     }
@@ -418,9 +445,9 @@ async fn ollama_chat_with_image(
         .unwrap_or("jpeg")
         .to_lowercase();
     let mime = match ext.as_str() {
-        "png"  => "image/png",
+        "png" => "image/png",
         "webp" => "image/webp",
-        _      => "image/jpeg",
+        _ => "image/jpeg",
     };
 
     let url = format!("{}{}", ollama.base_url, ollama.api_path);
@@ -477,8 +504,16 @@ fn extract_content(json: &Value) -> Result<String, String> {
 // ── File-tree scanner ──────────────────────────────────────────────────────
 
 const SKIP_DIRS: &[&str] = &[
-    "node_modules", ".git", "target", "dist", ".expo",
-    ".next", "build", "__pycache__", ".cache", ".turbo",
+    "node_modules",
+    ".git",
+    "target",
+    "dist",
+    ".expo",
+    ".next",
+    "build",
+    "__pycache__",
+    ".cache",
+    ".turbo",
 ];
 
 pub fn scan_file_tree(project_dir: &str, max_lines: usize) -> String {
@@ -552,7 +587,8 @@ fn parse_file_hints(response: &str) -> Vec<String> {
 
     // Direct JSON array
     if let Ok(Value::Array(arr)) = serde_json::from_str::<Value>(trimmed) {
-        return arr.iter()
+        return arr
+            .iter()
             .filter_map(|v| v.as_str().map(|s| s.to_string()))
             .collect();
     }
@@ -561,7 +597,8 @@ fn parse_file_hints(response: &str) -> Vec<String> {
     if let (Some(start), Some(end)) = (trimmed.find('['), trimmed.rfind(']')) {
         if start < end {
             if let Ok(Value::Array(arr)) = serde_json::from_str::<Value>(&trimmed[start..=end]) {
-                return arr.iter()
+                return arr
+                    .iter()
                     .filter_map(|v| v.as_str().map(|s| s.to_string()))
                     .collect();
             }
@@ -643,18 +680,24 @@ async fn run_pipeline_inner<R: Runtime>(
     // Helper macros to reduce repetition
     macro_rules! emit_stage {
         ($stage:expr, $status:expr) => {
-            let _ = app.emit("plan-stage-progress", PlanStageProgressEvent {
-                stage:  $stage.to_string(),
-                status: $status.to_string(),
-                detail: None,
-            });
+            let _ = app.emit(
+                "plan-stage-progress",
+                PlanStageProgressEvent {
+                    stage: $stage.to_string(),
+                    status: $status.to_string(),
+                    detail: None,
+                },
+            );
         };
         ($stage:expr, $status:expr, $detail:expr) => {
-            let _ = app.emit("plan-stage-progress", PlanStageProgressEvent {
-                stage:  $stage.to_string(),
-                status: $status.to_string(),
-                detail: Some($detail.to_string()),
-            });
+            let _ = app.emit(
+                "plan-stage-progress",
+                PlanStageProgressEvent {
+                    stage: $stage.to_string(),
+                    status: $status.to_string(),
+                    detail: Some($detail.to_string()),
+                },
+            );
         };
     }
 
@@ -697,11 +740,17 @@ async fn run_pipeline_inner<R: Runtime>(
             translated
         );
 
-        match select_or_cancel!(
-            ollama_chat_with_image(ollama, &config.models.vision, &vision_prompt, img)
-        ) {
+        match select_or_cancel!(ollama_chat_with_image(
+            ollama,
+            &config.models.vision,
+            &vision_prompt,
+            img
+        )) {
             Ok(analysis) => {
-                log::info!("[PlanAgent] Stage 2 done. Vision length: {}", analysis.len());
+                log::info!(
+                    "[PlanAgent] Stage 2 done. Vision length: {}",
+                    analysis.len()
+                );
                 emit_stage!("vision", "done");
                 analysis
             }
@@ -733,9 +782,12 @@ async fn run_pipeline_inner<R: Runtime>(
         }
     );
 
-    let nav_response = select_or_cancel!(
-        ollama_chat(ollama, &config.models.navigator, NAVIGATE_SYSTEM, &navigate_user)
-    )
+    let nav_response = select_or_cancel!(ollama_chat(
+        ollama,
+        &config.models.navigator,
+        NAVIGATE_SYSTEM,
+        &navigate_user
+    ))
     .map_err(|e| format!("Stage 3 (Navigate) failed: {}", e))?;
 
     let file_hints = parse_file_hints(&nav_response);
@@ -762,7 +814,10 @@ async fn run_pipeline_inner<R: Runtime>(
     if cancel.is_cancelled() {
         let _ = app.emit(
             "code-agent-done",
-            CodeAgentDoneEvent { exit_code: None, success: false },
+            CodeAgentDoneEvent {
+                exit_code: None,
+                success: false,
+            },
         );
         return Ok(());
     }
@@ -772,27 +827,39 @@ async fn run_pipeline_inner<R: Runtime>(
 
     match run_stage4_architect(app, child_arc, stdin_arc, &mega_prompt, project_dir, config).await {
         Ok(()) => {
-            let _ = app.emit("plan-stage-progress", PlanStageProgressEvent {
-                stage: "architect".to_string(),
-                status: "done".to_string(),
-                detail: None,
-            });
+            let _ = app.emit(
+                "plan-stage-progress",
+                PlanStageProgressEvent {
+                    stage: "architect".to_string(),
+                    status: "done".to_string(),
+                    detail: None,
+                },
+            );
             let _ = app.emit(
                 "code-agent-done",
-                CodeAgentDoneEvent { exit_code: Some(0), success: true },
+                CodeAgentDoneEvent {
+                    exit_code: Some(0),
+                    success: true,
+                },
             );
         }
         Err(e) => {
             log::error!("[PlanAgent] Architect stage failed: {}", e);
-            let _ = app.emit("plan-stage-progress", PlanStageProgressEvent {
-                stage: "architect".to_string(),
-                status: "error".to_string(),
-                detail: Some(e.clone()),
-            });
+            let _ = app.emit(
+                "plan-stage-progress",
+                PlanStageProgressEvent {
+                    stage: "architect".to_string(),
+                    status: "error".to_string(),
+                    detail: Some(e.clone()),
+                },
+            );
             let _ = app.emit("code-agent-error", CodeAgentErrorEvent { message: e });
             let _ = app.emit(
                 "code-agent-done",
-                CodeAgentDoneEvent { exit_code: Some(1), success: false },
+                CodeAgentDoneEvent {
+                    exit_code: Some(1),
+                    success: false,
+                },
             );
         }
     }
@@ -807,7 +874,10 @@ fn is_expo_project(project_dir: &str) -> bool {
     let root = Path::new(project_dir);
 
     // 1. Check for app.json or app.config.js
-    if root.join("app.json").exists() || root.join("app.config.js").exists() || root.join("app.config.ts").exists() {
+    if root.join("app.json").exists()
+        || root.join("app.config.js").exists()
+        || root.join("app.config.ts").exists()
+    {
         return true;
     }
 
@@ -846,11 +916,16 @@ pub async fn run_plan_pipeline<R: Runtime>(
 
     // Warn if not an Expo project
     if !is_expo_project(&workspace_path) {
-        let _ = app.emit("plan-stage-progress", PlanStageProgressEvent {
-            stage: "navigate".to_string(), // Associate warning with early stage
-            status: "warning".to_string(),
-            detail: Some("Expo project markers not found. Plan quality may be lower.".to_string()),
-        });
+        let _ = app.emit(
+            "plan-stage-progress",
+            PlanStageProgressEvent {
+                stage: "navigate".to_string(), // Associate warning with early stage
+                status: "warning".to_string(),
+                detail: Some(
+                    "Expo project markers not found. Plan quality may be lower.".to_string(),
+                ),
+            },
+        );
     }
 
     // Guard: only one pipeline at a time
@@ -881,12 +956,12 @@ pub async fn run_plan_pipeline<R: Runtime>(
 
     // Clone Arcs for the spawned task
     let pipeline_running = state.pipeline_running.clone();
-    let pipeline_cancel  = state.pipeline_cancel.clone();
-    let child_arc        = state.child.clone();
-    let stdin_arc        = state.stdin.clone();
-    let config           = PlannerConfig::load(&app);
-    let app_clone        = app.clone();
-    let project_dir_str  = workspace_path.clone();
+    let pipeline_cancel = state.pipeline_cancel.clone();
+    let child_arc = state.child.clone();
+    let stdin_arc = state.stdin.clone();
+    let config = PlannerConfig::load(&app);
+    let app_clone = app.clone();
+    let project_dir_str = workspace_path.clone();
 
     tokio::spawn(async move {
         let result = run_pipeline_inner(
@@ -925,24 +1000,30 @@ pub async fn run_plan_pipeline<R: Runtime>(
                     // is kept for safety.
                     let _ = app_clone.emit(
                         "code-agent-done",
-                        CodeAgentDoneEvent { exit_code: Some(0), success: true },
+                        CodeAgentDoneEvent {
+                            exit_code: Some(0),
+                            success: true,
+                        },
                     );
                 }
                 Err(ref e) if e == "cancelled" => {
                     let _ = app_clone.emit(
                         "code-agent-done",
-                        CodeAgentDoneEvent { exit_code: None, success: false },
+                        CodeAgentDoneEvent {
+                            exit_code: None,
+                            success: false,
+                        },
                     );
                 }
                 Err(e) => {
                     log::error!("[PlanAgent] Pipeline error: {}", e);
-                    let _ = app_clone.emit(
-                        "code-agent-error",
-                        CodeAgentErrorEvent { message: e },
-                    );
+                    let _ = app_clone.emit("code-agent-error", CodeAgentErrorEvent { message: e });
                     let _ = app_clone.emit(
                         "code-agent-done",
-                        CodeAgentDoneEvent { exit_code: Some(1), success: false },
+                        CodeAgentDoneEvent {
+                            exit_code: Some(1),
+                            success: false,
+                        },
                     );
                 }
             }
@@ -960,7 +1041,10 @@ mod tests {
     fn test_pipeline_rejects_nonexistent_dir() {
         let result = crate::core::code_agent::validate_workspace("/nonexistent/path/xyz_123");
         assert!(result.is_err());
-        assert!(result.err().unwrap().contains("Project directory does not exist"));
+        assert!(result
+            .err()
+            .unwrap()
+            .contains("Project directory does not exist"));
     }
 
     #[test]

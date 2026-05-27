@@ -19,10 +19,118 @@ use serde_json::{json, Value};
 
 // ── Tool schemas ──────────────────────────────────────────────────────────────
 
+/// OpenAI function-calling schemas for the 5 read-only LSP tools.
+/// Returned only when `lsp_enabled` is true.
+fn lsp_tool_schemas() -> Vec<Value> {
+    vec![
+        json!({
+            "type": "function",
+            "function": {
+                "name": "lsp_diagnostics",
+                "description": "Get LSP diagnostics (errors, warnings) for a file. Returns an empty list if no diagnostics or LSP unavailable.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "project_dir": { "type": "string", "description": "Absolute path to the project root" },
+                        "file_path": { "type": "string", "description": "Absolute path to the file to check" }
+                    },
+                    "required": ["project_dir"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "lsp_definitions",
+                "description": "Go-to-definition: find where a symbol at a given position is defined. Returns null if not found.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "project_dir": { "type": "string" },
+                        "file_path": { "type": "string", "description": "Absolute path to the file" },
+                        "line": { "type": "integer", "description": "0-based line number" },
+                        "character": { "type": "integer", "description": "0-based character offset" }
+                    },
+                    "required": ["project_dir", "file_path", "line", "character"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "lsp_references",
+                "description": "Find all references to a symbol at a given position. Capped at 100 results.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "project_dir": { "type": "string" },
+                        "file_path": { "type": "string" },
+                        "line": { "type": "integer", "description": "0-based line number" },
+                        "character": { "type": "integer", "description": "0-based character offset" }
+                    },
+                    "required": ["project_dir", "file_path", "line", "character"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "lsp_hover",
+                "description": "Get hover information (type, docs) for a symbol at a given position.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "project_dir": { "type": "string" },
+                        "file_path": { "type": "string" },
+                        "line": { "type": "integer", "description": "0-based line number" },
+                        "character": { "type": "integer", "description": "0-based character offset" }
+                    },
+                    "required": ["project_dir", "file_path", "line", "character"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "lsp_document_symbols",
+                "description": "List symbols (functions, classes, variables) defined in a file. Capped at 200 symbols.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "project_dir": { "type": "string" },
+                        "file_path": { "type": "string", "description": "Absolute path to the file" }
+                    },
+                    "required": ["project_dir", "file_path"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "lsp_code_actions",
+                "description": "Get code actions (quick fixes and refactoring options) for a range in a file. Use this to get LSP suggestions for fixing diagnostics or refactoring code.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "project_dir": { "type": "string" },
+                        "file_path": { "type": "string", "description": "Absolute path to the file" },
+                        "start_line": { "type": "integer", "description": "0-based line number for start of range" },
+                        "start_character": { "type": "integer", "description": "0-based character offset for start of range" },
+                        "end_line": { "type": "integer", "description": "0-based line number for end of range" },
+                        "end_character": { "type": "integer", "description": "0-based character offset for end of range" }
+                    },
+                    "required": ["project_dir", "file_path", "start_line", "start_character", "end_line", "end_character"]
+                }
+            }
+        }),
+    ]
+}
+
 /// OpenAI function-calling schemas for all MCP tools exposed to the agent.
 /// S1 calls this to build the `tools` array sent with every completion request.
-pub fn tool_schemas() -> Value {
-    json!([
+/// Pass `lsp_enabled = true` to include the 5 read-only LSP tools.
+pub fn tool_schemas(lsp_enabled: bool) -> Value {
+    let mut base = json!([
         {
             "type": "function",
             "function": {
@@ -194,7 +302,14 @@ pub fn tool_schemas() -> Value {
                 }
             }
         }
-    ])
+    ]);
+
+    if lsp_enabled {
+        let extra = lsp_tool_schemas();
+        base.as_array_mut().unwrap().extend(extra);
+    }
+
+    base
 }
 
 // ── Oxc Validation ────────────────────────────────────────────────────────────
@@ -208,10 +323,7 @@ const JS_TS_EXTENSIONS: &[&str] = &["js", "jsx", "ts", "tsx", "mjs", "cjs"];
 /// Returns `Err(diagnostic)` with precise location info on parse failure so the
 /// S1 Self-Healing loop can feed it back to the model.
 pub fn validate_js_ts(source: &str, path: &Path) -> Result<(), String> {
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
     if !JS_TS_EXTENSIONS.contains(&ext) {
         return Ok(());
@@ -272,7 +384,7 @@ mod tests {
 
     #[test]
     fn tool_schemas_has_all_tools() {
-        let schemas = tool_schemas();
+        let schemas = tool_schemas(false);
         let names: Vec<&str> = schemas
             .as_array()
             .unwrap()
@@ -287,5 +399,35 @@ mod tests {
         assert!(names.contains(&"run_shell"));
         assert!(names.contains(&"locate_code"));
         assert!(names.contains(&"find_and_analyze_code"));
+    }
+
+    #[test]
+    fn tool_schemas_includes_lsp_when_enabled() {
+        let schemas = tool_schemas(true);
+        let names: Vec<&str> = schemas
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["function"]["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"lsp_diagnostics"));
+        assert!(names.contains(&"lsp_definitions"));
+        assert!(names.contains(&"lsp_references"));
+        assert!(names.contains(&"lsp_hover"));
+        assert!(names.contains(&"lsp_document_symbols"));
+        assert!(names.contains(&"lsp_code_actions"));
+    }
+
+    #[test]
+    fn tool_schemas_excludes_lsp_when_disabled() {
+        let schemas = tool_schemas(false);
+        let names: Vec<&str> = schemas
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["function"]["name"].as_str().unwrap())
+            .collect();
+        assert!(!names.contains(&"lsp_diagnostics"));
+        assert!(!names.contains(&"lsp_document_symbols"));
     }
 }

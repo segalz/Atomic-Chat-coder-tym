@@ -166,9 +166,20 @@ pub fn run() {
         // Download
         core::downloads::commands::download_files,
         core::downloads::commands::cancel_download_task,
+        // LSP read-only tools (S6)
+        core::lsp::commands::get_lsp_config,
+        core::lsp::commands::lsp_diagnostics,
+        core::lsp::commands::lsp_definitions,
+        core::lsp::commands::lsp_references,
+        core::lsp::commands::lsp_hover,
+        core::lsp::commands::lsp_document_symbols,
+        core::lsp::commands::lsp_code_actions,
         // Custom updater commands (desktop only)
         core::updater::commands::check_for_app_updates,
         core::updater::commands::is_update_available,
+        // LSP diagnostics pipeline (S11)
+        core::lsp::commands::start_diagnostics_pipeline,
+        core::lsp::commands::add_workspace_to_diagnostics_pipeline,
         // HTTP streaming (bypasses tauri_plugin_http fetch interception)
         core::http::stream_local_http,
     ]);
@@ -258,7 +269,8 @@ pub fn run() {
     let app_builder = app_builder
         .manage(core::code_agent::CodeAgentState::default())
         .manage(core::ollama_agent::OllamaAgentState::default())
-        .manage(core::test_runner::TestRunnerState::default());
+        .manage(core::test_runner::TestRunnerState::default())
+        .manage(core::lsp::commands::LspToolsState::new(true));
 
     let app = app_builder
         .manage(AppState {
@@ -274,6 +286,7 @@ pub fn run() {
             background_cleanup_handle: Arc::new(Mutex::new(None)),
             mcp_server_pids: Arc::new(Mutex::new(HashMap::new())),
             provider_configs: Arc::new(Mutex::new(HashMap::new())),
+            lsp_tools: core::lsp::commands::LspToolsState::new(true),
         })
         .setup(|app| {
             app.handle().plugin(
@@ -418,6 +431,12 @@ pub fn run() {
                         use tauri_plugin_foundation_models::cleanup_processes;
                         cleanup_processes(&app_handle).await;
                         log::info!("Foundation Models processes cleaned up successfully");
+                    }
+
+                    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+                    {
+                        state.lsp_tools.manager.shutdown_all().await;
+                        log::info!("LSP sessions cleaned up successfully");
                     }
 
                     log::info!("App cleanup completed");

@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { useCodingAgentStore, type CodingSessionSource, type ExecLogLine } from '@/stores/coding-agent-store'
-import { useThreads } from '@/hooks/useThreads'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -60,8 +59,11 @@ import {
   type TextDeltaPayload,
 } from './agent-event-adapter'
 import { CodeModelSelector } from './CodeModelSelector'
+import './ConversationSummary.css'
+import { ContextBudgetIndicator } from './ContextBudgetIndicator'
+import { buildConversationSummary } from './conversation-summary'
 import { buildCodingAgentPrompt } from './conversation-context'
-import { getEditPermissionForPrompt, type EditPermission } from './edit-permission'
+import type { EditPermission } from './edit-permission'
 
 // ── S6 types ─────────────────────────────────────────────────
 interface CodingAgentConfig {
@@ -80,9 +82,14 @@ interface PendingEditIntent {
 
 const CODING_AGENT_CODE_MODEL_STORAGE_KEY = 'coding-agent-code-model'
 const CODE_AGENT_DEFAULT_MODEL = 'qwen3-coder:30b'
+const CODE_AGENT_FALLBACK_MODELS = [
+  CODE_AGENT_DEFAULT_MODEL,
+  'qwen3-coder-next',
+]
 
 const CODE_AGENT_INCOMPATIBLE_MODEL_PREFIXES = [
   'deepseek-r1',
+  'deepseek-coder-v2',
   'qwen-vl',
   'qwen2-vl',
   'qwen2.5-vl',
@@ -99,6 +106,7 @@ const CODE_AGENT_INCOMPATIBLE_MODEL_PREFIXES = [
 function isCodeAgentToolCompatible(model: string): boolean {
   const normalized = model.trim().toLowerCase().replace(/:latest$/, '')
   const family = normalized.split('/').pop() ?? normalized
+  if (family.includes('-mlx')) return false
   return !CODE_AGENT_INCOMPATIBLE_MODEL_PREFIXES.some((prefix) => family.startsWith(prefix))
 }
 
@@ -126,6 +134,52 @@ function isOllamaModelInstalled(model: string, installedModels: string[]): boole
     if (trimmed.includes(':')) return false
     return installed.startsWith(`${trimmed}:`)
   })
+}
+
+function findInstalledModel(model: string | null | undefined, installedModels: string[]): string | null {
+  const trimmed = model?.trim()
+  if (!trimmed) return null
+
+  for (const installed of installedModels) {
+    if (installed === trimmed) return installed
+    if (!trimmed.includes(':') && installed.startsWith(`${trimmed}:`)) return installed
+  }
+
+  return null
+}
+
+function resolveInstalledCodeModel(
+  preferredModel: string | null | undefined,
+  configuredModel: string | null | undefined,
+  installedModels: string[]
+): string | null {
+  const compatibleInstalled = installedModels
+    .map((model) => model.trim())
+    .filter(Boolean)
+    .filter(isCodeAgentToolCompatible)
+
+  const candidates = [
+    preferredModel,
+    configuredModel,
+    ...CODE_AGENT_FALLBACK_MODELS,
+    ...compatibleInstalled,
+  ]
+
+  for (const candidate of candidates) {
+    if (!candidate || !isCodeAgentToolCompatible(candidate)) continue
+    const installed = findInstalledModel(candidate, compatibleInstalled)
+    if (installed) return installed
+  }
+
+  return null
+}
+
+function persistSelectedCodeModel(model: string): void {
+  try {
+    window.localStorage.setItem(CODING_AGENT_CODE_MODEL_STORAGE_KEY, model)
+  } catch {
+    // Ignore storage failures; the current selection still applies for this session.
+  }
 }
 
 function withLegacyEditInstruction(prompt: string, editPermission: EditPermission): string {
@@ -199,6 +253,15 @@ function HardwareSetup({
     invoke<SystemInfo>('plugin:hardware|get_system_info').then(setSysInfo).catch(() => {})
     refreshInstalledModels()
   }, [refreshInstalledModels])
+
+  useEffect(() => {
+    if (!config || installedModels.length === 0) return
+
+    const installedCodeModel = resolveInstalledCodeModel(selectedCodeModel, config.code_model, installedModels)
+    if (installedCodeModel && installedCodeModel !== selectedCodeModel) {
+      onCodeModelChange(installedCodeModel)
+    }
+  }, [config, installedModels, onCodeModelChange, selectedCodeModel])
 
   const effectiveVramMib = sysInfo
     ? sysInfo.gpus.length > 0
@@ -328,17 +391,18 @@ function formatTerminalMessage(success: boolean, errorMessage?: string | null): 
 }
 
 export function CodingAgentPanel() {
-  const createThread = useThreads((s) => s.createThread)
   const {
     projectDir, setProjectDir,
     draftPrompt, setDraftPrompt,
     isRunning, setRunning,
     appendPlanText,
     execLog, appendLog,
-    addDiff,
+    addDiff, clearPendingDiffs,
     pendingDiffs,
-    startNewSession, continueSession, loadSession, deleteSession,
+    startNewSession, continueSession, loadSession, deleteSession, setConversationSummary,
+    conversationSummary,
     sessions,
+    activeSessionId,
   } = useCodingAgentStore()
 
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -349,10 +413,58 @@ export function CodingAgentPanel() {
   const [agentStatus, setAgentStatus] = useState<AgentStatus>('idle')
   const [lastFailureMessage, setLastFailureMessage] = useState<string | null>(null)
   const [pendingEditIntent, setPendingEditIntent] = useState<PendingEditIntent | null>(null)
-  const [autoApprove, setAutoApprove] = useState(true)
   const autoApproveRef = useRef(true)
-  useEffect(() => { autoApproveRef.current = autoApprove }, [autoApprove])
+  const [lspEnabled, setLspEnabled] = useState(() => {
+    if (typeof window !== 'undefined') return window.localStorage.getItem('coding-agent-lsp') === 'true'
+    return false
+  })
+  useEffect(() => {
+    if (typeof window !== 'undefined') window.localStorage.setItem('coding-agent-lsp', String(lspEnabled))
+  }, [lspEnabled])
   const lastAgentErrorRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    if (lspEnabled && projectDir) {
+      const initDiagnostics = async () => {
+        try {
+          await invoke('start_diagnostics_pipeline')
+          await invoke('add_workspace_to_diagnostics_pipeline', { workspacePath: projectDir })
+        } catch (err) {
+          console.error('Failed to initialize diagnostics pipeline:', err)
+        }
+      }
+      void initDiagnostics()
+    }
+  }, [lspEnabled, projectDir])
+
+  useEffect(() => {
+    let cancelled = false
+    const unlisteners: (() => void)[] = []
+
+    const setup = async () => {
+      const u1 = await listen('lsp-diagnostics-updated', (event) => {
+        if (cancelled) return
+        const payload = event.payload as { uri: string; diagnostics: any[] }
+        let filePath = payload.uri
+        try {
+          filePath = payload.uri.startsWith('file://')
+            ? decodeURIComponent(new URL(payload.uri).pathname)
+            : payload.uri
+        } catch {
+          filePath = payload.uri.startsWith('file://') ? payload.uri.substring(7) : payload.uri
+        }
+        useCodingAgentStore.getState().setDiagnostics(filePath, payload.diagnostics)
+      })
+
+      unlisteners.push(u1)
+    }
+
+    setup()
+    return () => {
+      cancelled = true
+      unlisteners.forEach((u) => u())
+    }
+  }, [])
 
   // ── Loop scheduler ────────────────────────────────────────
   const [loopPopoverOpen, setLoopPopoverOpen] = useState(false)
@@ -384,11 +496,7 @@ export function CodingAgentPanel() {
     if (!isCodeAgentToolCompatible(model)) return
 
     setSelectedCodeModel(model)
-    try {
-      window.localStorage.setItem(CODING_AGENT_CODE_MODEL_STORAGE_KEY, model)
-    } catch {
-      // Ignore storage failures; the current selection still applies for this session.
-    }
+    persistSelectedCodeModel(model)
   }, [])
 
   // ── Pre-flight Ollama check ───────────────────────────────
@@ -494,6 +602,14 @@ export function CodingAgentPanel() {
         })
         break
       case 'diff_proposed':
+        if (!event.id) {
+          appendLog({
+            type: 'error',
+            content: `Diff proposed for ${event.filePath}, but no approval id was provided by the backend.`,
+            timestamp: Date.now(),
+          })
+          break
+        }
         addDiff({
           id: event.id,
           filePath: event.filePath,
@@ -584,9 +700,32 @@ export function CodingAgentPanel() {
       })
       const u13 = await listen<DirectEditIntentRequestPayload>('agent-edit-intent-request', (e) => {
         if (cancelled) return
+        const callId = e.payload.call_id ?? e.payload.callId ?? ''
+        const toolName = e.payload.tool_name ?? e.payload.toolName ?? 'file edit'
+        if (!callId) {
+          appendLog({
+            type: 'error',
+            content: `File edit intent for ${e.payload.path || toolName} did not include an approval id.`,
+            timestamp: Date.now(),
+          })
+          return
+        }
+        if (autoApproveRef.current) {
+          void invoke('approve_agent_edit_intent', { callId })
+            .then(() => {
+              appendLog({
+                type: 'text_delta',
+                content: `File edit intent auto-approved for ${e.payload.path || toolName}.`,
+                timestamp: Date.now(),
+              })
+            })
+            .catch((err) => appendLog({ type: 'error', content: String(err), timestamp: Date.now() }))
+          return
+        }
+
         setPendingEditIntent({
-          id: e.payload.call_id,
-          toolName: e.payload.tool_name,
+          id: callId,
+          toolName,
           filePath: e.payload.path,
         })
       })
@@ -628,43 +767,54 @@ export function CodingAgentPanel() {
 
   const sendPrompt = useCallback(async (
     prompt: string,
-    options: { source?: CodingSessionSource; includeConversationContext?: boolean } = {}
-  ) => {
-    if (!projectDir || !prompt.trim()) return
+    options: { source?: CodingSessionSource; includeConversationContext?: boolean; includeSummaryContext?: boolean } = {}
+  ): Promise<boolean> => {
+    if (!projectDir || !prompt.trim()) return false
 
     const source = options.source ?? 'manual'
     const includeConversationContext = options.includeConversationContext ?? source === 'manual'
-    const editPermission: EditPermission = getEditPermissionForPrompt(prompt, source)
+    const includeSummaryContext = options.includeSummaryContext ?? includeConversationContext
+    const editPermission: EditPermission = 'allowed'
     const storeState = useCodingAgentStore.getState()
     const activeSession = storeState.sessions.find((session) => session.id === storeState.activeSessionId)
     const shouldStartNewSession = !activeSession || activeSession.projectDir !== projectDir || activeSession.source !== source
     const candidateModel = selectedCodeModel || agentConfig?.code_model || CODE_AGENT_DEFAULT_MODEL
-    const model = isCodeAgentToolCompatible(candidateModel) ? candidateModel : CODE_AGENT_DEFAULT_MODEL
+    let model = isCodeAgentToolCompatible(candidateModel) ? candidateModel : CODE_AGENT_DEFAULT_MODEL
+    try {
+      const installedModels = await invoke<string[]>('list_ollama_models')
+      const installedCodeModel = resolveInstalledCodeModel(model, agentConfig?.code_model, installedModels)
+      if (!installedCodeModel) {
+        appendLog({
+          type: 'error',
+          content: 'No installed code-compatible Ollama model was found. Install or select a code model before running Code Agent.',
+          timestamp: Date.now(),
+        })
+        setLastFailureMessage('✗ No installed code-compatible Ollama model was found.')
+        setAgentStatus('failed')
+        return false
+      }
+
+      model = installedCodeModel
+      if (model !== selectedCodeModel) {
+        setSelectedCodeModel(model)
+        persistSelectedCodeModel(model)
+      }
+    } catch (err) {
+      console.warn('Failed to refresh Ollama models before Code Agent run:', err)
+    }
     const promptForAgent = buildCodingAgentPrompt({
       prompt,
       projectDir,
       sessions: storeState.sessions,
       activeSessionId: shouldStartNewSession ? null : storeState.activeSessionId,
       includeHistory: includeConversationContext,
+      includeSummaryContext,
     })
-    let threadId: string | undefined
-
     if (shouldStartNewSession) {
-      try {
-        const newThread = await createThread(
-          { id: model, provider: 'ollama' },
-          prompt
-        )
-        threadId = newThread.id
-      } catch (err) {
-        console.warn('Failed to create thread for code agent session:', err)
-      }
-    }
-
-    if (shouldStartNewSession) {
-      startNewSession(prompt, threadId, source)
+      startNewSession(prompt, undefined, source)
     } else {
       continueSession(prompt, source)
+      clearPendingDiffs()
     }
     completionHandledRef.current = false
     lastAgentErrorRef.current = null
@@ -674,6 +824,7 @@ export function CodingAgentPanel() {
     appendLog({ type: 'text_delta', content: `> ${prompt}`, timestamp: Date.now() })
     appendLog({ type: 'text_delta', content: `Backend: ${agentBackend}`, timestamp: Date.now() })
     appendLog({ type: 'text_delta', content: `Model: ${model}`, timestamp: Date.now() })
+    appendLog({ type: 'text_delta', content: `LSP Tools: ${lspEnabled ? 'enabled' : 'disabled'}`, timestamp: Date.now() })
     appendLog({ type: 'text_delta', content: 'Starting agent…', timestamp: Date.now() })
 
     try {
@@ -684,6 +835,7 @@ export function CodingAgentPanel() {
           model,
           ollamaBaseUrl: agentConfig?.ollama_url ?? 'http://localhost:11434',
           editPermission,
+          lspEnabled,
         })
       } else {
         await invoke('spawn_code_agent', {
@@ -693,6 +845,7 @@ export function CodingAgentPanel() {
           permissionMode: 'auto_accept',
         })
       }
+      return true
     } catch (err) {
       appendLog({ type: 'error', content: String(err), timestamp: Date.now() })
       setRunning(false)
@@ -708,8 +861,9 @@ export function CodingAgentPanel() {
       }
       setLastFailureMessage(`✗ ${String(err)}`)
       setAgentStatus('idle')
+      return false
     }
-  }, [projectDir, selectedCodeModel, agentConfig, agentBackend, createThread, setRunning, appendLog, startNewSession, continueSession, loopEnabled, clearLoopSchedule])
+  }, [projectDir, selectedCodeModel, agentConfig, agentBackend, setRunning, appendLog, startNewSession, continueSession, clearPendingDiffs, loopEnabled, clearLoopSchedule])
 
   const sendPromptRef = useRef(sendPrompt)
 
@@ -725,8 +879,41 @@ export function CodingAgentPanel() {
       setLoopCount(1)
       setLoopPrompt(prompt)
     }
-    await sendPrompt(prompt, { source: loopEnabled ? 'loop' : 'manual' })
-  }, [projectDir, draftPrompt, loopEnabled, setDraftPrompt, sendPrompt])
+    const success = await sendPrompt(prompt, {
+      source: loopEnabled ? 'loop' : 'manual',
+      includeConversationContext: !loopEnabled,
+      includeSummaryContext: !loopEnabled,
+    })
+    if (!success) {
+      setDraftPrompt(prompt)
+      if (loopEnabled) {
+        setLoopCount(0)
+        setLoopPrompt('')
+      }
+    }
+  }, [projectDir, draftPrompt, loopEnabled, setDraftPrompt, sendPrompt, setLoopCount, setLoopPrompt])
+
+  const handleSummarizeConversation = useCallback(async () => {
+    const storeState = useCodingAgentStore.getState()
+    const session = storeState.sessions.find((item) => item.id === storeState.activeSessionId)
+    if (!session || session.projectDir !== projectDir || session.source === 'loop' || loopEnabled) return
+
+    const summary = buildConversationSummary(session)
+    if (!summary) return
+
+    setConversationSummary(summary)
+
+    try {
+      await navigator.clipboard.writeText(summary)
+      appendLog({
+        type: 'text_delta',
+        content: '\n[System] Conversation summary copied to clipboard! You can paste it into a new chat to continue.',
+        timestamp: Date.now(),
+      })
+    } catch (err) {
+      console.warn('Failed to copy summary to clipboard:', err)
+    }
+  }, [loopEnabled, projectDir, setConversationSummary, appendLog])
 
   // ── Loop trigger ──────────────────────────────────────────
   useEffect(() => {
@@ -751,7 +938,11 @@ export function CodingAgentPanel() {
       clearInterval(loopTickRef.current!)
       setLoopCountdown(null)
       setLoopCount((c) => c + 1)
-      await sendPromptRef.current(loopPrompt, { source: 'loop', includeConversationContext: false })
+      await sendPromptRef.current(loopPrompt, {
+        source: 'loop',
+        includeConversationContext: false,
+        includeSummaryContext: false,
+      })
     }, seconds * 1000)
 
     return () => {
@@ -815,6 +1006,23 @@ export function CodingAgentPanel() {
 
   const folderName = projectDir ? projectDir.split('/').pop() : null
   const displayLog = useMemo(() => mergeStreamingLog(execLog), [execLog])
+  const activeManualSession = useMemo(() => {
+    const session = sessions.find((item) => item.id === activeSessionId)
+    if (!session || session.projectDir !== projectDir || session.source === 'loop') return null
+    if (!session.prompt.trim() && !session.planText.trim() && session.execLog.length === 0) return null
+    return session
+  }, [activeSessionId, projectDir, sessions])
+  const contextCharacterCount = useMemo(() => {
+    if (loopEnabled) return draftPrompt.length
+
+    const sessionChars = activeManualSession
+      ? activeManualSession.prompt.length +
+        activeManualSession.planText.length +
+        activeManualSession.execLog.reduce((total, line) => total + line.content.length, 0)
+      : 0
+
+    return draftPrompt.length + sessionChars
+  }, [activeManualSession, draftPrompt, loopEnabled])
 
   return (
     <div className="flex h-full overflow-hidden">
@@ -998,6 +1206,29 @@ export function CodingAgentPanel() {
 
         {/* Input */}
         <div className="shrink-0 px-4 pb-4 pt-3 border-t">
+          <div className="mb-2 flex items-center gap-2">
+            <ContextBudgetIndicator
+              characterCount={contextCharacterCount}
+              contextEnabled={!loopEnabled}
+            />
+            <div className="ml-auto flex items-center gap-2">
+              {conversationSummary && !loopEnabled && (
+                <span className="code-mode-summary-status">Summary saved</span>
+              )}
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                className="code-mode-summary-action h-7 gap-1 text-xs text-muted-foreground"
+                onClick={handleSummarizeConversation}
+                disabled={isRunning || loopEnabled || !activeManualSession}
+                title="Summarize & continue"
+              >
+                <IconCircleCheck size={13} />
+                Summarize & continue
+              </Button>
+            </div>
+          </div>
           <div className="relative flex items-end rounded-xl border bg-background shadow-sm">
             <textarea
               ref={textareaRef}
@@ -1065,19 +1296,11 @@ export function CodingAgentPanel() {
               )}
               <button
                 type="button"
-                onClick={() => {
-                  setAutoApprove((v) => {
-                    const next = !v
-                    if (next) {
-                      pendingDiffs.filter((d) => d.status === 'pending').forEach((d) => void handleApproveDiff(d.id))
-                    }
-                    return next
-                  })
-                }}
-                title={autoApprove ? 'Auto-approve ON — click to disable' : 'Auto-approve OFF — click to enable'}
-                className={`h-7 px-2 text-[10px] rounded-md border cursor-pointer select-none font-medium ${autoApprove ? 'bg-foreground text-background border-foreground hover:bg-foreground/80' : 'bg-background text-foreground border-border hover:bg-muted/40'}`}
+                onClick={() => setLspEnabled((v) => !v)}
+                title={lspEnabled ? 'LSP Tools ON — click to disable' : 'LSP Tools OFF — click to enable'}
+                className={`h-7 px-2 text-[10px] rounded-md border cursor-pointer select-none font-medium ${lspEnabled ? 'bg-foreground text-background border-foreground hover:bg-foreground/80' : 'bg-background text-foreground border-border hover:bg-muted/40'}`}
               >
-                {autoApprove ? '✓ Auto' : '✗ Auto'}
+                {lspEnabled ? '✓ LSP' : '✗ LSP'}
               </button>
               {isRunning ? (
                 <Button size="icon-sm" variant="destructive" className="rounded-full" onClick={handleStop} title="Stop agent">
@@ -1176,6 +1399,7 @@ export function CodingAgentPanel() {
 function ProjectFileTree({ projectDir }: { projectDir: string }) {
   const [files, setFiles] = useState<string[]>([])
   const [loading, setLoading] = useState(false)
+  const diagnostics = useCodingAgentStore((s) => s.diagnostics)
 
   useEffect(() => {
     setLoading(true)
@@ -1187,14 +1411,32 @@ function ProjectFileTree({ projectDir }: { projectDir: string }) {
 
   if (loading) return <IconLoader2 size={14} className="animate-spin text-muted-foreground mx-auto mt-4" />
 
+  const getDiagnosticCount = (filePath: string) => {
+    const normalized = filePath.split('/').pop() || filePath
+    return Object.entries(diagnostics).reduce((count, [key, diags]) => {
+      if (key.split('/').pop() === normalized || key.endsWith('/' + normalized)) {
+        return count + diags.length
+      }
+      return count
+    }, 0)
+  }
+
   return (
     <ul className="space-y-0.5">
-      {files.map((f) => (
-        <li key={f} className="flex items-center gap-1.5 py-0.5 px-1 rounded text-xs text-muted-foreground hover:bg-muted/40 cursor-default truncate">
-          <IconFileCode size={12} className="shrink-0 opacity-60" />
-          <span className="truncate">{f.split('/').pop()}</span>
-        </li>
-      ))}
+      {files.map((f) => {
+        const diagCount = getDiagnosticCount(f)
+        return (
+          <li key={f} className="flex items-center gap-1.5 py-0.5 px-1 rounded text-xs text-muted-foreground hover:bg-muted/40 cursor-default truncate">
+            <IconFileCode size={12} className="shrink-0 opacity-60" />
+            <span className="truncate flex-1">{f.split('/').pop()}</span>
+            {diagCount > 0 && (
+              <span className="flex items-center justify-center min-w-[14px] h-[14px] px-0.5 rounded text-[9px] font-semibold bg-red-500 text-white">
+                {diagCount}
+              </span>
+            )}
+          </li>
+        )
+      })}
     </ul>
   )
 }

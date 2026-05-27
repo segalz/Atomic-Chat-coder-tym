@@ -1,0 +1,9 @@
+.code-mode-summary-action {
+  min-width: max-content;
+}
+
+.code-mode-summary-status {
+  color: hsl(var(--muted-foreground));
+  font-size: 0.75rem;
+  line-height: 1rem;
+}

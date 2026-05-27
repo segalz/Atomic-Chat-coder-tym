@@ -49,13 +49,18 @@ pub fn install_extensions<R: Runtime>(app: tauri::AppHandle<R>, force: bool) -> 
     }
     log::info!("Installing extensions. Clean up: {clean_up}");
     if !clean_up && extensions_path.exists() {
-        log::info!("Extensions directory already exists and clean_up is false. Skipping installation.");
+        log::info!(
+            "Extensions directory already exists and clean_up is false. Skipping installation."
+        );
         return Ok(());
     }
 
     // Attempt to remove extensions folder
     if extensions_path.exists() {
-        log::info!("Removing existing extensions directory: {:?}", extensions_path);
+        log::info!(
+            "Removing existing extensions directory: {:?}",
+            extensions_path
+        );
         fs::remove_dir_all(&extensions_path).unwrap_or_else(|_| {
             log::warn!("Failed to remove existing extensions folder, it may not exist or there might be a permission issue.");
         });
@@ -76,7 +81,10 @@ pub fn install_extensions<R: Runtime>(app: tauri::AppHandle<R>, force: bool) -> 
         vec![]
     };
 
-    log::info!("Reading extensions from pre-install directory: {:?}", pre_install_path);
+    log::info!(
+        "Reading extensions from pre-install directory: {:?}",
+        pre_install_path
+    );
     for entry in fs::read_dir(&pre_install_path).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path();
@@ -307,11 +315,7 @@ pub fn setup_jan_cli<R: Runtime>(app_handle: tauri::AppHandle<R>, version_change
                 use std::os::windows::process::CommandExt;
                 cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
             }
-            if cmd
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
-            {
+            if cmd.output().map(|o| o.status.success()).unwrap_or(false) {
                 log::debug!("jan CLI already on PATH — skipping reinstall");
                 return;
             }
@@ -321,7 +325,11 @@ pub fn setup_jan_cli<R: Runtime>(app_handle: tauri::AppHandle<R>, version_change
             Ok(status) => {
                 log::info!(
                     "jan CLI {} to {}",
-                    if version_changed { "updated" } else { "installed" },
+                    if version_changed {
+                        "updated"
+                    } else {
+                        "installed"
+                    },
                     status.path.as_deref().unwrap_or("<unknown>")
                 );
             }

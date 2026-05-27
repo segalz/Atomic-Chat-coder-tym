@@ -82,7 +82,12 @@ pub async fn capture_and_describe<R: Runtime>(
         inference_ms,
     };
 
-    let _ = app.emit("sim_capture", SimCaptureEvent { result: result.clone() });
+    let _ = app.emit(
+        "sim_capture",
+        SimCaptureEvent {
+            result: result.clone(),
+        },
+    );
 
     Ok(result)
 }
@@ -123,7 +128,13 @@ async fn capture_ios() -> Result<(String, Vec<u8>, u64), String> {
     let status = tokio::time::timeout(
         Duration::from_secs(CAPTURE_TIMEOUT_SECS),
         Command::new("xcrun")
-            .args(["simctl", "io", "booted", "screenshot", tmp.to_str().unwrap()])
+            .args([
+                "simctl",
+                "io",
+                "booted",
+                "screenshot",
+                tmp.to_str().unwrap(),
+            ])
             .status(),
     )
     .await

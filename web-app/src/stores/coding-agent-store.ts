@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { persist } from 'zustand/middleware'
+import { persist, createJSONStorage } from 'zustand/middleware'
 
 export type ExecLogLineType =
   | 'text_delta'
@@ -35,6 +35,8 @@ export interface CodingSession {
   planText: string
   execLog: ExecLogLine[]
   pendingDiffs: PendingDiff[]
+  conversationSummary?: string
+  conversationSummaryUpdatedAt?: number
   timestamp: number
 }
 
@@ -50,6 +52,9 @@ interface CodingAgentState {
   planText: string
   execLog: ExecLogLine[]
   pendingDiffs: PendingDiff[]
+  diagnostics: Record<string, any[]>
+  conversationSummary?: string
+  conversationSummaryUpdatedAt?: number
   showFree: boolean
 
   // Actions
@@ -61,6 +66,9 @@ interface CodingAgentState {
   appendLog: (line: ExecLogLine) => void
   addDiff: (diff: PendingDiff) => void
   updateDiffStatus: (id: string, status: PendingDiff['status']) => void
+  clearPendingDiffs: () => void
+  setDiagnostics: (filePath: string, diagnostics: any[]) => void
+  setConversationSummary: (summary: string) => void
   /** Save current session to history then clear runtime state */
   startNewSession: (prompt: string, threadId?: string, source?: CodingSessionSource) => void
   /** Continue the active session without clearing visible output */
@@ -95,6 +103,12 @@ function normalizePendingDiffs(value: unknown): PendingDiff[] {
     })
 }
 
+function normalizeDiagnostics(value: unknown): Record<string, any[]> {
+  if (!value || typeof value !== 'object') return {}
+
+  return value as Record<string, any[]>
+}
+
 function normalizeSessions(value: unknown): CodingSession[] {
   if (!Array.isArray(value)) return []
 
@@ -102,7 +116,7 @@ function normalizeSessions(value: unknown): CodingSession[] {
     .filter((session) => session && typeof session === 'object')
     .map((session) => {
       const s = session as Partial<CodingSession>
-      return {
+      const normalized: CodingSession = {
         id: typeof s.id === 'string' ? s.id : crypto.randomUUID(),
         threadId: typeof s.threadId === 'string' ? s.threadId : undefined,
         prompt: typeof s.prompt === 'string' ? s.prompt : 'Session',
@@ -113,6 +127,16 @@ function normalizeSessions(value: unknown): CodingSession[] {
         pendingDiffs: normalizePendingDiffs(s.pendingDiffs),
         timestamp: typeof s.timestamp === 'number' ? s.timestamp : Date.now(),
       }
+
+      if (typeof s.conversationSummary === 'string') {
+        normalized.conversationSummary = s.conversationSummary
+      }
+
+      if (typeof s.conversationSummaryUpdatedAt === 'number') {
+        normalized.conversationSummaryUpdatedAt = s.conversationSummaryUpdatedAt
+      }
+
+      return normalized
     })
 }
 
@@ -120,21 +144,30 @@ function migrateCodingAgentState(persistedState: unknown): Partial<CodingAgentSt
   if (!persistedState || typeof persistedState !== 'object') return {}
 
   const state = persistedState as Partial<CodingAgentState>
+  const sessions = normalizeSessions(state.sessions)
+  const activeSessionId = typeof state.activeSessionId === 'string' ? state.activeSessionId : null
+  const activeSession = activeSessionId
+    ? sessions.find((session) => session.id === activeSessionId && session.source === 'manual')
+    : undefined
+
   return {
     projectDir: typeof state.projectDir === 'string' ? state.projectDir : '',
     draftPrompt: typeof state.draftPrompt === 'string' ? state.draftPrompt : '',
-    sessions: normalizeSessions(state.sessions),
-    activeSessionId: typeof state.activeSessionId === 'string' ? state.activeSessionId : null,
+    sessions,
+    activeSessionId,
     planText: typeof state.planText === 'string' ? state.planText : '',
     execLog: normalizeExecLog(state.execLog),
     pendingDiffs: normalizePendingDiffs(state.pendingDiffs),
+    diagnostics: normalizeDiagnostics(state.diagnostics),
+    conversationSummary: activeSession?.conversationSummary,
+    conversationSummaryUpdatedAt: activeSession?.conversationSummaryUpdatedAt,
     isRunning: false,
   }
 }
 
 function updateActiveSession(
   state: Pick<CodingAgentState, 'activeSessionId' | 'sessions'>,
-  patch: Partial<Pick<CodingSession, 'planText' | 'execLog' | 'pendingDiffs'>>
+  patch: Partial<Pick<CodingSession, 'planText' | 'execLog' | 'pendingDiffs' | 'conversationSummary' | 'conversationSummaryUpdatedAt'>>
 ): CodingSession[] {
   if (!state.activeSessionId) return state.sessions
 
@@ -157,6 +190,9 @@ export const useCodingAgentStore = create<CodingAgentState>()(
       planText: '',
       execLog: [],
       pendingDiffs: [],
+      diagnostics: {},
+      conversationSummary: undefined,
+      conversationSummaryUpdatedAt: undefined,
       showFree: false,
 
       setProjectDir: (dir) => set({ projectDir: dir }),
@@ -195,6 +231,32 @@ export const useCodingAgentStore = create<CodingAgentState>()(
             sessions: updateActiveSession(s, { pendingDiffs }),
           }
         }),
+      clearPendingDiffs: () =>
+        set((s) => ({
+          pendingDiffs: [],
+          sessions: updateActiveSession(s, { pendingDiffs: [] }),
+        })),
+      setDiagnostics: (filePath, diagnostics) =>
+        set((s) => ({
+          diagnostics: { ...s.diagnostics, [filePath]: diagnostics },
+        })),
+      setConversationSummary: (summary) => {
+        const trimmedSummary = summary.trim()
+        const conversationSummaryUpdatedAt = Date.now()
+        set((s) => {
+          const activeSession = s.sessions.find((session) => session.id === s.activeSessionId)
+          if (!activeSession || activeSession.source !== 'manual') return {}
+
+          return {
+            conversationSummary: trimmedSummary,
+            conversationSummaryUpdatedAt,
+            sessions: updateActiveSession(s, {
+              conversationSummary: trimmedSummary,
+              conversationSummaryUpdatedAt,
+            }),
+          }
+        })
+      },
 
       startNewSession: (prompt, threadId, source = 'manual') => {
         const { planText, execLog, pendingDiffs, projectDir, sessions, activeSessionId } = get()
@@ -242,6 +304,8 @@ export const useCodingAgentStore = create<CodingAgentState>()(
           planText: '',
           execLog: [],
           pendingDiffs: [],
+          conversationSummary: undefined,
+          conversationSummaryUpdatedAt: undefined,
           isRunning: false,
         })
       },
@@ -304,7 +368,9 @@ export const useCodingAgentStore = create<CodingAgentState>()(
           activeSessionId: id,
           planText: session.planText,
           execLog: session.execLog,
-          pendingDiffs: session.pendingDiffs,
+          pendingDiffs: normalizePendingDiffs(session.pendingDiffs).filter((diff) => diff.status === 'pending'),
+          conversationSummary: session.conversationSummary,
+          conversationSummaryUpdatedAt: session.conversationSummaryUpdatedAt,
           projectDir: session.projectDir,
           isRunning: false,
         })
@@ -315,11 +381,36 @@ export const useCodingAgentStore = create<CodingAgentState>()(
       },
 
       clearSession: () =>
-        set({ planText: '', execLog: [], pendingDiffs: [], isRunning: false, activeSessionId: null }),
+        set({
+          planText: '',
+          execLog: [],
+          pendingDiffs: [],
+          conversationSummary: undefined,
+          conversationSummaryUpdatedAt: undefined,
+          isRunning: false,
+          activeSessionId: null,
+        }),
     }),
     {
       name: 'coding-agent-store',
       version: 0,
+      storage: createJSONStorage(() => ({
+        getItem: (name) => (typeof window !== 'undefined' ? localStorage.getItem(name) : null),
+        setItem: (name, value) => {
+          if (typeof window !== 'undefined') {
+            try {
+              localStorage.setItem(name, value)
+            } catch (e) {
+              console.warn('coding-agent-store: Failed to persist state to localStorage (quota exceeded)', e)
+            }
+          }
+        },
+        removeItem: (name) => {
+          if (typeof window !== 'undefined') {
+            localStorage.removeItem(name)
+          }
+        },
+      })),
       migrate: migrateCodingAgentState,
       partialize: (s) => ({
         projectDir: s.projectDir,
@@ -329,13 +420,16 @@ export const useCodingAgentStore = create<CodingAgentState>()(
         planText: s.planText,
         execLog: s.execLog,
         pendingDiffs: s.pendingDiffs,
+        diagnostics: s.diagnostics,
       }),
       onRehydrateStorage: () => (state) => {
         if (state) {
           state.isRunning = false
-          state.pendingDiffs = state.pendingDiffs.map((d) =>
-            d.status === 'pending' ? { ...d, status: 'rejected' } : d
-          )
+          state.pendingDiffs = []
+          state.sessions = state.sessions.map((session) => ({
+            ...session,
+            pendingDiffs: normalizePendingDiffs(session.pendingDiffs).filter((diff) => diff.status !== 'pending'),
+          }))
         }
       },
     }

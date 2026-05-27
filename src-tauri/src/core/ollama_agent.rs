@@ -18,6 +18,7 @@ use futures_util::StreamExt;
 use reqwest::Client;
 use serde::Serialize;
 use serde_json::{json, Value};
+use tauri::Manager;
 use tauri::{AppHandle, Emitter, Runtime, State};
 use tokio::sync::{oneshot, Mutex};
 use tokio::time::{timeout, Duration};
@@ -30,6 +31,7 @@ const MAX_ITERATIONS: u32 = 40;
 const DIRECT_AGENT_IDLE_TIMEOUT_SECS: u64 = 10 * 60;
 const DIRECT_AGENT_MAX_RUNTIME_SECS: u64 = 45 * 60;
 const DIRECT_AGENT_HTTP_TIMEOUT_SECS: u64 = 120;
+const MAX_NO_EDIT_FINISH_RETRIES: u32 = 2;
 /// Prune when history exceeds this many messages (keeps first system message + recent N)
 const CONTEXT_PRUNE_THRESHOLD: usize = 60;
 const CONTEXT_KEEP_RECENT: usize = 30;
@@ -255,8 +257,9 @@ fn emit_content_delta<R: Runtime>(
 // ── Tool schemas (OpenAI function calling format) ─────────────────────────────
 
 /// Delegates to agent_bridge so schemas are defined in a single place (S2).
-fn tool_definitions() -> Value {
-    crate::core::mcp::agent_bridge::tool_schemas()
+/// `lsp_enabled` conditionally includes the 5 read-only LSP tool schemas.
+fn tool_definitions(lsp_enabled: bool) -> Value {
+    crate::core::mcp::agent_bridge::tool_schemas(lsp_enabled)
 }
 
 fn code_planner_enabled() -> bool {
@@ -547,13 +550,8 @@ async fn locate_code_inner(
                     output.push('\n');
                 }
 
-                let dependencies = build_dependency_lines(
-                    &root,
-                    &all_file_set,
-                    &candidate.path,
-                    &content,
-                )
-                .await?;
+                let dependencies =
+                    build_dependency_lines(&root, &all_file_set, &candidate.path, &content).await?;
                 if !dependencies.is_empty() {
                     output.push_str("   dependency hints:");
                     for dependency in dependencies.into_iter().take(4) {
@@ -1495,6 +1493,7 @@ async fn execute_tool<R: Runtime>(
     pending_diffs: Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>,
     pending_edit_intents: Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>,
     edit_permission: Arc<Mutex<FileEditPermission>>,
+    lsp_enabled: bool,
 ) -> Result<String, String> {
     match name {
         "read_file" => {
@@ -1525,26 +1524,28 @@ async fn execute_tool<R: Runtime>(
             // Errors are returned to the S1 self-healing loop, not the user.
             crate::core::mcp::agent_bridge::validate_js_ts(&content, &path)?;
 
-            // Emit diff_proposed and wait for approval
-            let (tx, rx) = oneshot::channel::<bool>();
-            {
-                let mut guard = pending_diffs.lock().await;
-                guard.insert(call_id.to_string(), tx);
-            }
+            if *edit_permission.lock().await != FileEditPermission::Allowed {
+                // Emit diff_proposed and wait for approval.
+                let (tx, rx) = oneshot::channel::<bool>();
+                {
+                    let mut guard = pending_diffs.lock().await;
+                    guard.insert(call_id.to_string(), tx);
+                }
 
-            let _ = app.emit(
-                "agent-diff-proposed",
-                AgentDiffProposedEvent {
-                    call_id: call_id.to_string(),
-                    path: path.to_string_lossy().into_owned(),
-                    search: String::new(),
-                    replace: content.clone(),
-                },
-            );
+                let _ = app.emit(
+                    "agent-diff-proposed",
+                    AgentDiffProposedEvent {
+                        call_id: call_id.to_string(),
+                        path: path.to_string_lossy().into_owned(),
+                        search: String::new(),
+                        replace: content.clone(),
+                    },
+                );
 
-            let approved = rx.await.unwrap_or(false);
-            if !approved {
-                return Err("User rejected the file write.".to_string());
+                let approved = rx.await.unwrap_or(false);
+                if !approved {
+                    return Err("User rejected the file write.".to_string());
+                }
             }
 
             if let Some(parent) = path.parent() {
@@ -1599,26 +1600,28 @@ async fn execute_tool<R: Runtime>(
             let new_content = current.replacen(&search, &replace, 1);
             crate::core::mcp::agent_bridge::validate_js_ts(&new_content, &path)?;
 
-            // Emit diff_proposed and wait for approval
-            let (tx, rx) = oneshot::channel::<bool>();
-            {
-                let mut guard = pending_diffs.lock().await;
-                guard.insert(call_id.to_string(), tx);
-            }
+            if *edit_permission.lock().await != FileEditPermission::Allowed {
+                // Emit diff_proposed and wait for approval.
+                let (tx, rx) = oneshot::channel::<bool>();
+                {
+                    let mut guard = pending_diffs.lock().await;
+                    guard.insert(call_id.to_string(), tx);
+                }
 
-            let _ = app.emit(
-                "agent-diff-proposed",
-                AgentDiffProposedEvent {
-                    call_id: call_id.to_string(),
-                    path: path.to_string_lossy().into_owned(),
-                    search: search.clone(),
-                    replace: replace.clone(),
-                },
-            );
+                let _ = app.emit(
+                    "agent-diff-proposed",
+                    AgentDiffProposedEvent {
+                        call_id: call_id.to_string(),
+                        path: path.to_string_lossy().into_owned(),
+                        search: search.clone(),
+                        replace: replace.clone(),
+                    },
+                );
 
-            let approved = rx.await.unwrap_or(false);
-            if !approved {
-                return Err("User rejected the edit.".to_string());
+                let approved = rx.await.unwrap_or(false);
+                if !approved {
+                    return Err("User rejected the edit.".to_string());
+                }
             }
 
             // new_content already computed and validated above (S2 gate)
@@ -1755,16 +1758,9 @@ async fn execute_tool<R: Runtime>(
             } else {
                 PathBuf::from(project_dir)
             };
-            let max_results = args["max_results"]
-                .as_u64()
-                .map(|value| value as usize);
+            let max_results = args["max_results"].as_u64().map(|value| value as usize);
 
-            locate_code(
-                root.to_string_lossy().as_ref(),
-                query,
-                max_results,
-            )
-            .await
+            locate_code(root.to_string_lossy().as_ref(), query, max_results).await
         }
 
         "find_and_analyze_code" => {
@@ -1823,6 +1819,161 @@ async fn execute_tool<R: Runtime>(
                     "Relevant files for query '{}':\n{}Use read_file or grep on the most relevant paths before editing.",
                     query, matches
                 ))
+            }
+        }
+
+        // ── LSP read-only tools ────────────────────────────────────────────
+        "lsp_diagnostics" => {
+            if !lsp_enabled {
+                return Ok(
+                    "LSP is not enabled for this session. Enable it via the LSP toggle button."
+                        .to_string(),
+                );
+            }
+            let lsp_state = app.state::<crate::core::lsp::commands::LspToolsState>();
+            let file_path = args["file_path"]
+                .as_str()
+                .map(|p| resolve_path(&json!({"path": p}), "path", project_dir))
+                .transpose()?;
+            let diags = crate::core::lsp::commands::lsp_diagnostics_internal(
+                &*lsp_state,
+                project_dir.to_string(),
+                file_path,
+            )
+            .await;
+            serde_json::to_string_pretty(&diags)
+                .map_err(|e| format!("lsp_diagnostics: serialise error: {}", e))
+        }
+
+        "lsp_definitions" => {
+            if !lsp_enabled {
+                return Ok("LSP is not enabled for this session.".to_string());
+            }
+            let lsp_state = app.state::<crate::core::lsp::commands::LspToolsState>();
+            let file_path = resolve_path(args, "file_path", project_dir)?;
+            let line = args["line"]
+                .as_u64()
+                .ok_or("lsp_definitions: missing 'line'")? as u32;
+            let character = args["character"]
+                .as_u64()
+                .ok_or("lsp_definitions: missing 'character'")? as u32;
+            let result = crate::core::lsp::commands::lsp_definitions_internal(
+                &*lsp_state,
+                project_dir.to_string(),
+                file_path,
+                line,
+                character,
+            )
+            .await;
+            match result {
+                Some(loc) => serde_json::to_string_pretty(&loc)
+                    .map_err(|e| format!("lsp_definitions: serialise error: {}", e)),
+                None => Ok("No definition found.".to_string()),
+            }
+        }
+
+        "lsp_references" => {
+            if !lsp_enabled {
+                return Ok("LSP is not enabled for this session.".to_string());
+            }
+            let lsp_state = app.state::<crate::core::lsp::commands::LspToolsState>();
+            let file_path = resolve_path(args, "file_path", project_dir)?;
+            let line = args["line"]
+                .as_u64()
+                .ok_or("lsp_references: missing 'line'")? as u32;
+            let character = args["character"]
+                .as_u64()
+                .ok_or("lsp_references: missing 'character'")? as u32;
+            let result = crate::core::lsp::commands::lsp_references_internal(
+                &*lsp_state,
+                project_dir.to_string(),
+                file_path,
+                line,
+                character,
+            )
+            .await;
+            match result {
+                Some(refs) => serde_json::to_string_pretty(&refs)
+                    .map_err(|e| format!("lsp_references: serialise error: {}", e)),
+                None => Ok("No references found.".to_string()),
+            }
+        }
+
+        "lsp_hover" => {
+            if !lsp_enabled {
+                return Ok("LSP is not enabled for this session.".to_string());
+            }
+            let lsp_state = app.state::<crate::core::lsp::commands::LspToolsState>();
+            let file_path = resolve_path(args, "file_path", project_dir)?;
+            let line = args["line"].as_u64().ok_or("lsp_hover: missing 'line'")? as u32;
+            let character = args["character"]
+                .as_u64()
+                .ok_or("lsp_hover: missing 'character'")? as u32;
+            let result = crate::core::lsp::commands::lsp_hover_internal(
+                &*lsp_state,
+                project_dir.to_string(),
+                file_path,
+                line,
+                character,
+            )
+            .await;
+            match result {
+                Some(hover) => Ok(hover),
+                None => Ok("No hover information available.".to_string()),
+            }
+        }
+
+        "lsp_document_symbols" => {
+            if !lsp_enabled {
+                return Ok("LSP is not enabled for this session.".to_string());
+            }
+            let lsp_state = app.state::<crate::core::lsp::commands::LspToolsState>();
+            let file_path = resolve_path(args, "file_path", project_dir)?;
+            let result = crate::core::lsp::commands::lsp_document_symbols_internal(
+                &*lsp_state,
+                project_dir.to_string(),
+                file_path,
+            )
+            .await;
+            serde_json::to_string_pretty(&result)
+                .map_err(|e| format!("lsp_document_symbols: serialise error: {}", e))
+        }
+
+        "lsp_code_actions" => {
+            if !lsp_enabled {
+                return Ok("LSP is not enabled for this session.".to_string());
+            }
+            let lsp_state = app.state::<crate::core::lsp::commands::LspToolsState>();
+            let file_path = resolve_path(args, "file_path", project_dir)?;
+            let start_line = args["start_line"]
+                .as_u64()
+                .ok_or("lsp_code_actions: missing 'start_line'")?
+                as u32;
+            let start_character = args["start_character"]
+                .as_u64()
+                .ok_or("lsp_code_actions: missing 'start_character'")?
+                as u32;
+            let end_line = args["end_line"]
+                .as_u64()
+                .ok_or("lsp_code_actions: missing 'end_line'")? as u32;
+            let end_character = args["end_character"]
+                .as_u64()
+                .ok_or("lsp_code_actions: missing 'end_character'")?
+                as u32;
+            let result = crate::core::lsp::commands::lsp_code_actions_internal(
+                &*lsp_state,
+                project_dir.to_string(),
+                file_path,
+                start_line,
+                start_character,
+                end_line,
+                end_character,
+            )
+            .await;
+            match result {
+                Some(actions) => serde_json::to_string_pretty(&actions)
+                    .map_err(|e| format!("lsp_code_actions: serialise error: {}", e)),
+                None => Ok("No code actions available.".to_string()),
             }
         }
 
@@ -2155,9 +2306,11 @@ async fn run_agent_loop<R: Runtime>(
     pending_diffs: Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>,
     pending_edit_intents: Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>,
     edit_permission: Arc<Mutex<FileEditPermission>>,
+    requires_file_edit: bool,
     cancel: CancellationToken,
+    lsp_enabled: bool,
 ) -> Result<(), String> {
-    let tools = tool_definitions();
+    let tools = tool_definitions(lsp_enabled);
     let mut messages: Vec<Value> = vec![json!({ "role": "system", "content": SYSTEM_PROMPT })];
 
     if code_planner_enabled() {
@@ -2189,6 +2342,8 @@ async fn run_agent_loop<R: Runtime>(
 
     let mut iteration = 0u32;
     let mut heal_retries = 0u32;
+    let mut no_edit_finish_retries = 0u32;
+    let mut successful_file_edits = 0u32;
 
     loop {
         if cancel.is_cancelled() {
@@ -2251,6 +2406,22 @@ async fn run_agent_loop<R: Runtime>(
 
         // Append assistant message to history
         if tool_calls.is_empty() {
+            if requires_file_edit && successful_file_edits == 0 {
+                no_edit_finish_retries += 1;
+                if no_edit_finish_retries > MAX_NO_EDIT_FINISH_RETRIES {
+                    return Err(
+                        "The model stopped without editing any files. It read context but did not call edit_file or write_file."
+                            .to_string(),
+                    );
+                }
+
+                let correction = "You stopped without editing any files. The user requested a code/file change and file edits are already approved. Continue now: call edit_file for an existing file or write_file for a new file. Do not say you are done until a file edit tool succeeds.";
+                emit_text_delta(app, correction);
+                messages.push(json!({ "role": "assistant", "content": text }));
+                messages.push(json!({ "role": "user", "content": correction }));
+                continue;
+            }
+
             messages.push(json!({ "role": "assistant", "content": text }));
             // No tool calls → model is done
             log::info!("[OllamaAgent] Agent finished — no more tool calls");
@@ -2334,12 +2505,16 @@ async fn run_agent_loop<R: Runtime>(
                 pending_diffs.clone(),
                 pending_edit_intents.clone(),
                 edit_permission.clone(),
+                lsp_enabled,
             )
             .await;
 
             let (result_content, is_error) = match exec_result {
                 Ok(output) => {
                     heal_retries = 0;
+                    if matches!(tc.name.as_str(), "edit_file" | "write_file") {
+                        successful_file_edits += 1;
+                    }
                     (output, false)
                 }
                 Err(e) => {
@@ -2394,6 +2569,7 @@ pub async fn start_ollama_agent<R: Runtime>(
     model: String,
     ollama_base_url: Option<String>,
     edit_permission: Option<String>,
+    lsp_enabled: Option<bool>,
 ) -> Result<(), String> {
     // Guard: only one agent at a time
     {
@@ -2406,6 +2582,7 @@ pub async fn start_ollama_agent<R: Runtime>(
 
     let base_url = ollama_base_url.unwrap_or_else(|| "http://localhost:11434".to_string());
     let ollama_url = format!("{}/v1/chat/completions", base_url.trim_end_matches('/'));
+    let lsp_enabled = lsp_enabled.unwrap_or(false);
 
     let cancel = CancellationToken::new();
     {
@@ -2420,7 +2597,9 @@ pub async fn start_ollama_agent<R: Runtime>(
     let running_arc = state.running.clone();
     let cancel_arc = state.cancel.clone();
     let app_clone = app.clone();
-    let edit_permission = Arc::new(Mutex::new(FileEditPermission::from_option(edit_permission)));
+    let parsed_edit_permission = FileEditPermission::from_option(edit_permission);
+    let requires_file_edit = parsed_edit_permission == FileEditPermission::Allowed;
+    let edit_permission = Arc::new(Mutex::new(parsed_edit_permission));
 
     emit_text_delta(
         &app,
@@ -2449,7 +2628,9 @@ pub async fn start_ollama_agent<R: Runtime>(
                 pending_diffs,
                 pending_edit_intents,
                 edit_permission,
+                requires_file_edit,
                 loop_cancel,
+                lsp_enabled,
             ),
         )
         .await
@@ -2688,13 +2869,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_locate_code_failure_returns_fallback() {
-        let output = locate_code(
-            "/definitely/not/a/project/root",
-            "anything",
-            Some(5),
-        )
-        .await
-        .unwrap();
+        let output = locate_code("/definitely/not/a/project/root", "anything", Some(5))
+            .await
+            .unwrap();
 
         assert!(output.contains("locate_code unavailable"));
         assert!(output.contains("Fallback: continue"));

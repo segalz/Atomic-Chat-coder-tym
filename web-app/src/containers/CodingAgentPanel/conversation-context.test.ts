@@ -73,15 +73,125 @@ describe('buildCodingAgentPrompt', () => {
     expect(result).toContain('Assistant: 5 + 3 = 8')
   })
 
+  it('prefers stored summary over raw active session history', () => {
+    const result = buildCodingAgentPrompt({
+      prompt: 'Current request',
+      projectDir: '/repo',
+      activeSessionId: 'session-1',
+      sessions: [{
+        ...baseSession,
+        conversationSummary: '## Conversation Goal\nContinue safely.',
+        execLog: [
+          { type: 'text_delta', content: '> raw prior request', timestamp: 1 },
+          { type: 'text_delta', content: 'raw prior answer', timestamp: 2 },
+        ],
+      }],
+    })
+
+    expect(result).toContain('Coding-agent summary context from the active conversation')
+    expect(result).toContain('Saved conversation summary:\n## Conversation Goal\nContinue safely.')
+    expect(result).toContain('Current request:\nCurrent request')
+    expect(result).not.toContain('Current conversation so far:')
+    expect(result).not.toContain('First request: Previous request')
+    expect(result).not.toContain('raw prior request')
+    expect(result).not.toContain('raw prior answer')
+  })
+
+  it('does not include stored summary when summary context is disabled', () => {
+    const result = buildCodingAgentPrompt({
+      prompt: 'Current request',
+      projectDir: '/repo',
+      activeSessionId: 'session-1',
+      includeSummaryContext: false,
+      sessions: [{
+        ...baseSession,
+        conversationSummary: 'Stored summary',
+      }],
+    })
+
+    expect(result).toContain('Current conversation so far:')
+    expect(result).toContain('Relevant result:\nPrevious result')
+    expect(result).not.toContain('Stored summary')
+  })
+
+  it('can include stored summary without raw history', () => {
+    const result = buildCodingAgentPrompt({
+      prompt: 'Current request',
+      projectDir: '/repo',
+      activeSessionId: 'session-1',
+      includeHistory: false,
+      includeSummaryContext: true,
+      sessions: [{
+        ...baseSession,
+        conversationSummary: 'Stored summary',
+        execLog: [
+          { type: 'text_delta', content: '> raw prior request', timestamp: 1 },
+        ],
+      }],
+    })
+
+    expect(result).toContain('Saved conversation summary:\nStored summary')
+    expect(result).not.toContain('raw prior request')
+  })
+
   it('does not include loop sessions', () => {
     const result = buildCodingAgentPrompt({
       prompt: 'Current request',
       projectDir: '/repo',
-      sessions: [{ ...baseSession, source: 'loop' }],
+      sessions: [{ ...baseSession, source: 'loop', conversationSummary: 'Loop summary' }],
       activeSessionId: 'session-1',
     })
 
     expect(result).toBe('Current request')
+  })
+
+  it('does not leak active manual context into a loop continuation', () => {
+    const result = buildCodingAgentPrompt({
+      prompt: 'Loop request',
+      projectDir: '/repo',
+      sessions: [{
+        ...baseSession,
+        conversationSummary: 'Manual summary',
+        execLog: [
+          { type: 'text_delta', content: '> manual prior request', timestamp: 1 },
+          { type: 'text_delta', content: 'manual prior answer', timestamp: 2 },
+        ],
+      }],
+      activeSessionId: 'session-1',
+      includeHistory: false,
+      includeSummaryContext: false,
+    })
+
+    expect(result).toBe('Loop request')
+    expect(result).not.toContain('Manual summary')
+    expect(result).not.toContain('manual prior request')
+    expect(result).not.toContain('manual prior answer')
+  })
+
+  it('uses only the explicitly loaded active session summary', () => {
+    const result = buildCodingAgentPrompt({
+      prompt: 'Continue loaded session',
+      projectDir: '/repo',
+      activeSessionId: 'loaded-session',
+      sessions: [
+        {
+          ...baseSession,
+          id: 'newer-session',
+          conversationSummary: 'Newer inactive summary',
+        },
+        {
+          ...baseSession,
+          id: 'loaded-session',
+          prompt: 'Loaded prior request',
+          conversationSummary: 'Loaded session summary',
+        },
+      ],
+    })
+
+    expect(result).toContain('Saved conversation summary:\nLoaded session summary')
+    expect(result).toContain('Current request:\nContinue loaded session')
+    expect(result).not.toContain('Newer inactive summary')
+    expect(result).not.toContain('Loaded prior request')
   })
 
   it('does not include sessions from other projects', () => {
