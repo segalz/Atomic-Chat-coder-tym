@@ -211,6 +211,38 @@ function ThreadDetail() {
       const msgMeta = message.metadata as Record<string, unknown> | undefined
       const finishReason = msgMeta?.finishReason as string | undefined
 
+      // [ctx-debug] Context usage per loop iteration. There is NO 60% gate in
+      // the code — the real thresholds are 85% (isNearLimit warning) and 90%
+      // (continuation / auto-increase). This log lets us correlate the observed
+      // "breaks above 60%" with the actual token usage, finishReason, agent mode,
+      // and whether any context handling fires this turn.
+      {
+        const usage = msgMeta?.usage as
+          | { inputTokens?: number; outputTokens?: number; totalTokens?: number }
+          | undefined
+        const ctxLen =
+          (useModelProvider.getState().selectedModel?.settings?.ctx_len
+            ?.controller_props?.value as number) ?? 32768
+        const inputTokens = usage?.inputTokens ?? 0
+        const outputTokens = usage?.outputTokens ?? 0
+        const totalTokens = usage?.totalTokens ?? inputTokens + outputTokens
+        const pctOfCtx = ctxLen > 0 ? Math.round((totalTokens / ctxLen) * 1000) / 10 : undefined
+        const inAgentLoop = useAgentMode.getState().agentThreads[threadId] === true
+        console.log('[ctx-debug] context usage @ onFinish', {
+          finishReason,
+          isAbort,
+          inAgentLoop,
+          inputTokens,
+          outputTokens,
+          totalTokens,
+          ctxLen,
+          pctOfCtx,
+          crossed_85_nearLimit: pctOfCtx != null && pctOfCtx > 85,
+          crossed_90_continuation: totalTokens >= ctxLen * 0.9,
+          pendingTools: sessionData.tools.length,
+        })
+      }
+
       // Context limit hit: send partial content as prefill so the model continues
       // from where it stopped. The stream wrapper injects it as the first text-delta
       // of the new message, so the user sees the partial text immediately.
