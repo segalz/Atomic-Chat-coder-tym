@@ -354,6 +354,35 @@ export class CustomChatTransport implements ChatTransport<UIMessage> {
       })
     })()
 
+    // [ctx-debug] Inspect exactly what context is sent to the model on each
+    // loop iteration. If toolPartsWithOutput stays low while toolParts grows,
+    // tool results are missing from the context the model receives.
+    {
+      let toolParts = 0
+      let toolPartsWithOutput = 0
+      for (const message of options.messages) {
+        for (const part of (message.parts ?? []) as Array<{
+          type: string
+          state?: string
+          output?: unknown
+        }>) {
+          if (!part.type.startsWith('tool-')) continue
+          toolParts++
+          if (part.state === 'output-available' || part.output != null)
+            toolPartsWithOutput++
+        }
+      }
+      console.log('[ctx-debug] sendMessages: outgoing context', {
+        trigger: options.trigger,
+        provider: effectiveProviderName,
+        uiMessages: options.messages.length,
+        roles: options.messages.map((m) => m.role),
+        toolParts,
+        toolPartsWithOutput,
+        continuing: this.continueFromContent != null,
+      })
+    }
+
     // Convert UI messages to model messages
     const baseMessages = convertToModelMessages(
       this.mapUserInlineAttachments(messagesToConvert)

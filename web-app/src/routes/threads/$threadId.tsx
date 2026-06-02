@@ -60,6 +60,29 @@ const CHAT_STATUS = {
   SUBMITTED: 'submitted',
 } as const
 
+// [ctx-debug] Temporary diagnostics for the agentic-loop context-loss issue.
+// Summarizes how many tool parts each message carries and how many already
+// have an output, so we can see whether tool results survive each loop
+// iteration and the persistence step. Remove once the bug is confirmed/fixed.
+function summarizeToolParts(messages: UIMessage[]) {
+  let toolParts = 0
+  let withOutput = 0
+  let pending = 0
+  for (const message of messages) {
+    for (const part of (message.parts ?? []) as Array<{
+      type: string
+      state?: string
+      output?: unknown
+    }>) {
+      if (!part.type.startsWith('tool-')) continue
+      toolParts++
+      if (part.state === 'output-available' || part.output != null) withOutput++
+      else pending++
+    }
+  }
+  return { messages: messages.length, toolParts, withOutput, pending }
+}
+
 type ThreadModel = {
   id: string
   provider: string
@@ -116,9 +139,19 @@ function ThreadDetail() {
         !toolCallAbortController.current ||
         toolCallAbortController.current?.signal.aborted
       ) {
+        console.log('[ctx-debug] followUpMessage: skipped (no/aborted abort controller)', {
+          hasController: !!toolCallAbortController.current,
+          aborted: toolCallAbortController.current?.signal.aborted,
+          ...summarizeToolParts(messages),
+        })
         return false
       }
-      return lastAssistantMessageIsCompleteWithToolCalls({ messages })
+      const shouldFollowUp = lastAssistantMessageIsCompleteWithToolCalls({ messages })
+      console.log('[ctx-debug] followUpMessage: evaluating', {
+        shouldFollowUp,
+        ...summarizeToolParts(messages),
+      })
+      return shouldFollowUp
     },
     []
   )
@@ -223,6 +256,22 @@ function ThreadDetail() {
       if (!isAbort && message.role === 'assistant') {
         const contentParts = extractContentPartsFromUIMessage(message)
 
+        // [ctx-debug] What is actually being persisted for this assistant turn?
+        // If toolCallsWithOutput is 0 while toolCalls > 0, tool results are being
+        // saved WITHOUT their outputs (the suspected context-loss bug).
+        const persistedToolCalls = contentParts.filter(
+          (c) => (c as { type?: string }).type === 'tool_call'
+        )
+        console.log('[ctx-debug] onFinish persist assistant message', {
+          messageId: message.id,
+          finishReason,
+          contentParts: contentParts.length,
+          toolCalls: persistedToolCalls.length,
+          toolCallsWithOutput: persistedToolCalls.filter(
+            (c) => (c as { output?: unknown }).output != null
+          ).length,
+        })
+
         if (contentParts.length > 0) {
           const messageMetadata = (message.metadata || {}) as Record<
             string,
@@ -265,6 +314,10 @@ function ThreadDetail() {
       const mcpToolNames = useAppState.getState().mcpToolNames
 
       // Process tool calls sequentially, requesting approval for each if needed
+      console.log('[ctx-debug] tool-exec: starting', {
+        pendingTools: sessionData.tools.length,
+        toolNames: sessionData.tools.map((t) => t.toolName),
+      })
       ;(async () => {
         for (const toolCall of sessionData.tools) {
           // Check if already aborted before starting
@@ -327,6 +380,11 @@ function ThreadDetail() {
                 toolCallId: toolCall.toolCallId,
                 output: result.content,
               })
+              console.log('[ctx-debug] tool-exec: addToolOutput (success)', {
+                toolName: toolCall.toolName,
+                toolCallId: toolCall.toolCallId,
+                hasOutput: result.content != null,
+              })
             }
           } catch (error) {
             // Ignore abort errors
@@ -343,6 +401,7 @@ function ThreadDetail() {
         }
 
         // Clear tools after processing all
+        console.log('[ctx-debug] tool-exec: finished, clearing abort controller')
         sessionData.tools = []
         toolCallAbortController.current = null
       })().catch((error) => {
@@ -470,6 +529,13 @@ function ThreadDetail() {
 
           // Convert and set messages for AI SDK chat
           const uiMessages = convertThreadMessagesToUIMessages(messagesToSet)
+          // [ctx-debug] On (re)load from backend: do restored tool calls still
+          // carry their outputs? If pending > 0 here, tool results were never
+          // persisted and the loop context is broken after a refresh.
+          console.log('[ctx-debug] reload from backend', {
+            backendMessages: messagesToSet.length,
+            ...summarizeToolParts(uiMessages),
+          })
           setChatMessages(uiMessages)
           currentThread.current = threadId
         }
