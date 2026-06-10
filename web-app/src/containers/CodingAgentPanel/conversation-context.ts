@@ -38,7 +38,27 @@ function isStatusLine(content: string): boolean {
   return STATUS_PREFIXES.some((prefix) => trimmed.startsWith(prefix))
 }
 
-function summarizeLogLine(type: string, content: string): string | null {
+const FILE_EDIT_TOOLS = new Set(['edit_file', 'write_file', 'create_file'])
+
+function summarizeToolStart(toolName: string, content: string): string | null {
+  if (!FILE_EDIT_TOOLS.has(toolName)) return null
+  try {
+    const input = JSON.parse(content) as Record<string, unknown>
+    const path = input['path'] ?? input['file_path'] ?? input['filename']
+    if (typeof path === 'string' && path) {
+      return `Edited: ${path}`
+    }
+  } catch {
+    // ignore malformed JSON
+  }
+  return null
+}
+
+function summarizeLogLine(type: string, content: string, toolName?: string): string | null {
+  if (type === 'tool_start') {
+    return toolName ? summarizeToolStart(toolName, content) : null
+  }
+
   const normalized = normalizeText(content)
   if (!normalized) return null
 
@@ -49,14 +69,21 @@ function summarizeLogLine(type: string, content: string): string | null {
   if (isStatusLine(normalized)) return null
   if (type === 'done') return null
   if (type === 'error') return `Error: ${normalized}`
+  if (type === 'tool_result') return null
 
   return `Assistant: ${normalized}`
 }
 
 function summarizeSession(session: CodingSession): string {
   const logText = session.execLog
-    .filter((line) => line.type === 'text_delta' || line.type === 'thinking' || line.type === 'done' || line.type === 'error')
-    .map((line) => summarizeLogLine(line.type, line.content))
+    .filter((line) =>
+      line.type === 'text_delta' ||
+      line.type === 'thinking' ||
+      line.type === 'done' ||
+      line.type === 'error' ||
+      line.type === 'tool_start'
+    )
+    .map((line) => summarizeLogLine(line.type, line.content, line.toolName))
     .filter((content): content is string => Boolean(content))
     .join('\n')
 

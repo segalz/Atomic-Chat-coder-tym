@@ -473,6 +473,7 @@ export function CodingAgentPanel() {
   const [loopEnabled, setLoopEnabled] = useState(false)
   const [loopCount, setLoopCount] = useState(0)
   const [loopPrompt, setLoopPrompt] = useState('')
+  const [loopId, setLoopId] = useState<string | null>(null)
   const [loopCountdown, setLoopCountdown] = useState<number | null>(null)
   const loopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const loopTickRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -767,13 +768,23 @@ export function CodingAgentPanel() {
 
   const sendPrompt = useCallback(async (
     prompt: string,
-    options: { source?: CodingSessionSource; includeConversationContext?: boolean; includeSummaryContext?: boolean } = {}
+    options: {
+      source?: CodingSessionSource
+      includeConversationContext?: boolean
+      includeSummaryContext?: boolean
+      currentRun?: number
+      maxRuns?: number
+      loopId?: string | null
+    } = {}
   ): Promise<boolean> => {
     if (!projectDir || !prompt.trim()) return false
 
     const source = options.source ?? 'manual'
     const includeConversationContext = options.includeConversationContext ?? source === 'manual'
     const includeSummaryContext = options.includeSummaryContext ?? includeConversationContext
+    const currentRun = options.currentRun ?? 1
+    const maxRuns = options.maxRuns ?? 1
+    const activeLoopId = options.loopId ?? null
     const editPermission: EditPermission = 'allowed'
     const storeState = useCodingAgentStore.getState()
     const activeSession = storeState.sessions.find((session) => session.id === storeState.activeSessionId)
@@ -828,14 +839,33 @@ export function CodingAgentPanel() {
     appendLog({ type: 'text_delta', content: 'Starting agent…', timestamp: Date.now() })
 
     try {
+      let finalPrompt = promptForAgent
+      if (source === 'loop' && currentRun > 1 && activeLoopId) {
+        try {
+          const resumePrompt = await invoke<string | null>('get_loop_resume_prompt', {
+            loopId: activeLoopId,
+            runNumber: currentRun - 1,
+          })
+          if (resumePrompt) {
+            finalPrompt = `${resumePrompt}\n\n${promptForAgent}`
+          }
+        } catch (err) {
+          console.warn('[Loop] Failed to load resume prompt:', err)
+        }
+      }
+
       if (agentBackend === 'direct-ollama') {
         await invoke('start_ollama_agent', {
           projectDir,
-          prompt: promptForAgent,
+          prompt: finalPrompt,
           model,
           ollamaBaseUrl: agentConfig?.ollama_url ?? 'http://localhost:11434',
           editPermission,
           lspEnabled,
+          source,
+          currentRun,
+          maxRuns,
+          loopId: activeLoopId,
         })
       } else {
         await invoke('spawn_code_agent', {
@@ -876,22 +906,35 @@ export function CodingAgentPanel() {
     const prompt = draftPrompt
     setDraftPrompt('')
     if (loopEnabled) {
+      const newLoopId = crypto.randomUUID()
+      setLoopId(newLoopId)
       setLoopCount(1)
       setLoopPrompt(prompt)
-    }
-    const success = await sendPrompt(prompt, {
-      source: loopEnabled ? 'loop' : 'manual',
-      includeConversationContext: !loopEnabled,
-      includeSummaryContext: !loopEnabled,
-    })
-    if (!success) {
-      setDraftPrompt(prompt)
-      if (loopEnabled) {
+      const success = await sendPrompt(prompt, {
+        source: 'loop',
+        includeConversationContext: false,
+        includeSummaryContext: false,
+        currentRun: 1,
+        maxRuns: loopTimes,
+        loopId: newLoopId,
+      })
+      if (!success) {
+        setDraftPrompt(prompt)
+        setLoopId(null)
         setLoopCount(0)
         setLoopPrompt('')
       }
+    } else {
+      const success = await sendPrompt(prompt, {
+        source: 'manual',
+        includeConversationContext: true,
+        includeSummaryContext: true,
+      })
+      if (!success) {
+        setDraftPrompt(prompt)
+      }
     }
-  }, [projectDir, draftPrompt, loopEnabled, setDraftPrompt, sendPrompt, setLoopCount, setLoopPrompt])
+  }, [projectDir, draftPrompt, loopEnabled, loopTimes, setDraftPrompt, sendPrompt, setLoopCount, setLoopPrompt, setLoopId])
 
   const handleSummarizeConversation = useCallback(async () => {
     const storeState = useCodingAgentStore.getState()
@@ -924,6 +967,7 @@ export function CodingAgentPanel() {
       setLoopEnabled(false)
       setLoopCount(0)
       setLoopPrompt('')
+      setLoopId(null)
       return
     }
 
@@ -937,11 +981,15 @@ export function CodingAgentPanel() {
     loopTimerRef.current = setTimeout(async () => {
       clearInterval(loopTickRef.current!)
       setLoopCountdown(null)
-      setLoopCount((c) => c + 1)
+      const nextRun = loopCount + 1
+      setLoopCount(nextRun)
       await sendPromptRef.current(loopPrompt, {
         source: 'loop',
         includeConversationContext: false,
         includeSummaryContext: false,
+        currentRun: nextRun,
+        maxRuns: loopTimes,
+        loopId,
       })
     }, seconds * 1000)
 
@@ -955,6 +1003,7 @@ export function CodingAgentPanel() {
     try { await stopSelectedBackend() } catch { /* ignore */ }
     setRunning(false)
     setLoopEnabled(false)
+    setLoopId(null)
     setLoopCountdown(null)
     clearTimeout(loopTimerRef.current!)
     clearInterval(loopTickRef.current!)
@@ -1012,8 +1061,20 @@ export function CodingAgentPanel() {
     if (!session.prompt.trim() && !session.planText.trim() && session.execLog.length === 0) return null
     return session
   }, [activeSessionId, projectDir, sessions])
+  const activeLoopSession = useMemo(() => {
+    const session = sessions.find((item) => item.id === activeSessionId)
+    if (!session || session.projectDir !== projectDir || session.source !== 'loop') return null
+    return session
+  }, [activeSessionId, projectDir, sessions])
   const contextCharacterCount = useMemo(() => {
-    if (loopEnabled) return draftPrompt.length
+    if (loopEnabled) {
+      const loopSessionChars = activeLoopSession
+        ? activeLoopSession.planText.length +
+          activeLoopSession.execLog.reduce((total, line) => total + line.content.length, 0)
+        : 0
+
+      return loopPrompt.length + loopSessionChars
+    }
 
     const sessionChars = activeManualSession
       ? activeManualSession.prompt.length +
@@ -1022,7 +1083,7 @@ export function CodingAgentPanel() {
       : 0
 
     return draftPrompt.length + sessionChars
-  }, [activeManualSession, draftPrompt, loopEnabled])
+  }, [activeLoopSession, activeManualSession, draftPrompt, loopEnabled, loopPrompt])
 
   return (
     <div className="flex h-full overflow-hidden">
@@ -1209,7 +1270,7 @@ export function CodingAgentPanel() {
           <div className="mb-2 flex items-center gap-2">
             <ContextBudgetIndicator
               characterCount={contextCharacterCount}
-              contextEnabled={!loopEnabled}
+              contextEnabled={true}
             />
             <div className="ml-auto flex items-center gap-2">
               {conversationSummary && !loopEnabled && (

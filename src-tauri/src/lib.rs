@@ -120,13 +120,30 @@ pub fn run() {
         core::code_agent::restart_ollama,
         core::planner_config::get_planner_config,
         core::planner_config::get_coding_agent_config,
+        core::planner_config::get_point_failure_advisor_config,
         // Ollama Agent (S1)
         core::ollama_agent::start_ollama_agent,
         core::ollama_agent::stop_ollama_agent,
+        core::ollama_agent::stop_loop,
         core::ollama_agent::approve_agent_edit_intent,
         core::ollama_agent::reject_agent_edit_intent,
         core::ollama_agent::approve_agent_diff,
         core::ollama_agent::reject_agent_diff,
+        // Loop supervision read-only commands
+        core::loop_supervision::loop_status,
+        core::loop_supervision::read_loop_progress,
+        core::loop_supervision::get_loop_diff,
+        core::loop_supervision::get_last_loop_errors,
+        core::loop_supervision::run_loop_audit,
+        core::loop_supervision::request_supervisor_review,
+        core::loop_supervision::pause_loop,
+        core::loop_supervision::resume_loop,
+        core::loop_supervision::approve_next_stage,
+        core::loop_supervision::set_loop_limits,
+        core::loop_supervision::get_loop_resume_prompt,
+        core::loop_launcher::get_loop_launch_request_path,
+        core::loop_launcher::queue_loop_launch_request,
+        core::loop_launcher::consume_loop_launch_request,
         // Vision Simulator Capture (S4)
         core::sim_capture::sim_capture,
         // Test Verification & Regression Loop (S5)
@@ -144,6 +161,8 @@ pub fn run() {
         core::mcp::commands::get_tools,
         core::mcp::commands::call_tool,
         core::mcp::commands::cancel_tool_call,
+        core::mcp::commands::get_loop_supervision_mcp_tools,
+        core::mcp::commands::call_loop_supervision_mcp_tool,
         core::mcp::commands::restart_mcp_servers,
         core::mcp::commands::get_connected_servers,
         core::mcp::commands::save_mcp_configs,
@@ -269,6 +288,7 @@ pub fn run() {
     let app_builder = app_builder
         .manage(core::code_agent::CodeAgentState::default())
         .manage(core::ollama_agent::OllamaAgentState::default())
+        .manage(core::loop_supervision::LoopSupervisionState::default())
         .manage(core::test_runner::TestRunnerState::default())
         .manage(core::lsp::commands::LspToolsState::new(true));
 

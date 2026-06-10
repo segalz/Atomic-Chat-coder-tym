@@ -4,6 +4,10 @@ use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+use super::loop_supervision_server::{
+    call_loop_supervision_tool, list_loop_supervision_tools, LOOP_SUPERVISION_SERVER_NAME,
+};
 use super::{
     constants::DEFAULT_MCP_CONFIG,
     helpers::{restart_active_mcp_servers, start_mcp_server},
@@ -11,10 +15,17 @@ use super::{
 use crate::core::{
     app::commands::get_jan_data_folder_path, mcp::models::McpSettings, state::AppState,
 };
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+use crate::core::{
+    loop_supervision::LoopSupervisionState,
+    ollama_agent::{cancel_active_ollama_agent, OllamaAgentState},
+};
 use crate::core::{
     mcp::models::ToolWithServer,
     state::{RunningServiceEnum, SharedMcpServers},
 };
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+use std::future::Future;
 use std::{fs, time::Duration};
 
 async fn tool_call_timeout(state: &State<'_, AppState>) -> Duration {
@@ -305,6 +316,114 @@ pub async fn call_tool(
     }
 
     Err(format!("Tool {tool_name} not found"))
+}
+
+#[tauri::command]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub async fn get_loop_supervision_mcp_tools() -> Result<Vec<ToolWithServer>, String> {
+    Ok(list_loop_supervision_tools()
+        .into_iter()
+        .map(|tool| ToolWithServer {
+            name: tool.name.to_string(),
+            description: tool
+                .description
+                .as_ref()
+                .map(|description| description.to_string()),
+            input_schema: serde_json::Value::Object((*tool.input_schema).clone()),
+            server: LOOP_SUPERVISION_SERVER_NAME.to_string(),
+        })
+        .collect())
+}
+
+#[tauri::command]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub async fn call_loop_supervision_mcp_tool(
+    state: State<'_, AppState>,
+    ollama_agent_state: State<'_, OllamaAgentState>,
+    loop_supervision: State<'_, LoopSupervisionState>,
+    tool_name: String,
+    arguments: Option<Map<String, Value>>,
+    cancellation_token: Option<String>,
+) -> Result<CallToolResult, String> {
+    let timeout_duration = tool_call_timeout(&state).await;
+    let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+
+    if let Some(token) = &cancellation_token {
+        let mut cancellations = state.tool_call_cancellations.lock().await;
+        cancellations.insert(token.clone(), cancel_tx);
+    }
+
+    let tool_call = call_loop_supervision_tool_with_agent_state(
+        loop_supervision.inner(),
+        ollama_agent_state.inner(),
+        &tool_name,
+        arguments,
+    );
+
+    let result = run_loop_supervision_tool_with_timeout(
+        tool_name.clone(),
+        timeout_duration,
+        tool_call,
+        cancellation_token.is_some().then_some(cancel_rx),
+    )
+    .await;
+
+    if let Some(token) = &cancellation_token {
+        let mut cancellations = state.tool_call_cancellations.lock().await;
+        cancellations.remove(token);
+    }
+
+    result
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+async fn call_loop_supervision_tool_with_agent_state(
+    loop_supervision: &LoopSupervisionState,
+    ollama_agent_state: &OllamaAgentState,
+    tool_name: &str,
+    arguments: Option<Map<String, Value>>,
+) -> Result<CallToolResult, String> {
+    let result = call_loop_supervision_tool(loop_supervision, tool_name, arguments).await;
+    if tool_name == "stop_loop" && result.is_ok() {
+        let _ = cancel_active_ollama_agent(ollama_agent_state).await;
+    }
+    result
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+async fn run_loop_supervision_tool_with_timeout<F>(
+    tool_name: String,
+    timeout_duration: Duration,
+    tool_call: F,
+    cancel_rx: Option<oneshot::Receiver<()>>,
+) -> Result<CallToolResult, String>
+where
+    F: Future<Output = Result<CallToolResult, String>>,
+{
+    if let Some(cancel_rx) = cancel_rx {
+        tokio::select! {
+            result = timeout(timeout_duration, tool_call) => {
+                match result {
+                    Ok(call_result) => call_result,
+                    Err(_) => Err(format!(
+                        "Loop supervision tool call '{tool_name}' timed out after {} seconds",
+                        timeout_duration.as_secs()
+                    )),
+                }
+            }
+            _ = cancel_rx => {
+                Err(format!("Loop supervision tool call '{tool_name}' was cancelled"))
+            }
+        }
+    } else {
+        match timeout(timeout_duration, tool_call).await {
+            Ok(call_result) => call_result,
+            Err(_) => Err(format!(
+                "Loop supervision tool call '{tool_name}' timed out after {} seconds",
+                timeout_duration.as_secs()
+            )),
+        }
+    }
 }
 
 /// Cancels a running tool call by its cancellation token
@@ -604,4 +723,77 @@ pub async fn save_mcp_configs<R: Runtime>(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+mod loop_supervision_mcp_command_tests {
+    use super::*;
+    use std::future;
+    use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn loop_supervision_tool_timeout_is_reported() {
+        let result = run_loop_supervision_tool_with_timeout(
+            "loop_status".to_string(),
+            Duration::from_millis(1),
+            future::pending::<Result<CallToolResult, String>>(),
+            None,
+        )
+        .await;
+
+        assert!(result.unwrap_err().contains("timed out"));
+    }
+
+    #[tokio::test]
+    async fn loop_supervision_tool_cancellation_is_reported() {
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        let _ = cancel_tx.send(());
+
+        let result = run_loop_supervision_tool_with_timeout(
+            "loop_status".to_string(),
+            Duration::from_secs(1),
+            future::pending::<Result<CallToolResult, String>>(),
+            Some(cancel_rx),
+        )
+        .await;
+
+        assert!(result.unwrap_err().contains("cancelled"));
+    }
+
+    #[tokio::test]
+    async fn loop_supervision_tool_success_wins_without_cancellation() {
+        let result = run_loop_supervision_tool_with_timeout(
+            "loop_status".to_string(),
+            Duration::from_secs(1),
+            async { Ok(CallToolResult::structured(json!({ "ok": true }))) },
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.structured_content.unwrap()["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn stop_loop_tool_cancels_active_ollama_agent() {
+        let loop_supervision = LoopSupervisionState::default();
+        let ollama_agent_state = OllamaAgentState::default();
+        let cancel = CancellationToken::new();
+        {
+            let mut guard = ollama_agent_state.cancel.lock().await;
+            *guard = Some(cancel.clone());
+        }
+
+        call_loop_supervision_tool_with_agent_state(
+            &loop_supervision,
+            &ollama_agent_state,
+            "stop_loop",
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(cancel.is_cancelled());
+    }
 }

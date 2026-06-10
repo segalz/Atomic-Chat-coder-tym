@@ -206,15 +206,25 @@ pub fn tool_schemas(lsp_enabled: bool) -> Value {
             "type": "function",
             "function": {
                 "name": "grep",
-                "description": "Search for a regex pattern in files under a directory.",
+                "description": "Fast project search using ripgrep when available. Always provide a narrow pattern and path; prefer file_glob and max_results for large projects.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "pattern": { "type": "string" },
-                        "path": { "type": "string" },
+                        "pattern": {
+                            "type": "string",
+                            "description": "Regex or exact symbol/text to search for. Avoid broad patterns like .* or empty strings."
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Directory or file to search. Prefer the smallest relevant directory instead of the project root."
+                        },
                         "file_glob": {
                             "type": "string",
                             "description": "Optional glob filter, e.g. '*.tsx'"
+                        },
+                        "max_results": {
+                            "type": "integer",
+                            "description": "Optional maximum result lines, default 80, max 200."
                         }
                     },
                     "required": ["pattern", "path"]

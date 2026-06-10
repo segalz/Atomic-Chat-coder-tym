@@ -8,6 +8,16 @@ pub mod extensions;
 pub mod filesystem;
 pub mod http;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub mod loop_checkpoint;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub mod loop_checkpoint_ai;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub mod loop_event_log;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub mod loop_launcher;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub mod loop_supervision;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub mod lsp;
 pub mod mcp;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
