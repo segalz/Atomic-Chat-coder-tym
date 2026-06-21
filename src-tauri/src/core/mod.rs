@@ -16,6 +16,8 @@ pub mod loop_event_log;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub mod loop_launcher;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub mod loop_store;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub mod loop_supervision;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub mod lsp;

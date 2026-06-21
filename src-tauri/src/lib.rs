@@ -136,6 +136,7 @@ pub fn run() {
         core::loop_supervision::get_last_loop_errors,
         core::loop_supervision::run_loop_audit,
         core::loop_supervision::request_supervisor_review,
+        core::loop_supervision::loop_durable_status,
         core::loop_supervision::pause_loop,
         core::loop_supervision::resume_loop,
         core::loop_supervision::approve_next_stage,
@@ -285,10 +286,15 @@ pub fn run() {
     ]);
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let loop_supervision_base_dir =
+        core::app::commands::resolve_jan_data_folder().join("loop-supervision");
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     let app_builder = app_builder
         .manage(core::code_agent::CodeAgentState::default())
         .manage(core::ollama_agent::OllamaAgentState::default())
-        .manage(core::loop_supervision::LoopSupervisionState::default())
+        .manage(core::loop_supervision::LoopSupervisionState::with_base_dir(
+            loop_supervision_base_dir,
+        ))
         .manage(core::test_runner::TestRunnerState::default())
         .manage(core::lsp::commands::LspToolsState::new(true));
 

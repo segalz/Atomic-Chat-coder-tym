@@ -12,6 +12,7 @@ const READ_LOOP_PROGRESS: &str = "read_loop_progress";
 const GET_LOOP_DIFF: &str = "get_loop_diff";
 const GET_LAST_LOOP_ERRORS: &str = "get_last_loop_errors";
 const RUN_LOOP_AUDIT: &str = "run_loop_audit";
+const LOOP_DURABLE_STATUS: &str = "loop_durable_status";
 const REQUEST_SUPERVISOR_REVIEW: &str = "request_supervisor_review";
 const PAUSE_LOOP: &str = "pause_loop";
 const RESUME_LOOP: &str = "resume_loop";
@@ -57,6 +58,14 @@ pub fn list_loop_supervision_tools() -> Vec<Tool> {
             RUN_LOOP_AUDIT,
             "Run deterministic local Loop Mode audit checks.",
             empty_schema(),
+        ),
+        read_only_tool(
+            LOOP_DURABLE_STATUS,
+            "Return SQLite-backed durable Loop Mode status.",
+            object_schema(
+                vec![("loop_id", json!({ "type": "string", "minLength": 1 }))],
+                vec![],
+            ),
         ),
         control_tool(
             REQUEST_SUPERVISOR_REVIEW,
@@ -142,6 +151,13 @@ pub async fn call_loop_supervision_tool(
             json_result(state.errors_response(optional_usize(&args, "limit")?).await)?
         }
         RUN_LOOP_AUDIT => json_result(state.audit_response().await)?,
+        LOOP_DURABLE_STATUS => {
+            let loop_id = args
+                .get("loop_id")
+                .and_then(|value| value.as_str())
+                .map(|value| value.to_string());
+            json_result(state.durable_status_response(loop_id).await?)?
+        }
         REQUEST_SUPERVISOR_REVIEW => json_result(
             state
                 .supervisor_review_response(optional_usize(&args, "byte_cap")?)
@@ -187,6 +203,7 @@ pub fn loop_supervision_tool_names() -> Vec<&'static str> {
         GET_LOOP_DIFF,
         GET_LAST_LOOP_ERRORS,
         RUN_LOOP_AUDIT,
+        LOOP_DURABLE_STATUS,
         REQUEST_SUPERVISOR_REVIEW,
         PAUSE_LOOP,
         RESUME_LOOP,
@@ -373,7 +390,15 @@ mod tests {
     #[tokio::test]
     async fn dispatch_supervisor_review_returns_recommendation() {
         let state = LoopSupervisionState::default();
-        state.begin_run("/tmp/project".to_string(), "test goal".to_string(), 1, 2, None).await;
+        state
+            .begin_run(
+                "/tmp/project".to_string(),
+                "test goal".to_string(),
+                1,
+                2,
+                None,
+            )
+            .await;
 
         let result = call_loop_supervision_tool(&state, REQUEST_SUPERVISOR_REVIEW, None)
             .await

@@ -1,7 +1,13 @@
-use crate::core::loop_checkpoint::{build_and_write_checkpoint, build_resume_prompt, LoopCheckpoint};
+use crate::core::loop_checkpoint::{
+    build_and_write_checkpoint, build_resume_prompt, LoopCheckpoint,
+};
 use crate::core::loop_event_log::LoopEventLog;
+use crate::core::loop_store::{
+    LoopDurableStatus, LoopEventRecord, LoopSessionRecord, LoopStoreState, LoopToolCallRecord,
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -270,6 +276,8 @@ pub struct LoopSupervisionState {
     snapshot: Arc<Mutex<LoopSupervisionSnapshot>>,
     /// Optional directory under which `loops/{loop_id}/run_{n}.jsonl` files are written.
     base_dir: Option<PathBuf>,
+    /// Optional SQLite-backed store for durable loop lifecycle state.
+    store: Option<LoopStoreState>,
     /// Active event log for the current run, guarded separately so the snapshot stays Clone.
     event_log: Arc<Mutex<Option<LoopEventLog>>>,
 }
@@ -279,6 +287,7 @@ impl Default for LoopSupervisionState {
         Self {
             snapshot: Arc::new(Mutex::new(LoopSupervisionSnapshot::default())),
             base_dir: None,
+            store: None,
             event_log: Arc::new(Mutex::new(None)),
         }
     }
@@ -287,14 +296,75 @@ impl Default for LoopSupervisionState {
 impl LoopSupervisionState {
     /// Create a state that will write event logs under `base_dir`.
     pub fn with_base_dir(base_dir: PathBuf) -> Self {
+        let store = LoopStoreState::new(base_dir.clone());
         Self {
             base_dir: Some(base_dir),
+            store: Some(store),
             ..Self::default()
         }
     }
 
     pub fn base_dir(&self) -> Option<&Path> {
         self.base_dir.as_deref()
+    }
+
+    pub fn store(&self) -> Option<&LoopStoreState> {
+        self.store.as_ref()
+    }
+
+    async fn persist_session(&self, prompt: Option<String>, last_error: Option<String>) {
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        let snapshot = self.snapshot().await;
+        let Some(record) = session_record_from_snapshot(&snapshot, prompt, last_error) else {
+            return;
+        };
+        if let Err(err) = store.upsert_session(record).await {
+            log::warn!("[LoopSupervision] durable session write failed: {err}");
+        }
+    }
+
+    async fn persist_event(
+        &self,
+        event_type: impl Into<String>,
+        payload: Value,
+        idempotency_key: Option<String>,
+    ) {
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        let snapshot = self.snapshot().await;
+        let Some(loop_id) = snapshot.run_id.clone() else {
+            return;
+        };
+
+        if let Some(record) = session_record_from_snapshot(&snapshot, None, None) {
+            if let Err(err) = store.upsert_session(record).await {
+                log::warn!("[LoopSupervision] durable session refresh failed: {err}");
+            }
+        }
+
+        let event_type = event_type.into();
+        let record = LoopEventRecord {
+            loop_id,
+            run_number: snapshot.current_run,
+            event_type,
+            payload,
+            idempotency_key,
+        };
+        if let Err(err) = store.append_event(record).await {
+            log::warn!("[LoopSupervision] durable event write failed: {err}");
+        }
+    }
+
+    async fn persist_tool_call(&self, record: LoopToolCallRecord) {
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        if let Err(err) = store.upsert_tool_call(record).await {
+            log::warn!("[LoopSupervision] durable tool call write failed: {err}");
+        }
     }
 }
 
@@ -311,6 +381,7 @@ impl LoopSupervisionState {
     ) {
         let now = Utc::now();
         let run_id = loop_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let goal_for_store = goal.clone();
         let mut snapshot = self.snapshot.lock().await;
         *snapshot = LoopSupervisionSnapshot {
             run_id: Some(run_id.clone()),
@@ -348,6 +419,20 @@ impl LoopSupervisionState {
         if let Some(log) = event_log.as_mut() {
             log.log_run_started(&project_dir, &goal, max_runs);
         }
+
+        self.persist_session(Some(goal_for_store.clone()), None)
+            .await;
+        self.persist_event(
+            "run_started",
+            serde_json::json!({
+                "project_dir": project_dir,
+                "goal": goal_for_store,
+                "current_run": current_run,
+                "max_runs": max_runs
+            }),
+            Some(format!("{run_id}:{current_run}:run_started")),
+        )
+        .await;
     }
 
     pub async fn record_step(&self, step: impl Into<String>) {
@@ -359,6 +444,13 @@ impl LoopSupervisionState {
             snapshot.updated_at = Some(now);
             push_progress_event(&mut snapshot, step, None, now);
         }
+        drop(snapshot);
+        self.persist_event(
+            "progress_step",
+            serde_json::json!({ "step": self.snapshot().await.last_step }),
+            None,
+        )
+        .await;
     }
 
     pub async fn record_tool_start(
@@ -392,6 +484,8 @@ impl LoopSupervisionState {
         snapshot.updated_at = Some(now);
         let tool_name = trace.name.clone();
         let call_id_str = trace.call_id.clone();
+        let arguments_summary_str = trace.arguments_summary.clone();
+        let call_signature_str = trace.call_signature.clone();
         snapshot.tool_traces.push(trace);
         trim_front(&mut snapshot.tool_traces, MAX_TOOL_TRACES);
         push_progress_event(&mut snapshot, step, Some(message), now);
@@ -399,6 +493,35 @@ impl LoopSupervisionState {
 
         if let Some(log) = self.event_log.lock().await.as_mut() {
             log.log_tool_call_started(&tool_name, &call_id_str);
+        }
+        let snapshot = self.snapshot().await;
+        if let Some(loop_id) = snapshot.run_id.clone() {
+            self.persist_tool_call(LoopToolCallRecord {
+                call_id: call_id_str.clone(),
+                loop_id: loop_id.clone(),
+                run_number: snapshot.current_run,
+                tool_name: tool_name.clone(),
+                status: "started".to_string(),
+                args_summary: Some(arguments_summary_str.clone()),
+                result_signature: None,
+                elapsed_ms: None,
+                is_error: false,
+            })
+            .await;
+            self.persist_event(
+                "tool_call_started",
+                serde_json::json!({
+                    "tool_name": tool_name,
+                    "call_id": call_id_str,
+                    "arguments_summary": arguments_summary_str,
+                    "call_signature": call_signature_str
+                }),
+                Some(format!(
+                    "{loop_id}:{}:{call_id_str}:tool_started",
+                    snapshot.current_run
+                )),
+            )
+            .await;
         }
     }
 
@@ -454,6 +577,38 @@ impl LoopSupervisionState {
                 &result_signature,
             );
         }
+        let snapshot = self.snapshot().await;
+        if let Some(loop_id) = snapshot.run_id.clone() {
+            self.persist_tool_call(LoopToolCallRecord {
+                call_id: call_id_owned.clone(),
+                loop_id: loop_id.clone(),
+                run_number: snapshot.current_run,
+                tool_name: tool_name.clone(),
+                status: "completed".to_string(),
+                args_summary: None,
+                result_signature: Some(result_signature.clone()),
+                elapsed_ms: Some(elapsed_ms),
+                is_error,
+            })
+            .await;
+            self.persist_event(
+                "tool_call_completed",
+                serde_json::json!({
+                    "tool_name": tool_name,
+                    "call_id": call_id_owned,
+                    "duration_ms": elapsed_ms,
+                    "cache_hit": cache_hit,
+                    "is_error": is_error,
+                    "result_signature": result_signature,
+                    "result_bytes": result_bytes
+                }),
+                Some(format!(
+                    "{loop_id}:{}:{call_id}:tool_completed",
+                    snapshot.current_run
+                )),
+            )
+            .await;
+        }
     }
 
     pub async fn record_error(&self, error: impl Into<String>) {
@@ -474,6 +629,12 @@ impl LoopSupervisionState {
         if let Some(log) = self.event_log.lock().await.as_mut() {
             log.log_error(&error);
         }
+        self.persist_event(
+            "error_recorded",
+            serde_json::json!({ "message": error }),
+            None,
+        )
+        .await;
     }
 
     pub async fn record_changed_path(&self, path: impl Into<String>) {
@@ -498,6 +659,12 @@ impl LoopSupervisionState {
         if let Some(log) = self.event_log.lock().await.as_mut() {
             log.log_file_changed(&path, 0);
         }
+        self.persist_event(
+            "file_changed",
+            serde_json::json!({ "path": path, "bytes_changed": 0 }),
+            None,
+        )
+        .await;
     }
 
     pub async fn record_diff(
@@ -508,6 +675,7 @@ impl LoopSupervisionState {
         replace: Option<String>,
     ) {
         let path = path.into();
+        let operation = operation.into();
         let mut snapshot = self.snapshot.lock().await;
         if snapshot.status == LoopSupervisionStatus::Idle {
             return;
@@ -521,8 +689,8 @@ impl LoopSupervisionState {
         }
 
         snapshot.diff_entries.push(build_diff_entry(
-            path,
-            operation.into(),
+            path.clone(),
+            operation.clone(),
             search.as_deref(),
             replace.as_deref(),
         ));
@@ -531,6 +699,18 @@ impl LoopSupervisionState {
         let now = Utc::now();
         snapshot.updated_at = Some(now);
         push_progress_event(&mut snapshot, "file_change".to_string(), None, now);
+        drop(snapshot);
+        self.persist_event(
+            "diff_recorded",
+            serde_json::json!({
+                "path": path,
+                "operation": operation,
+                "search_bytes": search.as_ref().map_or(0, |value| value.len()),
+                "replace_bytes": replace.as_ref().map_or(0, |value| value.len())
+            }),
+            None,
+        )
+        .await;
     }
 
     pub async fn record_build_test_failure(
@@ -540,6 +720,9 @@ impl LoopSupervisionState {
         exit_code: Option<i32>,
         output: impl AsRef<str>,
     ) {
+        let command = command.into();
+        let cwd = cwd.into();
+        let output_preview = preview_text(output.as_ref());
         let mut snapshot = self.snapshot.lock().await;
         if snapshot.status == LoopSupervisionStatus::Idle {
             return;
@@ -549,10 +732,10 @@ impl LoopSupervisionState {
         snapshot.risk_flags.push("build_test_failed".to_string());
         dedupe_strings(&mut snapshot.risk_flags);
         snapshot.build_test_failures.push(LoopBuildTestFailure {
-            command: command.into(),
-            cwd: cwd.into(),
+            command: command.clone(),
+            cwd: cwd.clone(),
             exit_code,
-            output_preview: preview_text(output.as_ref()),
+            output_preview: output_preview.clone(),
             timestamp: now,
         });
         trim_front(&mut snapshot.build_test_failures, MAX_LAST_ERRORS);
@@ -564,6 +747,22 @@ impl LoopSupervisionState {
             Some(format!("exit_code={:?}", exit_code)),
             now,
         );
+        drop(snapshot);
+        if let Some(log) = self.event_log.lock().await.as_mut() {
+            log.log_verification_completed(&command, false);
+        }
+        self.persist_event(
+            "verification_completed",
+            serde_json::json!({
+                "command": command,
+                "cwd": cwd,
+                "success": false,
+                "exit_code": exit_code,
+                "output_preview": output_preview
+            }),
+            None,
+        )
+        .await;
     }
 
     pub async fn record_path_rejection(&self, path: impl Into<String>, reason: impl Into<String>) {
@@ -582,6 +781,13 @@ impl LoopSupervisionState {
         let now = Utc::now();
         snapshot.updated_at = Some(now);
         push_progress_event(&mut snapshot, "path_rejected".to_string(), Some(error), now);
+        drop(snapshot);
+        self.persist_event(
+            "path_rejected",
+            serde_json::json!({ "path": path, "reason": reason }),
+            None,
+        )
+        .await;
     }
 
     pub async fn finish_run(&self, success: bool, stopped: bool, error: Option<String>) {
@@ -612,6 +818,28 @@ impl LoopSupervisionState {
         push_progress_event(&mut snapshot, "done".to_string(), None, now);
         drop(snapshot);
 
+        self.persist_session(None, fail_reason.clone()).await;
+        let event_type = match &final_status {
+            LoopSupervisionStatus::Complete => "run_completed",
+            LoopSupervisionStatus::Failed => "run_failed",
+            LoopSupervisionStatus::Stopped => "loop_stopped",
+            LoopSupervisionStatus::Paused => "suspended",
+            _ => "run_finished",
+        };
+        self.persist_event(
+            event_type,
+            serde_json::json!({
+                "status": status_label(&final_status),
+                "success": success,
+                "stopped": stopped,
+                "error": fail_reason.clone()
+            }),
+            run_id
+                .as_ref()
+                .map(|loop_id| format!("{loop_id}:{current_run}:{event_type}")),
+        )
+        .await;
+
         if let Some(log) = self.event_log.lock().await.as_mut() {
             let status_str = match &final_status {
                 LoopSupervisionStatus::Complete => "complete",
@@ -636,14 +864,56 @@ impl LoopSupervisionState {
         // Build and write a deterministic checkpoint from the event log (fire-and-forget).
         if let (Some(loop_id), Some(base_dir)) = (run_id, self.base_dir.as_deref()) {
             let base_dir = base_dir.to_path_buf();
-            if let Err(err) = build_and_write_checkpoint(&loop_id, current_run, &base_dir) {
-                log::warn!("[LoopSupervision] checkpoint write failed for {loop_id} run {current_run}: {err}");
+            match build_and_write_checkpoint(&loop_id, current_run, &base_dir) {
+                Ok(path) => {
+                    self.persist_event(
+                        "checkpoint_written",
+                        serde_json::json!({
+                            "path": path.display().to_string(),
+                            "run_number": current_run
+                        }),
+                        Some(format!("{loop_id}:{current_run}:checkpoint_written")),
+                    )
+                    .await;
+                    if let Some(store) = self.store.as_ref() {
+                        match std::fs::read_to_string(&path) {
+                            Ok(checkpoint_json) => {
+                                let resume_prompt = serde_json::from_str::<LoopCheckpoint>(
+                                    &checkpoint_json,
+                                )
+                                .map(|checkpoint| build_resume_prompt(&checkpoint))
+                                .unwrap_or_default();
+                                if let Err(err) = store
+                                    .store_checkpoint(
+                                        &loop_id,
+                                        current_run,
+                                        checkpoint_json,
+                                        resume_prompt,
+                                        None,
+                                    )
+                                    .await
+                                {
+                                    log::warn!(
+                                        "[LoopSupervision] durable checkpoint write failed: {err}"
+                                    );
+                                }
+                            }
+                            Err(err) => log::warn!(
+                                "[LoopSupervision] checkpoint readback failed for {loop_id} run {current_run}: {err}"
+                            ),
+                        }
+                    }
+                }
+                Err(err) => {
+                    log::warn!("[LoopSupervision] checkpoint write failed for {loop_id} run {current_run}: {err}");
+                }
             }
         }
     }
 
     pub async fn request_pause(&self, mode: LoopPauseMode) -> LoopControlResponse {
         let mut snapshot = self.snapshot.lock().await;
+        let mode_for_event = mode.clone();
         if snapshot.status != LoopSupervisionStatus::Idle
             && snapshot.status != LoopSupervisionStatus::Stopped
             && snapshot.status != LoopSupervisionStatus::Complete
@@ -664,7 +934,15 @@ impl LoopSupervisionState {
                 .unwrap_or_else(|| "pause_requested".to_string());
             push_progress_event(&mut snapshot, step, None, now);
         }
-        build_control_response(&snapshot)
+        let response = build_control_response(&snapshot);
+        drop(snapshot);
+        self.persist_event(
+            "pause_requested",
+            serde_json::json!({ "mode": mode_label(&mode_for_event) }),
+            None,
+        )
+        .await;
+        response
     }
 
     pub async fn resume(&self) -> LoopControlResponse {
@@ -681,7 +959,11 @@ impl LoopSupervisionState {
             snapshot.updated_at = Some(now);
             push_progress_event(&mut snapshot, "resumed".to_string(), None, now);
         }
-        build_control_response(&snapshot)
+        let response = build_control_response(&snapshot);
+        drop(snapshot);
+        self.persist_event("resume_requested", serde_json::json!({}), None)
+            .await;
+        response
     }
 
     pub async fn mark_stop_requested(&self) {
@@ -699,6 +981,9 @@ impl LoopSupervisionState {
         let now = Utc::now();
         snapshot.updated_at = Some(now);
         push_progress_event(&mut snapshot, "stop_requested".to_string(), None, now);
+        drop(snapshot);
+        self.persist_event("stop_requested", serde_json::json!({}), None)
+            .await;
     }
 
     pub async fn request_stop(&self) -> LoopControlResponse {
@@ -712,7 +997,11 @@ impl LoopSupervisionState {
             snapshot.updated_at = Some(now);
             push_progress_event(&mut snapshot, "stop_requested".to_string(), None, now);
         }
-        build_control_response(&snapshot)
+        let response = build_control_response(&snapshot);
+        drop(snapshot);
+        self.persist_event("loop_stopped", serde_json::json!({}), None)
+            .await;
+        response
     }
 
     pub async fn approve_next_stage(&self) -> LoopControlResponse {
@@ -724,7 +1013,11 @@ impl LoopSupervisionState {
         let now = Utc::now();
         snapshot.updated_at = Some(now);
         push_progress_event(&mut snapshot, "next_stage_approved".to_string(), None, now);
-        build_control_response(&snapshot)
+        let response = build_control_response(&snapshot);
+        drop(snapshot);
+        self.persist_event("next_stage_approved", serde_json::json!({}), None)
+            .await;
+        response
     }
 
     pub async fn set_limits(
@@ -752,7 +1045,21 @@ impl LoopSupervisionState {
         let now = Utc::now();
         snapshot.updated_at = Some(now);
         push_progress_event(&mut snapshot, "limits_updated".to_string(), None, now);
-        build_control_response(&snapshot)
+        let response = build_control_response(&snapshot);
+        let limits = snapshot.limits.clone();
+        drop(snapshot);
+        self.persist_event(
+            "limits_updated",
+            serde_json::json!({
+                "max_iterations": limits.max_iterations,
+                "max_diff_bytes": limits.max_diff_bytes,
+                "max_changed_paths": limits.max_changed_paths,
+                "audit_interval_runs": limits.audit_interval_runs
+            }),
+            None,
+        )
+        .await;
+        response
     }
 
     /// Record the agent's current context-window usage (0–100 %) to the event log.
@@ -761,6 +1068,12 @@ impl LoopSupervisionState {
         if let Some(log) = self.event_log.lock().await.as_mut() {
             log.log_context_percent(percent);
         }
+        self.persist_event(
+            "context_percent_updated",
+            serde_json::json!({ "percent": percent }),
+            None,
+        )
+        .await;
     }
 
     /// Transition to `Checkpointing` state (context budget exceeded, writing checkpoint).
@@ -772,6 +1085,9 @@ impl LoopSupervisionState {
             snapshot.updated_at = Some(now);
             push_progress_event(&mut snapshot, "checkpointing".to_string(), None, now);
         }
+        drop(snapshot);
+        self.persist_event("checkpointing", serde_json::json!({}), None)
+            .await;
     }
 
     /// Transition back to `Running` after a checkpoint resume (same run, no count advance).
@@ -783,6 +1099,13 @@ impl LoopSupervisionState {
             snapshot.updated_at = Some(now);
             push_progress_event(&mut snapshot, "resuming_same_run".to_string(), None, now);
         }
+        drop(snapshot);
+        self.persist_event(
+            "resume_started",
+            serde_json::json!({ "same_run": true }),
+            None,
+        )
+        .await;
     }
 
     /// Transition from `ResumingSameRun` back to `Running` once the fresh run begins.
@@ -794,6 +1117,13 @@ impl LoopSupervisionState {
             snapshot.updated_at = Some(now);
             push_progress_event(&mut snapshot, "resumed".to_string(), None, now);
         }
+        drop(snapshot);
+        self.persist_event(
+            "resume_completed",
+            serde_json::json!({ "same_run": true }),
+            None,
+        )
+        .await;
     }
 
     /// Write a checkpoint for the current run and return its path.
@@ -806,7 +1136,45 @@ impl LoopSupervisionState {
         drop(snapshot);
 
         match build_and_write_checkpoint(&run_id, current_run, &base_dir) {
-            Ok(path) => Some(path),
+            Ok(path) => {
+                self.persist_event(
+                    "checkpoint_written",
+                    serde_json::json!({
+                        "path": path.display().to_string(),
+                        "run_number": current_run
+                    }),
+                    Some(format!("{run_id}:{current_run}:checkpoint_written")),
+                )
+                .await;
+                if let Some(store) = self.store.as_ref() {
+                    match std::fs::read_to_string(&path) {
+                        Ok(checkpoint_json) => {
+                            let resume_prompt =
+                                serde_json::from_str::<LoopCheckpoint>(&checkpoint_json)
+                                    .map(|checkpoint| build_resume_prompt(&checkpoint))
+                                    .unwrap_or_default();
+                            if let Err(err) = store
+                                .store_checkpoint(
+                                    &run_id,
+                                    current_run,
+                                    checkpoint_json,
+                                    resume_prompt,
+                                    None,
+                                )
+                                .await
+                            {
+                                log::warn!(
+                                    "[LoopSupervision] durable checkpoint write failed: {err}"
+                                );
+                            }
+                        }
+                        Err(err) => log::warn!(
+                            "[LoopSupervision] checkpoint readback failed during context reset: {err}"
+                        ),
+                    }
+                }
+                Some(path)
+            }
             Err(e) => {
                 log::warn!("[LoopSupervision] checkpoint write failed during context reset: {e}");
                 None
@@ -868,6 +1236,16 @@ impl LoopSupervisionState {
 
         evidence
     }
+
+    pub async fn durable_status_response(
+        &self,
+        loop_id: Option<String>,
+    ) -> Result<LoopDurableStatus, String> {
+        let Some(store) = self.store.as_ref() else {
+            return Ok(LoopDurableStatus::disabled());
+        };
+        store.durable_status(loop_id).await
+    }
 }
 
 /// Read the checkpoint written at the end of `run_number - 1` and return a
@@ -894,8 +1272,8 @@ pub async fn get_loop_resume_prompt(
 
     let json = std::fs::read_to_string(&checkpoint_path)
         .map_err(|e| format!("Failed to read checkpoint: {e}"))?;
-    let checkpoint: LoopCheckpoint = serde_json::from_str(&json)
-        .map_err(|e| format!("Failed to parse checkpoint: {e}"))?;
+    let checkpoint: LoopCheckpoint =
+        serde_json::from_str(&json).map_err(|e| format!("Failed to parse checkpoint: {e}"))?;
 
     Ok(Some(build_resume_prompt(&checkpoint)))
 }
@@ -945,6 +1323,14 @@ pub async fn request_supervisor_review(
     byte_cap: Option<usize>,
 ) -> Result<LoopSupervisorEvidence, String> {
     Ok(state.supervisor_review_response(byte_cap).await)
+}
+
+#[tauri::command]
+pub async fn loop_durable_status(
+    state: State<'_, LoopSupervisionState>,
+    loop_id: Option<String>,
+) -> Result<LoopDurableStatus, String> {
+    state.durable_status_response(loop_id).await
 }
 
 #[tauri::command]
@@ -1002,6 +1388,47 @@ fn build_status_response(snapshot: &LoopSupervisionSnapshot) -> LoopStatusRespon
         pause_requested: snapshot.pause_requested,
         stop_requested: snapshot.stop_requested,
         next_action: next_action(snapshot).to_string(),
+    }
+}
+
+fn session_record_from_snapshot(
+    snapshot: &LoopSupervisionSnapshot,
+    prompt: Option<String>,
+    last_error: Option<String>,
+) -> Option<LoopSessionRecord> {
+    Some(LoopSessionRecord {
+        id: snapshot.run_id.clone()?,
+        project_dir: snapshot.project_dir.clone(),
+        prompt,
+        status: status_label(&snapshot.status).to_string(),
+        current_run: snapshot.current_run,
+        max_runs: snapshot.max_runs,
+        interval_seconds: None,
+        backend: None,
+        model: None,
+        last_step: snapshot.last_step.clone(),
+        last_error,
+    })
+}
+
+fn status_label(status: &LoopSupervisionStatus) -> &'static str {
+    match status {
+        LoopSupervisionStatus::Idle => "idle",
+        LoopSupervisionStatus::Running => "running",
+        LoopSupervisionStatus::Checkpointing => "checkpointing",
+        LoopSupervisionStatus::ResumingSameRun => "resuming_same_run",
+        LoopSupervisionStatus::Paused => "paused",
+        LoopSupervisionStatus::WaitingApproval => "waiting_approval",
+        LoopSupervisionStatus::Failed => "failed",
+        LoopSupervisionStatus::Complete => "complete",
+        LoopSupervisionStatus::Stopped => "stopped",
+    }
+}
+
+fn mode_label(mode: &LoopPauseMode) -> &'static str {
+    match mode {
+        LoopPauseMode::AfterCurrentRun => "after_current_run",
+        LoopPauseMode::Immediate => "immediate",
     }
 }
 
@@ -1614,7 +2041,15 @@ mod tests {
     #[tokio::test]
     async fn status_response_serializes_snake_case_status() {
         let state = LoopSupervisionState::default();
-        state.begin_run("/tmp/project".to_string(), "test goal".to_string(), 2, 4, None).await;
+        state
+            .begin_run(
+                "/tmp/project".to_string(),
+                "test goal".to_string(),
+                2,
+                4,
+                None,
+            )
+            .await;
 
         let value = serde_json::to_value(state.status_response().await).unwrap();
 
@@ -1628,7 +2063,15 @@ mod tests {
     #[tokio::test]
     async fn progress_response_caps_tail_without_mutating_state() {
         let state = LoopSupervisionState::default();
-        state.begin_run("/tmp/project".to_string(), "test goal".to_string(), 1, 1, None).await;
+        state
+            .begin_run(
+                "/tmp/project".to_string(),
+                "test goal".to_string(),
+                1,
+                1,
+                None,
+            )
+            .await;
         for index in 0..60 {
             state.record_step(format!("step_{index}")).await;
         }
@@ -1647,7 +2090,15 @@ mod tests {
     #[tokio::test]
     async fn diff_response_applies_path_and_byte_caps() {
         let state = LoopSupervisionState::default();
-        state.begin_run("/tmp/project".to_string(), "test goal".to_string(), 1, 1, None).await;
+        state
+            .begin_run(
+                "/tmp/project".to_string(),
+                "test goal".to_string(),
+                1,
+                1,
+                None,
+            )
+            .await;
         state
             .record_diff(
                 "/tmp/project/a.ts",
@@ -1677,7 +2128,15 @@ mod tests {
     #[tokio::test]
     async fn errors_response_returns_recent_tail() {
         let state = LoopSupervisionState::default();
-        state.begin_run("/tmp/project".to_string(), "test goal".to_string(), 1, 1, None).await;
+        state
+            .begin_run(
+                "/tmp/project".to_string(),
+                "test goal".to_string(),
+                1,
+                1,
+                None,
+            )
+            .await;
         for index in 0..12 {
             state.record_error(format!("error_{index}")).await;
         }
@@ -1692,7 +2151,15 @@ mod tests {
     #[tokio::test]
     async fn audit_response_is_read_only_and_flags_failed_state() {
         let state = LoopSupervisionState::default();
-        state.begin_run("/tmp/project".to_string(), "test goal".to_string(), 1, 1, None).await;
+        state
+            .begin_run(
+                "/tmp/project".to_string(),
+                "test goal".to_string(),
+                1,
+                1,
+                None,
+            )
+            .await;
         state
             .finish_run(false, false, Some("build failed".to_string()))
             .await;
@@ -1710,7 +2177,15 @@ mod tests {
     #[tokio::test]
     async fn pause_after_current_run_marks_request_without_stopping_active_run() {
         let state = LoopSupervisionState::default();
-        state.begin_run("/tmp/project".to_string(), "test goal".to_string(), 1, 3, None).await;
+        state
+            .begin_run(
+                "/tmp/project".to_string(),
+                "test goal".to_string(),
+                1,
+                3,
+                None,
+            )
+            .await;
 
         let response = state.request_pause(LoopPauseMode::AfterCurrentRun).await;
 
@@ -1727,7 +2202,15 @@ mod tests {
     #[tokio::test]
     async fn immediate_pause_and_resume_only_change_loop_state() {
         let state = LoopSupervisionState::default();
-        state.begin_run("/tmp/project".to_string(), "test goal".to_string(), 1, 3, None).await;
+        state
+            .begin_run(
+                "/tmp/project".to_string(),
+                "test goal".to_string(),
+                1,
+                3,
+                None,
+            )
+            .await;
 
         let paused = state.request_pause(LoopPauseMode::Immediate).await;
         assert_eq!(paused.status, LoopSupervisionStatus::Paused);
@@ -1742,7 +2225,15 @@ mod tests {
     #[tokio::test]
     async fn stop_request_sets_terminal_control_state() {
         let state = LoopSupervisionState::default();
-        state.begin_run("/tmp/project".to_string(), "test goal".to_string(), 1, 3, None).await;
+        state
+            .begin_run(
+                "/tmp/project".to_string(),
+                "test goal".to_string(),
+                1,
+                3,
+                None,
+            )
+            .await;
         state.request_pause(LoopPauseMode::AfterCurrentRun).await;
 
         let response = state.request_stop().await;
@@ -1756,7 +2247,15 @@ mod tests {
     #[tokio::test]
     async fn set_limits_updates_limits_without_prompt_state() {
         let state = LoopSupervisionState::default();
-        state.begin_run("/tmp/project".to_string(), "test goal".to_string(), 1, 3, None).await;
+        state
+            .begin_run(
+                "/tmp/project".to_string(),
+                "test goal".to_string(),
+                1,
+                3,
+                None,
+            )
+            .await;
 
         let response = state
             .set_limits(Some(12), Some(2048), Some(7), Some(3))
@@ -1775,7 +2274,15 @@ mod tests {
     #[tokio::test]
     async fn audit_flags_repeated_error_signature() {
         let state = LoopSupervisionState::default();
-        state.begin_run("/tmp/project".to_string(), "test goal".to_string(), 1, 1, None).await;
+        state
+            .begin_run(
+                "/tmp/project".to_string(),
+                "test goal".to_string(),
+                1,
+                1,
+                None,
+            )
+            .await;
         state
             .record_error("edit_file: search text not found in src/a.ts")
             .await;
@@ -1797,7 +2304,15 @@ mod tests {
     #[tokio::test]
     async fn audit_flags_diff_thresholds() {
         let state = LoopSupervisionState::default();
-        state.begin_run("/tmp/project".to_string(), "test goal".to_string(), 1, 1, None).await;
+        state
+            .begin_run(
+                "/tmp/project".to_string(),
+                "test goal".to_string(),
+                1,
+                1,
+                None,
+            )
+            .await;
 
         for index in 0..30 {
             state
@@ -1821,7 +2336,15 @@ mod tests {
     #[tokio::test]
     async fn audit_flags_route_and_legacy_navigation_changes() {
         let state = LoopSupervisionState::default();
-        state.begin_run("/tmp/project".to_string(), "test goal".to_string(), 1, 1, None).await;
+        state
+            .begin_run(
+                "/tmp/project".to_string(),
+                "test goal".to_string(),
+                1,
+                1,
+                None,
+            )
+            .await;
         state
             .record_diff(
                 "/tmp/project/web-app/src/routes/index.tsx",
@@ -1844,7 +2367,15 @@ mod tests {
     #[tokio::test]
     async fn audit_flags_failed_build_or_test() {
         let state = LoopSupervisionState::default();
-        state.begin_run("/tmp/project".to_string(), "test goal".to_string(), 1, 1, None).await;
+        state
+            .begin_run(
+                "/tmp/project".to_string(),
+                "test goal".to_string(),
+                1,
+                1,
+                None,
+            )
+            .await;
         state
             .record_build_test_failure(
                 "cargo check --lib",
@@ -1865,7 +2396,15 @@ mod tests {
     #[tokio::test]
     async fn audit_flags_missing_changed_path() {
         let state = LoopSupervisionState::default();
-        state.begin_run("/tmp/project".to_string(), "test goal".to_string(), 1, 1, None).await;
+        state
+            .begin_run(
+                "/tmp/project".to_string(),
+                "test goal".to_string(),
+                1,
+                1,
+                None,
+            )
+            .await;
         state
             .record_diff(
                 "/tmp/project/definitely-missing-file.ts",
@@ -1893,7 +2432,15 @@ mod tests {
     #[tokio::test]
     async fn supervisor_review_pauses_on_build_failure_with_compact_evidence() {
         let state = LoopSupervisionState::default();
-        state.begin_run("/tmp/project".to_string(), "test goal".to_string(), 1, 3, None).await;
+        state
+            .begin_run(
+                "/tmp/project".to_string(),
+                "test goal".to_string(),
+                1,
+                3,
+                None,
+            )
+            .await;
         state
             .record_build_test_failure(
                 "cargo check --lib",
@@ -1918,7 +2465,15 @@ mod tests {
     #[tokio::test]
     async fn supervisor_review_recommends_more_evidence_for_interval_audit() {
         let state = LoopSupervisionState::default();
-        state.begin_run("/tmp/project".to_string(), "test goal".to_string(), 4, 8, None).await;
+        state
+            .begin_run(
+                "/tmp/project".to_string(),
+                "test goal".to_string(),
+                4,
+                8,
+                None,
+            )
+            .await;
         state.set_limits(None, None, None, Some(2)).await;
 
         let response = state.supervisor_review_response(None).await;
@@ -1935,7 +2490,15 @@ mod tests {
     #[tokio::test]
     async fn supervisor_review_continue_when_no_trigger_is_present() {
         let state = LoopSupervisionState::default();
-        state.begin_run("/tmp/project".to_string(), "test goal".to_string(), 1, 3, None).await;
+        state
+            .begin_run(
+                "/tmp/project".to_string(),
+                "test goal".to_string(),
+                1,
+                3,
+                None,
+            )
+            .await;
 
         let response = state.supervisor_review_response(None).await;
 
