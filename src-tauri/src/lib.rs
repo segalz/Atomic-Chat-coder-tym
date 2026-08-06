@@ -117,6 +117,7 @@ pub fn run() {
         core::code_agent::pull_ollama_model,
         core::code_agent::check_ollama,
         core::code_agent::list_ollama_models,
+        core::code_agent::list_ollama_model_capabilities,
         core::code_agent::restart_ollama,
         core::planner_config::get_planner_config,
         core::planner_config::get_coding_agent_config,

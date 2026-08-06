@@ -4,6 +4,7 @@ import {
   IconLoader2,
   IconRefresh,
 } from '@tabler/icons-react'
+import { isCodeAgentToolCompatible, type ModelCapabilitiesByName } from './code-model-compat'
 
 import './CodeModelSelector.css'
 
@@ -24,29 +25,6 @@ const RECOMMENDED_CODE_MODELS: RecommendedCodeModel[] = [
 ]
 
 const recommendedById = new Map(RECOMMENDED_CODE_MODELS.map((model) => [model.id, model]))
-
-const CODE_AGENT_INCOMPATIBLE_MODEL_PREFIXES = [
-  'deepseek-r1',
-  'deepseek-coder-v2',
-  'qwen-vl',
-  'qwen2-vl',
-  'qwen2.5-vl',
-  'qwen2.5vl',
-  'llama3.2-vision',
-  'granite3.2-vision',
-  'llava',
-  'bakllava',
-  'moondream',
-  'minicpm-v',
-  'minicpm-o',
-]
-
-function isCodeAgentToolCompatible(model: string): boolean {
-  const normalized = model.trim().toLowerCase().replace(/:latest$/, '')
-  const family = normalized.split('/').pop() ?? normalized
-  if (family.includes('-mlx')) return false
-  return !CODE_AGENT_INCOMPATIBLE_MODEL_PREFIXES.some((prefix) => family.startsWith(prefix))
-}
 
 function normalizeModels(models: string[]): string[] {
   return Array.from(new Set(models.map((model) => model.trim()).filter(Boolean)))
@@ -74,6 +52,7 @@ function formatModelOption(modelId: string): string {
 interface CodeModelSelectorProps {
   value: string
   installedModels: string[]
+  modelCapabilities?: ModelCapabilitiesByName
   disabled?: boolean
   isPulling?: boolean
   pullProgress?: string
@@ -85,6 +64,7 @@ interface CodeModelSelectorProps {
 export function CodeModelSelector({
   value,
   installedModels,
+  modelCapabilities,
   disabled = false,
   isPulling = false,
   pullProgress,
@@ -93,13 +73,13 @@ export function CodeModelSelector({
   onRefresh,
 }: CodeModelSelectorProps) {
   const installed = normalizeModels(installedModels)
-  const compatibleInstalled = installed.filter(isCodeAgentToolCompatible)
-  const incompatibleInstalled = installed.filter((model) => !isCodeAgentToolCompatible(model))
+  const compatibleInstalled = installed.filter((model) => isCodeAgentToolCompatible(model, modelCapabilities))
+  const incompatibleInstalled = installed.filter((model) => !isCodeAgentToolCompatible(model, modelCapabilities))
   const hasValueInOptions =
     !value ||
     installed.includes(value)
   const selectedInstalled = isOllamaModelInstalled(value, installed)
-  const selectedCompatible = isCodeAgentToolCompatible(value)
+  const selectedCompatible = isCodeAgentToolCompatible(value, modelCapabilities)
   const selectedMetadata = recommendedById.get(value)
   const canPull = Boolean(value) && selectedCompatible && !selectedInstalled && !isPulling && !disabled
 

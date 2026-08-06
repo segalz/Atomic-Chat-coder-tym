@@ -1,6 +1,6 @@
 #[cfg(unix)]
 use libc;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     env,
@@ -48,6 +48,17 @@ pub struct CodeAgentDoneEvent {
 #[derive(Clone, Serialize)]
 pub struct CodeAgentErrorEvent {
     pub message: String,
+}
+
+#[derive(Clone, Serialize)]
+pub struct OllamaModelCapabilities {
+    pub name: String,
+    pub capabilities: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct OllamaShowResponse {
+    capabilities: Option<Vec<String>>,
 }
 
 #[derive(Clone, Serialize)]
@@ -941,6 +952,46 @@ pub async fn list_ollama_models() -> Result<Vec<String>, String> {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         Err(format!("ollama list failed: {}", stderr))
     }
+}
+
+/// List all available Ollama models with their server-reported capabilities.
+#[tauri::command]
+pub async fn list_ollama_model_capabilities() -> Result<Vec<OllamaModelCapabilities>, String> {
+    let models = list_ollama_models().await?;
+    let client = reqwest::Client::new();
+    let mut result = Vec::with_capacity(models.len());
+
+    for model in models {
+        let response = client
+            .post("http://localhost:11434/api/show")
+            .json(&serde_json::json!({ "model": model }))
+            .send()
+            .await
+            .map_err(|e| format!("Failed to query Ollama model capabilities: {}", e))?;
+
+        if !response.status().is_success() {
+            log::warn!(
+                "[CodeAgent] Failed to query capabilities for {}: HTTP {}",
+                model,
+                response.status()
+            );
+            continue;
+        }
+
+        let show = response
+            .json::<OllamaShowResponse>()
+            .await
+            .map_err(|e| format!("Failed to parse Ollama model capabilities: {}", e))?;
+
+        if let Some(capabilities) = show.capabilities {
+            result.push(OllamaModelCapabilities {
+                name: model,
+                capabilities,
+            });
+        }
+    }
+
+    Ok(result)
 }
 
 /// Restart Ollama to free GPU/RAM: stop the server then start it again.

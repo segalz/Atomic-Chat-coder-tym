@@ -64,6 +64,12 @@ import { ContextBudgetIndicator } from './ContextBudgetIndicator'
 import { buildConversationSummary } from './conversation-summary'
 import { buildCodingAgentPrompt } from './conversation-context'
 import type { EditPermission } from './edit-permission'
+import {
+  buildModelCapabilitiesByName,
+  isCodeAgentToolCompatible,
+  type ModelCapabilitiesByName,
+  type OllamaModelCapabilities,
+} from './code-model-compat'
 
 // ── S6 types ─────────────────────────────────────────────────
 interface CodingAgentConfig {
@@ -86,29 +92,6 @@ const CODE_AGENT_FALLBACK_MODELS = [
   CODE_AGENT_DEFAULT_MODEL,
   'qwen3-coder-next',
 ]
-
-const CODE_AGENT_INCOMPATIBLE_MODEL_PREFIXES = [
-  'deepseek-r1',
-  'deepseek-coder-v2',
-  'qwen-vl',
-  'qwen2-vl',
-  'qwen2.5-vl',
-  'qwen2.5vl',
-  'llama3.2-vision',
-  'granite3.2-vision',
-  'llava',
-  'bakllava',
-  'moondream',
-  'minicpm-v',
-  'minicpm-o',
-]
-
-function isCodeAgentToolCompatible(model: string): boolean {
-  const normalized = model.trim().toLowerCase().replace(/:latest$/, '')
-  const family = normalized.split('/').pop() ?? normalized
-  if (family.includes('-mlx')) return false
-  return !CODE_AGENT_INCOMPATIBLE_MODEL_PREFIXES.some((prefix) => family.startsWith(prefix))
-}
 
 function getStoredCodeModel(): string | null {
   if (typeof window === 'undefined') return null
@@ -151,12 +134,13 @@ function findInstalledModel(model: string | null | undefined, installedModels: s
 function resolveInstalledCodeModel(
   preferredModel: string | null | undefined,
   configuredModel: string | null | undefined,
-  installedModels: string[]
+  installedModels: string[],
+  modelCapabilities?: ModelCapabilitiesByName
 ): string | null {
   const compatibleInstalled = installedModels
     .map((model) => model.trim())
     .filter(Boolean)
-    .filter(isCodeAgentToolCompatible)
+    .filter((model) => isCodeAgentToolCompatible(model, modelCapabilities))
 
   const candidates = [
     preferredModel,
@@ -166,7 +150,7 @@ function resolveInstalledCodeModel(
   ]
 
   for (const candidate of candidates) {
-    if (!candidate || !isCodeAgentToolCompatible(candidate)) continue
+    if (!candidate || !isCodeAgentToolCompatible(candidate, modelCapabilities)) continue
     const installed = findInstalledModel(candidate, compatibleInstalled)
     if (installed) return installed
   }
@@ -241,11 +225,15 @@ function HardwareSetup({
   const [config, setConfig] = useState<CodingAgentConfig | null>(null)
   const [sysInfo, setSysInfo] = useState<SystemInfo | null>(null)
   const [installedModels, setInstalledModels] = useState<string[]>([])
+  const [modelCapabilities, setModelCapabilities] = useState<ModelCapabilitiesByName>({})
   const [pulling, setPulling] = useState<Record<string, boolean>>({})
   const [pullProgress, setPullProgress] = useState<Record<string, string>>({})
 
   const refreshInstalledModels = useCallback(() => {
     invoke<string[]>('list_ollama_models').then(setInstalledModels).catch(() => {})
+    invoke<OllamaModelCapabilities[]>('list_ollama_model_capabilities')
+      .then((models) => setModelCapabilities(buildModelCapabilitiesByName(models)))
+      .catch(() => setModelCapabilities({}))
   }, [])
 
   useEffect(() => {
@@ -257,11 +245,11 @@ function HardwareSetup({
   useEffect(() => {
     if (!config || installedModels.length === 0) return
 
-    const installedCodeModel = resolveInstalledCodeModel(selectedCodeModel, config.code_model, installedModels)
+    const installedCodeModel = resolveInstalledCodeModel(selectedCodeModel, config.code_model, installedModels, modelCapabilities)
     if (installedCodeModel && installedCodeModel !== selectedCodeModel) {
       onCodeModelChange(installedCodeModel)
     }
-  }, [config, installedModels, onCodeModelChange, selectedCodeModel])
+  }, [config, installedModels, modelCapabilities, onCodeModelChange, selectedCodeModel])
 
   const effectiveVramMib = sysInfo
     ? sysInfo.gpus.length > 0
@@ -335,6 +323,7 @@ function HardwareSetup({
                 <CodeModelSelector
                   value={name}
                   installedModels={installedModels}
+                  modelCapabilities={modelCapabilities}
                   disabled={disabled}
                   isPulling={pulling[name]}
                   pullProgress={progress}
@@ -479,6 +468,7 @@ export function CodingAgentPanel() {
   const loopTickRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [agentConfig, setAgentConfig] = useState<CodingAgentConfig | null>(null)
   const [selectedCodeModel, setSelectedCodeModel] = useState(() => getStoredCodeModel() ?? '')
+  const [modelCapabilities, setModelCapabilities] = useState<ModelCapabilitiesByName>({})
   const [agentBackend] = useState<CodingAgentBackend>(() => getInitialCodingAgentBackend())
 
   useEffect(() => {
@@ -493,12 +483,18 @@ export function CodingAgentPanel() {
       .catch(() => {})
   }, [])
 
+  useEffect(() => {
+    invoke<OllamaModelCapabilities[]>('list_ollama_model_capabilities')
+      .then((models) => setModelCapabilities(buildModelCapabilitiesByName(models)))
+      .catch(() => setModelCapabilities({}))
+  }, [])
+
   const handleCodeModelChange = useCallback((model: string) => {
-    if (!isCodeAgentToolCompatible(model)) return
+    if (!isCodeAgentToolCompatible(model, modelCapabilities)) return
 
     setSelectedCodeModel(model)
     persistSelectedCodeModel(model)
-  }, [])
+  }, [modelCapabilities])
 
   // ── Pre-flight Ollama check ───────────────────────────────
   const checkOllama = useCallback(async () => {
@@ -790,10 +786,19 @@ export function CodingAgentPanel() {
     const activeSession = storeState.sessions.find((session) => session.id === storeState.activeSessionId)
     const shouldStartNewSession = !activeSession || activeSession.projectDir !== projectDir || activeSession.source !== source
     const candidateModel = selectedCodeModel || agentConfig?.code_model || CODE_AGENT_DEFAULT_MODEL
-    let model = isCodeAgentToolCompatible(candidateModel) ? candidateModel : CODE_AGENT_DEFAULT_MODEL
+    let model = isCodeAgentToolCompatible(candidateModel, modelCapabilities) ? candidateModel : CODE_AGENT_DEFAULT_MODEL
     try {
       const installedModels = await invoke<string[]>('list_ollama_models')
-      const installedCodeModel = resolveInstalledCodeModel(model, agentConfig?.code_model, installedModels)
+      let capabilities = modelCapabilities
+      try {
+        const modelCapabilityList = await invoke<OllamaModelCapabilities[]>('list_ollama_model_capabilities')
+        capabilities = buildModelCapabilitiesByName(modelCapabilityList)
+        setModelCapabilities(capabilities)
+      } catch (capabilityErr) {
+        console.warn('Failed to refresh Ollama model capabilities before Code Agent run:', capabilityErr)
+      }
+
+      const installedCodeModel = resolveInstalledCodeModel(model, agentConfig?.code_model, installedModels, capabilities)
       if (!installedCodeModel) {
         appendLog({
           type: 'error',
