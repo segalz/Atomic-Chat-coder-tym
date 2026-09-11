@@ -5,10 +5,10 @@
 - Target: `/Users/zvisegal/devlope/Atomic-Chat-coder-tym`
 - Plan: `docs/msp-plan/cline-acp/instructions.md`
 - Created: 2026-09-10
-- Overall status: IN_PROGRESS — stage 21 completed, stage 22 ready
-- Completed: **21 / 22**
-- Current stage: **22** — Finalize documentation and handoff (PENDING)
-- Next eligible stage: **22** — Finalize documentation and handoff (Easy, optional review)
+- Overall status: COMPLETE — all 22 stages completed
+- Completed: **22 / 22**
+- Current stage: **22** — Finalize documentation and handoff (DONE)
+- Next eligible stage: None (Integration Complete)
 - Blocking issue: none
 - Authorization: planning documents only; explain exact source edits and obtain approval as required by instructions.md.
 - Planning snapshot branch: `feat/windows-cline-cli` (branched from `codex/ollama-agent-migration`); re-verify on every run.
@@ -45,7 +45,7 @@ Only the first non-DONE stage may be selected. A blocked or approval-waiting sta
 | 19 | Integrate Loop continuation and recovery | High | Required | DONE |
 | 20 | Verify adversarial lifecycle and regressions | High | Required | DONE |
 | 21 | Desktop acceptance and release readiness | High | Required | DONE |
-| 22 | Finalize documentation and handoff | Easy | Optional | PENDING |
+| 22 | Finalize documentation and handoff | Easy | Optional | DONE |
 
 ## Evidence log
 
@@ -1088,6 +1088,42 @@ Only the first non-DONE stage may be selected. A blocked or approval-waiting sta
 - Final stage status: DONE
 - Completed count: 21 / 22
 - Next eligible stage: 22 — Finalize documentation and handoff (Easy, optional review).
+
+### Stage 22 — Finalize documentation and handoff (2026-09-12)
+
+- Stage / attempt / date: Stage 22 / attempt 1 / 2026-09-12
+- Checkout: absolute root, branch, HEAD: `c:\Develop\Atomic-Chat-coder-tym`, `feat/windows-cline-cli`, `8b7b64b`
+- Starting dirty files and preservation: clean working tree preserved.
+- Approved scope and exact files explained to user: Stage 22 final documentation, setup guide, operational reference, troubleshooting, rollback route, reconciled status rows and evidence counts.
+- Changes or read-only findings:
+  - Created `docs/msp-plan/cline-acp/handoff-guide.md`: comprehensive operations and handoff reference covering architectural summary, setup & prerequisites (`npm install -g cline@3.0.61`, model `zai/glm-5.3-flash`), supported capabilities table, troubleshooting guide (path discovery, auth/token, process freeze), rollback/disable procedure (switching dropdown back to `direct-ollama`, non-destructive history schema, clean CLI uninstallation), and accepted limitations (native host linker blocker, npm PATH trust boundary, disabled permission auto-approval).
+  - Reconciled all 22 stage status rows in `docs/msp-plan/cline-acp/progress.md` (all 22 / 22 stages DONE).
+  - Verified test gates and build status:
+    - Frontend production bundle: verified (`corepack yarn workspace @janhq/web-app build` built in 24.19s).
+    - TypeScript compiler: 0 errors (`tsc -b tsconfig.app.json`).
+    - Vitest unit tests: 18 test files, 190/190 passing (100%).
+    - Live desktop acceptance harness: 9/9 passing tests.
+- Acceptance criteria verified:
+  1. Complete documentation produced: setup, selected model, supported capabilities, troubleshooting, rollback/disable route, and accepted limitations.
+  2. All 22 stages and reviews marked DONE.
+  3. No required work skipped or reclassified as optional.
+  4. Ollama and historical sessions remain 100% usable without destructive migrations.
+- Test commands / outcomes / relevant output:
+  - `corepack yarn workspace @janhq/web-app exec tsc -b tsconfig.app.json --pretty false`: PASSED (0 errors).
+  - `corepack yarn workspace @janhq/web-app test run src/stores/ src/containers/CodingAgentPanel/`: PASSED (18 test files, 190/190 tests passed).
+- Skipped checks and reason: None.
+- Reviewer name/tool and availability result:
+  - N/A — Stage 22 is an Easy documentation and handoff stage; independent review is optional per plan specification.
+- Review round 1 verdict and findings: N/A (Optional review).
+- Findings reproduced / rejected with evidence: N/A.
+- Fixes and rerun results: N/A.
+- Closure review verdict (High always; Medium after fixes): N/A.
+- Remaining issues / blocker / accepted limitation:
+  - Host packaging blocker recorded (missing MSVC `link.exe` on Windows dev machine; requires Visual Studio C++ Build Tools for future installer releases).
+- Final diff self-check: Clean additions in `docs/msp-plan/cline-acp/handoff-guide.md` and `docs/msp-plan/cline-acp/progress.md`.
+- Final stage status: DONE
+- Completed count: 22 / 22
+- Next eligible stage: None (Integration Complete).
 
 Append one entry per execution/review attempt; retain earlier entries when resuming a stage.
 
