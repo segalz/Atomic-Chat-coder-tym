@@ -65,6 +65,7 @@ import {
   type DirectToolStartPayload,
   type NormalizedAgentEvent,
   type TextDeltaPayload,
+  resolveCodingAgentBackend,
 } from './agent-event-adapter'
 import {
   isOllamaHealthCheckRequired,
@@ -941,7 +942,21 @@ export function CodingAgentPanel() {
     const editPermission: EditPermission = 'allowed'
     const storeState = useCodingAgentStore.getState()
     const activeSession = storeState.sessions.find((session) => session.id === storeState.activeSessionId)
-    const shouldStartNewSession = !activeSession || activeSession.projectDir !== projectDir || activeSession.source !== source
+    const activeSessionBackend = activeSession ? resolveCodingAgentBackend(activeSession.backend) : null
+    const isProviderSwitch = Boolean(
+      activeSession &&
+      activeSession.projectDir === projectDir &&
+      activeSession.source === source &&
+      activeSessionBackend !== agentBackend
+    )
+    const shouldStartNewSession = !activeSession || activeSession.projectDir !== projectDir || activeSession.source !== source || isProviderSwitch
+    const seedFromSessionId = isProviderSwitch ? activeSession?.id : null
+    const isClineContinuation = Boolean(
+      !shouldStartNewSession &&
+      agentBackend === 'cline-acp' &&
+      activeSessionBackend === 'cline-acp' &&
+      activeSession?.externalSessionId
+    )
     const candidateModel = selectedCodeModel || agentConfig?.code_model || CODE_AGENT_DEFAULT_MODEL
     let model = candidateModel
     if (isOllamaHealthCheckRequired(agentBackend)) {
@@ -986,6 +1001,10 @@ export function CodingAgentPanel() {
       projectDir,
       sessions: storeState.sessions,
       activeSessionId: shouldStartNewSession ? null : storeState.activeSessionId,
+      seedFromSessionId,
+      backend: agentBackend,
+      source,
+      isContinuation: isClineContinuation,
       includeHistory: includeConversationContext,
       includeSummaryContext,
     })

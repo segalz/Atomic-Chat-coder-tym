@@ -1,4 +1,5 @@
-import type { CodingSession } from '@/stores/coding-agent-store'
+import type { CodingAgentBackend } from './backend-identity'
+import type { CodingSession, CodingSessionSource } from '@/stores/coding-agent-store'
 
 const MAX_CONTEXT_CHARS = 6000
 const MAX_PROMPT_CHARS = 400
@@ -15,11 +16,15 @@ const STATUS_PREFIXES = [
   'Diff proposed for',
 ]
 
-interface BuildCodingAgentPromptOptions {
+export interface BuildCodingAgentPromptOptions {
   prompt: string
   projectDir: string
   sessions: CodingSession[]
   activeSessionId?: string | null
+  seedFromSessionId?: string | null
+  backend?: CodingAgentBackend
+  isContinuation?: boolean
+  source?: CodingSessionSource
   includeHistory?: boolean
   includeSummaryContext?: boolean
 }
@@ -96,14 +101,15 @@ function summarizeSession(session: CodingSession): string {
 function getActiveContextSession(
   sessions: CodingSession[],
   projectDir: string,
-  activeSessionId?: string | null
+  activeSessionId?: string | null,
+  targetSource: CodingSessionSource = 'manual'
 ): CodingSession | null {
   if (!activeSessionId) return null
 
   const session = sessions.find((item) => item.id === activeSessionId)
   if (!session) return null
   if (session.projectDir !== projectDir) return null
-  if (session.source === 'loop') return null
+  if (session.source !== targetSource) return null
   if (!session.prompt.trim() && !session.planText.trim() && session.execLog.length === 0) return null
 
   return session
@@ -114,13 +120,83 @@ export function buildCodingAgentPrompt({
   projectDir,
   sessions,
   activeSessionId,
+  seedFromSessionId,
+  backend,
+  isContinuation,
+  source,
   includeHistory = true,
   includeSummaryContext = includeHistory,
 }: BuildCodingAgentPromptOptions): string {
   const currentPrompt = normalizeText(prompt)
+
+  if (backend === 'cline-acp' && isContinuation) {
+    // Cline ACP maintains its own conversation history internally; injecting
+    // additional context here would duplicate what the backend already sends.
+    return currentPrompt
+  }
+
   if (!includeHistory && !includeSummaryContext) return currentPrompt
 
-  const activeSession = getActiveContextSession(sessions, projectDir, activeSessionId)
+  if (seedFromSessionId) {
+    const seedSession = sessions.find((item) => item.id === seedFromSessionId)
+    if (
+      !seedSession ||
+      seedSession.projectDir !== projectDir ||
+      seedSession.source !== (source ?? 'manual') ||
+      (!seedSession.prompt.trim() &&
+        !seedSession.planText.trim() &&
+        seedSession.execLog.length === 0 &&
+        !seedSession.conversationSummary?.trim())
+    ) {
+      return currentPrompt
+    }
+
+    const storedSummary = normalizeText(seedSession.conversationSummary ?? '')
+    if (includeSummaryContext && storedSummary) {
+      const contextText = truncate([
+        'Coding-agent context from previous provider session follows.',
+        'Use it only as background. The current request is authoritative.',
+        '',
+        'Saved conversation summary:',
+        truncate(storedSummary, MAX_STORED_SUMMARY_CHARS),
+      ].join('\n'), MAX_CONTEXT_CHARS)
+
+      return [
+        contextText,
+        '',
+        'Current request:',
+        currentPrompt,
+      ].join('\n')
+    }
+
+    if (!includeHistory) return currentPrompt
+
+    const summary = summarizeSession(seedSession)
+    const contextBlock = [
+      'Previous session summary:',
+      `First request: ${truncate(normalizeText(seedSession.prompt), MAX_PROMPT_CHARS)}`,
+    ]
+
+    if (summary) {
+      contextBlock.push(`Relevant result:\n${summary}`)
+    }
+
+    const contextText = truncate([
+      'Coding-agent context from previous provider session follows.',
+      'Use it only as background. The current request is authoritative.',
+      '',
+      contextBlock.join('\n'),
+    ].join('\n'), MAX_CONTEXT_CHARS)
+
+    return [
+      contextText,
+      '',
+      'Current request:',
+      currentPrompt,
+    ].join('\n')
+  }
+
+  const activeSession = getActiveContextSession(sessions, projectDir, activeSessionId, source ?? 'manual')
   if (!activeSession) return currentPrompt
 
   const storedSummary = normalizeText(activeSession.conversationSummary ?? '')

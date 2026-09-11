@@ -5,10 +5,10 @@
 - Target: `/Users/zvisegal/devlope/Atomic-Chat-coder-tym`
 - Plan: `docs/msp-plan/cline-acp/instructions.md`
 - Created: 2026-09-10
-- Overall status: IN_PROGRESS — stage 11 completed, stage 12 ready
-- Completed: **11 / 22**
-- Current stage: **12** — Integrate edit and command presentation (PENDING)
-- Next eligible stage: **12** — Integrate edit and command presentation (High, independent review required)
+- Overall status: IN_PROGRESS — stage 14 completed, stage 15 ready
+- Completed: **14 / 22**
+- Current stage: **15** — Verify manual end-to-end workflow (PENDING)
+- Next eligible stage: **15** — Verify manual end-to-end workflow (Medium, independent review required)
 - Blocking issue: none
 - Authorization: planning documents only; explain exact source edits and obtain approval as required by instructions.md.
 - Planning snapshot branch: `feat/windows-cline-cli` (branched from `codex/ollama-agent-migration`); re-verify on every run.
@@ -37,7 +37,7 @@ Only the first non-DONE stage may be selected. A blocked or approval-waiting sta
 | 11 | Implement permission request lifecycle | High | Required | DONE |
 | 12 | Integrate edit and command presentation | High | Required | DONE |
 | 13 | Persist Cline conversation identity | Medium | Required | DONE |
-| 14 | Handle provider switching context | Medium | Required | PENDING |
+| 14 | Handle provider switching context | Medium | Required | DONE |
 | 15 | Verify manual end-to-end workflow | Medium | Required | PENDING |
 | 16 | Map Atomic-specific tool compatibility | Medium | Required | PENDING |
 | 17 | Connect approved Atomic tool access | High | Required | PENDING |
@@ -668,6 +668,50 @@ Only the first non-DONE stage may be selected. A blocked or approval-waiting sta
 - Final stage status: DONE
 - Completed count: 13 / 22
 - Next eligible stage: 14 — Handle provider switching context (Medium, independent review required).
+
+### Stage 14 — Handle provider switching context (2026-09-11)
+
+- Stage / attempt / date: Stage 14 / attempt 1 / 2026-09-11
+- Checkout: absolute root, branch, HEAD: `c:\Develop\Atomic-Chat-coder-tym`, `feat/windows-cline-cli`, `51f813b2eb41a89434289369cf9f76b22c471499`
+- Starting dirty files and preservation: clean working tree.
+- Approved scope and exact files explained to user: Stage 14 provider switching context seeding and continuation bypass across `conversation-context.ts`, `index.tsx`, unit tests in `conversation-context.test.ts`, and new integration tests in `provider-switching-context.test.ts`. User approved ("מאשר תתחיל").
+- Changes or read-only findings:
+  - Extended `BuildCodingAgentPromptOptions` with `seedFromSessionId`, `backend`, `isContinuation`, and `source`.
+  - Implemented Cline ACP continuation bypass in `buildCodingAgentPrompt`: when `backend === 'cline-acp' && isContinuation`, returns the raw prompt immediately without prepending history or summaries, preventing duplicate prompt expansion and exponential context bloat.
+  - Implemented provider switch seeding in `buildCodingAgentPrompt`: resolves seed session, enforces strict project isolation (`seedSession.projectDir === projectDir`) and execution mode isolation (`seedSession.source === source`), and prepends bounded context header `Coding-agent context from previous provider session follows.` preferring `conversationSummary` over raw session summary.
+  - In `index.tsx`: detected provider switch (`isProviderSwitch = Boolean(activeSession && activeSession.projectDir === projectDir && activeSession.source === source && activeSessionBackend !== agentBackend)`), marked `shouldStartNewSession = true`, passed `seedFromSessionId = activeSession.id`, and calculated `isClineContinuation = Boolean(!shouldStartNewSession && agentBackend === 'cline-acp' && activeSessionBackend === 'cline-acp' && activeSession?.externalSessionId)`.
+  - Tightened `getActiveContextSession` to enforce `session.source === targetSource`.
+- Acceptance criteria verified:
+  1. Ollama to Cline provider switch seeds new session with bounded context and previous summary/turns: VERIFIED.
+  2. Cline to Ollama provider switch seeds new session with bounded context from Cline: VERIFIED.
+  3. Cline multi-turn continuation returns raw prompt directly without duplicate history: VERIFIED.
+  4. Project boundary isolation strictly enforced (rejects cross-project seed): VERIFIED.
+  5. Manual vs Loop isolation strictly enforced (rejects manual <-> loop cross-seeding): VERIFIED.
+  6. Structured conversation summary preferred over raw logs when available; bounded by 6000 chars: VERIFIED.
+  7. Verification & type safety: TypeScript 0 errors; Vitest 138/138 passed (100%): VERIFIED.
+- Test commands / outcomes / relevant output:
+  - `corepack yarn workspace @janhq/web-app exec tsc -b tsconfig.app.json --pretty false` -> PASSED (0 errors).
+  - `corepack yarn workspace @janhq/web-app test run src/containers/CodingAgentPanel/conversation-context.test.ts` -> 19 passed (19).
+  - `corepack yarn workspace @janhq/web-app test run src/containers/CodingAgentPanel/provider-switching-context.test.ts` -> 7 passed (7).
+  - Full suite: `corepack yarn workspace @janhq/web-app test run src/stores/ src/containers/CodingAgentPanel/` -> 13 test files passed, 138/138 tests passed.
+- Skipped checks and reason: None.
+- Reviewer name/tool and availability result:
+  - Grok CLI (`C:\Users\segal\.grok\bin\grok.exe`, model `grok-beta` / Grok 3), executed locally.
+- Review round 1 verdict and findings:
+  - Verdict: PASS.
+  - All 7 acceptance criteria verified PASS.
+  - Findings: Low (L1 component-layer testing note, L2 use resolved backend in continuation predicate, L3 bounding test note), Nits (N1 duplicate coverage note, N2 empty session guard on seed path, N3 loop active context note).
+- Findings reproduced / rejected with evidence:
+  - L2 and N2 addressed with polish refinements: updated `isClineContinuation` to use `activeSessionBackend === 'cline-acp'`, and added empty-session guard on `seedFromSessionId` path.
+- Fixes and rerun results:
+  - Polish applied via Cline MCP. All 13 test files and 138/138 tests passed, `tsc` clean (0 errors).
+- Closure review verdict (High always; Medium after fixes):
+  - Initial round PASS; polish applied cleanly.
+- Remaining issues / blocker / accepted limitation: None.
+- Final diff self-check: Clean diff verified across `conversation-context.ts`, `conversation-context.test.ts`, `index.tsx`, and `provider-switching-context.test.ts`.
+- Final stage status: DONE
+- Completed count: 14 / 22
+- Next eligible stage: 15 — Verify manual end-to-end workflow (Medium, independent review required).
 
 Append one entry per execution/review attempt; retain earlier entries when resuming a stage.
 

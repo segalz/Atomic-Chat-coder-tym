@@ -205,3 +205,114 @@ describe('buildCodingAgentPrompt', () => {
     expect(result).toBe('Current request')
   })
 })
+
+describe('provider switching and continuation context', () => {
+  it('seeds new Cline session from prior Ollama session with summarizeSession', () => {
+    const result = buildCodingAgentPrompt({
+      prompt: 'New Cline request',
+      projectDir: '/repo',
+      sessions: [{ ...baseSession, backend: 'direct-ollama' }],
+      seedFromSessionId: 'session-1',
+      backend: 'cline-acp',
+      source: 'manual',
+    })
+
+    expect(result).toContain('Coding-agent context from previous provider session follows.')
+    expect(result).toContain('Previous session summary:')
+    expect(result).toContain('First request: Previous request')
+    expect(result).toContain('Relevant result:\nPrevious result')
+    expect(result).toContain('Current request:\nNew Cline request')
+  })
+
+  it('seeds new session using stored conversationSummary when available', () => {
+    const result = buildCodingAgentPrompt({
+      prompt: 'New request',
+      projectDir: '/repo',
+      sessions: [{ ...baseSession, conversationSummary: 'Stored summary from previous provider' }],
+      seedFromSessionId: 'session-1',
+      backend: 'cline-acp',
+      source: 'manual',
+    })
+
+    expect(result).toContain('Coding-agent context from previous provider session follows.')
+    expect(result).toContain('Saved conversation summary:\nStored summary from previous provider')
+    expect(result).not.toContain('Previous session summary:')
+  })
+
+  it('seeds new Ollama session from prior Cline session', () => {
+    const result = buildCodingAgentPrompt({
+      prompt: 'New Ollama request',
+      projectDir: '/repo',
+      sessions: [{ ...baseSession, backend: 'cline-acp' }],
+      seedFromSessionId: 'session-1',
+      backend: 'direct-ollama',
+      source: 'manual',
+    })
+
+    expect(result).toContain('Coding-agent context from previous provider session follows.')
+    expect(result).toContain('Current request:\nNew Ollama request')
+  })
+
+  it('bypasses context prepend for cline-acp continuation', () => {
+    const result = buildCodingAgentPrompt({
+      prompt: 'Second turn in Cline',
+      projectDir: '/repo',
+      activeSessionId: 'session-1',
+      backend: 'cline-acp',
+      isContinuation: true,
+      sessions: [baseSession],
+    })
+
+    expect(result).toBe('Second turn in Cline')
+  })
+
+  it('preserves context prepend for direct-ollama continuation', () => {
+    const result = buildCodingAgentPrompt({
+      prompt: 'Second turn in Ollama',
+      projectDir: '/repo',
+      activeSessionId: 'session-1',
+      backend: 'direct-ollama',
+      isContinuation: true,
+      sessions: [baseSession],
+    })
+
+    expect(result).toContain('Coding-agent context from the active conversation follows.')
+  })
+
+  it('rejects seedFromSessionId across different projectDir', () => {
+    const result = buildCodingAgentPrompt({
+      prompt: 'Current request',
+      projectDir: '/repo',
+      sessions: [{ ...baseSession, projectDir: '/other-repo' }],
+      seedFromSessionId: 'session-1',
+    })
+
+    expect(result).toBe('Current request')
+  })
+
+  it('rejects seedFromSessionId across different source', () => {
+    const result = buildCodingAgentPrompt({
+      prompt: 'Current request',
+      projectDir: '/repo',
+      source: 'manual',
+      sessions: [{ ...baseSession, source: 'loop' }],
+      seedFromSessionId: 'session-1',
+    })
+
+    expect(result).toBe('Current request')
+  })
+
+  it('returns raw prompt when history and summary context are disabled during provider switch', () => {
+    const result = buildCodingAgentPrompt({
+      prompt: 'Current request',
+      projectDir: '/repo',
+      includeHistory: false,
+      includeSummaryContext: false,
+      sessions: [baseSession],
+      seedFromSessionId: 'session-1',
+    })
+
+    expect(result).toBe('Current request')
+  })
+})
+
