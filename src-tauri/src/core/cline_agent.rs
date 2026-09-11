@@ -1262,7 +1262,6 @@ impl ClineAgentState {
                 };
                 RunTerminalOutcome::Failed {
                     error: err_msg,
-                    retryable: false,
                 }
             }
         };

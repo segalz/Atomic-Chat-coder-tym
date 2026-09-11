@@ -227,13 +227,19 @@ impl StderrTailBuffer {
     /// Renders the retained bytes as a lossy UTF-8 string, with a truncation
     /// notice prepended if any bytes were dropped.
     pub fn to_string_lossy(&self) -> String {
-        let body = String::from_utf8_lossy(self.bytes.make_contiguous()).into_owned();
+        let (s1, s2) = self.bytes.as_slices();
+        let mut combined = Vec::with_capacity(self.bytes.len());
+        combined.extend_from_slice(s1);
+        combined.extend_from_slice(s2);
+        let body = String::from_utf8_lossy(&combined).into_owned();
         if self.truncated {
             format!("[stderr truncated; showing last {} bytes]\n{}", self.limit, body)
         } else {
             body
         }
     }
+}
+
 /// Incremental newline-delimited JSON frame decoder.
 ///
 /// Accepts arbitrary byte chunks (as delivered by an incremental reader) and
@@ -338,7 +344,7 @@ impl IncrementalMessageBuffer {
 
 /// Trims leading/trailing ASCII whitespace (including `\r`) from a byte slice.
 fn trim_ascii(bytes: &[u8]) -> &[u8] {
-    let is_ws = |b: u8| b.is_ascii_whitespace();
+    let is_ws = |b: &u8| b.is_ascii_whitespace();
     let start = bytes.iter().position(|b| !is_ws(b)).unwrap_or(bytes.len());
     let end = bytes
         .iter()
