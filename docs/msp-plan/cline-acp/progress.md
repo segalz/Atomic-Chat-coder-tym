@@ -36,7 +36,7 @@ Only the first non-DONE stage may be selected. A blocked or approval-waiting sta
 | 10 | Add provider-aware model picker | Low | Optional | DONE |
 | 11 | Implement permission request lifecycle | High | Required | DONE |
 | 12 | Integrate edit and command presentation | High | Required | DONE |
-| 13 | Persist Cline conversation identity | Medium | Required | PENDING |
+| 13 | Persist Cline conversation identity | Medium | Required | DONE |
 | 14 | Handle provider switching context | Medium | Required | PENDING |
 | 15 | Verify manual end-to-end workflow | Medium | Required | PENDING |
 | 16 | Map Atomic-specific tool compatibility | Medium | Required | PENDING |
@@ -586,6 +586,88 @@ Only the first non-DONE stage may be selected. A blocked or approval-waiting sta
 - Final stage status: DONE
 - Completed count: 12 / 22
 - Next eligible stage: 13 — Persist Cline conversation identity (Medium, independent review required).
+
+### Stage 13 — Persist Cline conversation identity (2026-09-11)
+
+- Stage / attempt / date: Stage 13 / Attempt 1 / 2026-09-11
+- Checkout: absolute root `c:\Develop\Atomic-Chat-coder-tym`, branch `feat/windows-cline-cli`, HEAD `8af9e62`
+- Starting dirty files and preservation: None (clean working tree).
+- Approved scope and exact files explained to user:
+  - Extended coding sessions with optional backend/provider/model/external-session metadata.
+  - Bumped Zustand persist schema version from 0 to 1 with non-destructive migration.
+  - Handled in-flight run recovery: on restart/rehydration, reset `isRunning: false`, mark in-flight sessions as `status: 'interrupted'` with explicit reason `"Application restarted while run was active"`, and guarantee zero automatic prompt replay.
+  - Enforced project directory isolation on load, restored session backend and model defaults, and handled missing/stale external ACP sessions gracefully.
+  - Target files:
+    - `web-app/src/stores/coding-agent-store.ts`
+    - `web-app/src/stores/coding-agent-store.test.ts`
+    - `web-app/src/containers/CodingAgentPanel/index.tsx`
+    - `web-app/src/containers/CodingAgentPanel/session-identity-persistence.test.ts`
+    - `src-tauri/src/core/cline_agent.rs`
+- Changes or read-only findings:
+  - `web-app/src/stores/coding-agent-store.ts`:
+    - Extended `CodingSession` with `backend?: CodingAgentBackend`, `providerId?: string`, `modelId?: string`, `externalSessionId?: string`, `status?: SessionStatus`, `interruptedReason?: string`.
+    - Added `setSessionIdentity`, `markSessionInterrupted`, `setSessionStatus` actions to store.
+    - Updated `startNewSession` to accept initial metadata.
+    - Bumped schema version to 1. Implemented version 0 -> 1 migration in `migrateCodingAgentState` that safely preserves all existing logs, diffs, summaries, and plan text without data loss, and marks in-flight runs as interrupted.
+    - Updated `onRehydrateStorage` to reset `isRunning: false`, preserve approved diffs, and transition any session running during restart to `status: 'interrupted'` with reason `"Application restarted while run was active"`.
+    - In `setSessionStatus`, ensured `interruptedReason` is cleared on transition to `completed` or `running`.
+  - `web-app/src/containers/CodingAgentPanel/index.tsx`:
+    - In `sendPrompt`: initialized session with backend, provider (`CLINE_DEFAULT_PROVIDER_ID`), model, and `status: 'running'`. Explicitly set `externalSessionId: undefined` on fresh sessions to ensure they never inherit previous session IDs.
+    - Stamped local session ID onto `activeRun.sessionId` to guarantee run-scoped lifecycle updates.
+    - Bound `externalSessionId` only from `sendResult.activeRun.sessionId`.
+    - In `finishAgentRun`: targeted `activeRun?.sessionId ?? store.activeSessionId` with `completed` or `failed`.
+    - In `handleStop`: set `completionHandledRef.current = true` to guard against late terminal events, and recorded `status: 'interrupted'` with reason `"User stopped run"`.
+    - In `handleLoadSession`: restored `projectDir`, restored `session.backend` (falling back to `DEFAULT_CODING_AGENT_BACKEND`), and restored `session.modelId`.
+  - `src-tauri/src/core/cline_agent.rs`:
+    - Added `test_validate_session_resume_stale_session` asserting `ClineSessionError::StaleSessionId`.
+  - Test suites:
+    - `web-app/src/stores/coding-agent-store.test.ts`: added 9 tests covering Stage 13 metadata, version 0 migration, unversioned in-flight recovery, reason clearing, project isolation, and missing external session handling (14 tests total).
+    - `web-app/src/containers/CodingAgentPanel/session-identity-persistence.test.ts`: added 6 integration tests covering panel session identity lifecycle, user stop, project isolation, and restart rehydration.
+- Acceptance criteria verified:
+  - 1. Old stored sessions (v0 and unversioned) migrate cleanly without data loss: VERIFIED (passed).
+  - 2. Restart during active run resets `isRunning: false` and marks session `status: 'interrupted'` with `"Application restarted while run was active"`: VERIFIED (passed).
+  - 3. No automatic prompt replay upon restart or ambiguous disconnect: VERIFIED (passed).
+  - 4. Missing/stale external session handled gracefully without crash: VERIFIED (passed).
+  - 5. Project isolation enforced across project directories: VERIFIED (passed).
+  - 6. Session lifecycle accurately records `completed`, `failed`, and `interrupted`: VERIFIED (passed).
+  - 7. Test coverage and zero regressions: VERIFIED (12 test files, 123 tests passing, 0 TypeScript errors).
+- Test commands / outcomes / relevant output:
+  - `corepack yarn workspace @janhq/web-app exec tsc -b tsconfig.app.json --pretty false`: PASSED (0 errors).
+  - `corepack yarn workspace @janhq/web-app test run src/stores/ src/containers/CodingAgentPanel/`: PASSED (12 test files, 123 tests passed, 100%).
+- Skipped checks and reason:
+  - Full desktop cargo binary compilation skipped per plan; toolchain `dlltool.exe` requirement on Windows deferred to Stage 21.
+- Reviewer name/tool and availability result:
+  - Grok CLI (`C:\Users\segal\.grok\bin\grok.exe`, model `grok-beta` / Grok 3), fully available and executed locally.
+- Review round 1 verdict and findings:
+  - Verdict: CHANGES_REQUIRED.
+  - Findings:
+    - M1: v0 in-flight runs not marked interrupted (persisted isRunning check missing in migration).
+    - M2: New sessions copied previous ACP externalSessionId.
+    - M3: providerId was hardcoded to 'zai' instead of using constant.
+    - M4: Lifecycle updates used activeSessionId instead of run-scoped session ID.
+    - L1: Loading legacy session did not default backend to direct-ollama.
+    - L2/L3: Unversioned fixture and diffs/summary assertions missing in test.
+    - L4: interruptedReason never cleared on continue or success.
+    - Nits: UTF-8 BOM on test file, TS6133 unused version parameter.
+- Findings reproduced / rejected with evidence:
+  - All findings reproduced and confirmed valid.
+- Fixes and rerun results:
+  - M1: Added `wasRunning` check in `migrateCodingAgentState` and `onRehydrateStorage`; added unversioned in-flight test.
+  - M2: Set `externalSessionId: undefined` on `startNewSession`; only bound from `sendResult.activeRun.sessionId`.
+  - M3: Used `CLINE_DEFAULT_PROVIDER_ID`.
+  - M4: Used run-scoped session ID `activeRun?.sessionId ?? store.activeSessionId` across finish, stop, and error catch.
+  - L1: Added `DEFAULT_CODING_AGENT_BACKEND` fallback on `handleLoadSession`.
+  - L2/L3: Added unversioned test and assertions for approved diffs and summary timestamp.
+  - L4: Cleared `interruptedReason` on `completed` or `running` in `setSessionStatus` and on continue.
+  - Nits: Stripped BOM and renamed `version` to `_version`.
+  - Rerun: `tsc` 0 errors, Vitest 12/12 test files, 123/123 tests passed.
+- Closure review verdict (High always; Medium after fixes):
+  - Round 2: PASS. All Round 1 findings SATISFIED; all seven acceptance criteria MET.
+- Remaining issues / blocker / accepted limitation: None.
+- Final diff self-check: Clean diff verified; only Stage 13 files and tracker updated.
+- Final stage status: DONE
+- Completed count: 13 / 22
+- Next eligible stage: 14 — Handle provider switching context (Medium, independent review required).
 
 Append one entry per execution/review attempt; retain earlier entries when resuming a stage.
 

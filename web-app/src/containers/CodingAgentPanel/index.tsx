@@ -47,6 +47,8 @@ import {
   normalizeDirectToolStart,
   normalizeDone,
   normalizeError,
+  CLINE_DEFAULT_PROVIDER_ID,
+  DEFAULT_CODING_AGENT_BACKEND,
   normalizeLegacyCodeAgentOutput,
   normalizeTextDelta,
   persistCodingAgentBackend,
@@ -591,6 +593,15 @@ export function CodingAgentPanel() {
       }
     }
 
+    const runSessionId = activeRun?.sessionId ?? useCodingAgentStore.getState().activeSessionId
+    if (runSessionId) {
+      useCodingAgentStore.getState().setSessionStatus(
+        runSessionId,
+        success ? 'completed' : 'failed',
+        errorMessage ?? undefined
+      )
+    }
+
     useCodingAgentStore.getState().saveCurrentSession()
     setPendingPermission(null)
     const runBackend = activeRun?.backend ?? agentBackend
@@ -978,11 +989,27 @@ export function CodingAgentPanel() {
       includeHistory: includeConversationContext,
       includeSummaryContext,
     })
+    let targetSessionId = storeState.activeSessionId
     if (shouldStartNewSession) {
-      startNewSession(prompt, undefined, source)
+      startNewSession(prompt, undefined, source, {
+        backend: agentBackend,
+        providerId: agentBackend === 'cline-acp' ? CLINE_DEFAULT_PROVIDER_ID : undefined,
+        modelId: model,
+        externalSessionId: undefined,
+        status: 'running',
+      })
+      targetSessionId = useCodingAgentStore.getState().activeSessionId
     } else {
       continueSession(prompt, source)
       clearPendingDiffs()
+      if (targetSessionId) {
+        useCodingAgentStore.getState().setSessionIdentity(targetSessionId, {
+          backend: agentBackend,
+          providerId: agentBackend === 'cline-acp' ? CLINE_DEFAULT_PROVIDER_ID : undefined,
+          modelId: model,
+        })
+        useCodingAgentStore.getState().setSessionStatus(targetSessionId, 'running')
+      }
     }
     completionHandledRef.current = false
     lastAgentErrorRef.current = null
@@ -1020,7 +1047,7 @@ export function CodingAgentPanel() {
               ? finalPrompt
               : withLegacyEditInstruction(finalPrompt, editPermission),
           model,
-          sessionId: activeSession?.id,
+          sessionId: targetSessionId ?? activeSession?.id,
           activeRun,
           ollamaBaseUrl: agentConfig?.ollama_url ?? 'http://localhost:11434',
           editPermission,
@@ -1032,12 +1059,23 @@ export function CodingAgentPanel() {
         },
         invoke
       )
-      setActiveRun(sendResult.activeRun)
+      setActiveRun({
+        ...sendResult.activeRun,
+        sessionId: targetSessionId ?? sendResult.activeRun.sessionId,
+      })
+      if (sendResult.activeRun.sessionId && targetSessionId) {
+        useCodingAgentStore.getState().setSessionIdentity(targetSessionId, {
+          externalSessionId: sendResult.activeRun.sessionId,
+        })
+      }
       return true
     } catch (err) {
       setActiveRun(null)
       appendLog({ type: 'error', content: String(err), timestamp: Date.now() })
       setRunning(false)
+      if (targetSessionId) {
+        useCodingAgentStore.getState().setSessionStatus(targetSessionId, 'failed', String(err))
+      }
       if (loopEnabled) {
         clearLoopSchedule()
         setLoopEnabled(false)
@@ -1159,15 +1197,33 @@ export function CodingAgentPanel() {
   }, [agentStatus]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleStop = useCallback(async () => {
+    completionHandledRef.current = true
     try { await stopSelectedBackend() } catch { /* ignore */ }
     setRunning(false)
+    const runSessionId = activeRun?.sessionId ?? useCodingAgentStore.getState().activeSessionId
+    if (runSessionId) {
+      useCodingAgentStore.getState().markSessionInterrupted(runSessionId, 'User stopped run')
+    }
     setLoopEnabled(false)
     setLoopId(null)
     setLoopCountdown(null)
     clearTimeout(loopTimerRef.current!)
     clearInterval(loopTickRef.current!)
     setLastFailureMessage(null)
-  }, [setRunning, stopSelectedBackend])
+  }, [activeRun, setRunning, stopSelectedBackend])
+
+  const handleLoadSession = useCallback((id: string) => {
+    loadSession(id)
+    const session = useCodingAgentStore.getState().sessions.find((s) => s.id === id)
+    const targetBackend = session?.backend || DEFAULT_CODING_AGENT_BACKEND
+    setAgentBackend(targetBackend)
+    persistCodingAgentBackend(targetBackend)
+
+    if (session?.modelId) {
+      setSelectedCodeModel(session.modelId)
+      persistSelectedCodeModel(session.modelId)
+    }
+  }, [loadSession])
 
   const handleApproveDiff = useCallback(async (id: string) => {
     try {
@@ -1293,7 +1349,7 @@ export function CodingAgentPanel() {
                     <button
                       type="button"
                       className="flex-1 text-left text-xs text-muted-foreground truncate"
-                      onClick={() => loadSession(s.id)}
+                      onClick={() => handleLoadSession(s.id)}
                       title={s.prompt}
                     >
                       {s.prompt.length > 40 ? s.prompt.slice(0, 40) + '…' : s.prompt}

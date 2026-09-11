@@ -1853,6 +1853,19 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_session_resume_stale_session() {
+        let state = ClineAgentState::new(None);
+        let proj = std::env::temp_dir();
+
+        let res = state.validate_session_resume("non-existent-session-id", &proj);
+        assert!(res.is_err());
+        match res.unwrap_err() {
+            ClineSessionError::StaleSessionId(id) => assert_eq!(id, "non-existent-session-id"),
+            other => panic!("Expected StaleSessionId, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn test_prepare_prompt_turn_concurrency_rejection() {
         let state = ClineAgentState::new(None);
         let session = SessionIdentity {

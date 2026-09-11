@@ -1,5 +1,10 @@
 import { create } from 'zustand'
 import { persist, createJSONStorage } from 'zustand/middleware'
+import {
+  CodingAgentBackend,
+  isCodingAgentBackend,
+  resolveCodingAgentBackend,
+} from '@/containers/CodingAgentPanel/backend-identity'
 
 export type ExecLogLineType =
   | 'text_delta'
@@ -26,6 +31,12 @@ export interface PendingDiff {
 
 export type CodingSessionSource = 'manual' | 'loop'
 
+export type SessionStatus = 'completed' | 'interrupted' | 'failed' | 'running'
+
+export type SessionIdentityPatch = Partial<
+  Pick<CodingSession, 'backend' | 'providerId' | 'modelId' | 'externalSessionId' | 'status' | 'interruptedReason'>
+>
+
 export interface CodingSession {
   id: string
   threadId?: string
@@ -38,6 +49,12 @@ export interface CodingSession {
   conversationSummary?: string
   conversationSummaryUpdatedAt?: number
   timestamp: number
+  backend?: CodingAgentBackend
+  providerId?: string
+  modelId?: string
+  externalSessionId?: string
+  status?: SessionStatus
+  interruptedReason?: string
 }
 
 interface CodingAgentState {
@@ -70,11 +87,29 @@ interface CodingAgentState {
   setDiagnostics: (filePath: string, diagnostics: any[]) => void
   setConversationSummary: (summary: string) => void
   /** Save current session to history then clear runtime state */
-  startNewSession: (prompt: string, threadId?: string, source?: CodingSessionSource) => void
+  startNewSession: (
+    prompt: string,
+    threadId?: string,
+    source?: CodingSessionSource,
+    meta?: Partial<
+      Pick<CodingSession, 'backend' | 'providerId' | 'modelId' | 'externalSessionId' | 'status'>
+    >
+  ) => void
   /** Continue the active session without clearing visible output */
   continueSession: (prompt: string, source?: CodingSessionSource) => void
   /** Persist the current running session into history (call when agent finishes) */
   saveCurrentSession: () => void
+  /** Update identity metadata (backend, provider, model, ACP session id) for a session */
+  setSessionIdentity: (
+    sessionId: string,
+    identity: Partial<
+      Pick<CodingSession, 'backend' | 'providerId' | 'modelId' | 'externalSessionId' | 'status' | 'interruptedReason'>
+    >
+  ) => void
+  /** Mark a session (or the active one) as interrupted with an optional reason */
+  markSessionInterrupted: (sessionId?: string, reason?: string) => void
+  /** Update the lifecycle status of a session, with an optional reason */
+  setSessionStatus: (sessionId: string, status: SessionStatus, reason?: string) => void
   /** Load a past session into the view (read-only) */
   loadSession: (id: string) => void
   /** Delete a session from history */
@@ -109,6 +144,38 @@ function normalizeDiagnostics(value: unknown): Record<string, any[]> {
   return value as Record<string, any[]>
 }
 
+function isSessionStatus(value: unknown): value is SessionStatus {
+  return value === 'completed' || value === 'interrupted' || value === 'failed' || value === 'running'
+}
+
+function normalizeIdentityPatch(value: unknown): SessionIdentityPatch {
+  if (!value || typeof value !== 'object') return {}
+
+  const identity = value as Partial<CodingSession>
+  const patch: SessionIdentityPatch = {}
+
+  if (identity.backend !== undefined) {
+    patch.backend = resolveCodingAgentBackend(identity.backend)
+  }
+  if (typeof identity.providerId === 'string' && identity.providerId.length > 0) {
+    patch.providerId = identity.providerId
+  }
+  if (typeof identity.modelId === 'string' && identity.modelId.length > 0) {
+    patch.modelId = identity.modelId
+  }
+  if (typeof identity.externalSessionId === 'string' && identity.externalSessionId.length > 0) {
+    patch.externalSessionId = identity.externalSessionId
+  }
+  if (isSessionStatus(identity.status)) {
+    patch.status = identity.status
+  }
+  if (typeof identity.interruptedReason === 'string' && identity.interruptedReason.length > 0) {
+    patch.interruptedReason = identity.interruptedReason
+  }
+
+  return patch
+}
+
 function normalizeSessions(value: unknown): CodingSession[] {
   if (!Array.isArray(value)) return []
 
@@ -136,11 +203,35 @@ function normalizeSessions(value: unknown): CodingSession[] {
         normalized.conversationSummaryUpdatedAt = s.conversationSummaryUpdatedAt
       }
 
+      if (isCodingAgentBackend(s.backend)) {
+        normalized.backend = s.backend
+      }
+
+      if (typeof s.providerId === 'string' && s.providerId.length > 0) {
+        normalized.providerId = s.providerId
+      }
+
+      if (typeof s.modelId === 'string' && s.modelId.length > 0) {
+        normalized.modelId = s.modelId
+      }
+
+      if (typeof s.externalSessionId === 'string' && s.externalSessionId.length > 0) {
+        normalized.externalSessionId = s.externalSessionId
+      }
+
+      if (isSessionStatus(s.status)) {
+        normalized.status = s.status
+      }
+
+      if (typeof s.interruptedReason === 'string' && s.interruptedReason.length > 0) {
+        normalized.interruptedReason = s.interruptedReason
+      }
+
       return normalized
     })
 }
 
-function migrateCodingAgentState(persistedState: unknown): Partial<CodingAgentState> {
+function migrateCodingAgentState(persistedState: unknown, _version?: number): Partial<CodingAgentState> {
   if (!persistedState || typeof persistedState !== 'object') return {}
 
   const state = persistedState as Partial<CodingAgentState>
@@ -150,10 +241,27 @@ function migrateCodingAgentState(persistedState: unknown): Partial<CodingAgentSt
     ? sessions.find((session) => session.id === activeSessionId && session.source === 'manual')
     : undefined
 
+  const wasRunning = Boolean(state.isRunning)
+  // Sessions persisted with status 'running', or active session if the app crashed while isRunning was true (e.g. v0 / unversioned)
+  const migratedSessions = sessions.map((session) => {
+    const isInterruptedRun =
+      session.status === 'running' ||
+      (wasRunning && session.id === activeSessionId && session.status !== 'completed' && session.status !== 'failed')
+
+    if (isInterruptedRun) {
+      return {
+        ...session,
+        status: 'interrupted' as SessionStatus,
+        interruptedReason: session.interruptedReason || 'Application restarted while run was active',
+      }
+    }
+    return session
+  })
+
   return {
     projectDir: typeof state.projectDir === 'string' ? state.projectDir : '',
     draftPrompt: typeof state.draftPrompt === 'string' ? state.draftPrompt : '',
-    sessions,
+    sessions: migratedSessions,
     activeSessionId,
     planText: typeof state.planText === 'string' ? state.planText : '',
     execLog: normalizeExecLog(state.execLog),
@@ -258,9 +366,10 @@ export const useCodingAgentStore = create<CodingAgentState>()(
         })
       },
 
-      startNewSession: (prompt, threadId, source = 'manual') => {
+      startNewSession: (prompt, threadId, source = 'manual', meta) => {
         const { planText, execLog, pendingDiffs, projectDir, sessions, activeSessionId } = get()
         const newId = crypto.randomUUID()
+        const identity = meta ? normalizeIdentityPatch(meta) : {}
 
         // Save current session if it has any content
         const updatedSessions = [...sessions]
@@ -292,6 +401,8 @@ export const useCodingAgentStore = create<CodingAgentState>()(
           prompt,
           source,
           projectDir,
+          ...identity,
+          status: identity.status ?? 'running',
           planText: '',
           execLog: [],
           pendingDiffs: [],
@@ -376,6 +487,45 @@ export const useCodingAgentStore = create<CodingAgentState>()(
         })
       },
 
+      setSessionIdentity: (sessionId, identity) =>
+        set((s) => {
+          const patch = normalizeIdentityPatch(identity)
+          return {
+            sessions: s.sessions.map((sess) => (sess.id === sessionId ? { ...sess, ...patch } : sess)),
+          }
+        }),
+
+      markSessionInterrupted: (sessionId, reason = 'User stopped run') =>
+        set((s) => {
+          const targetId = sessionId ?? s.activeSessionId
+          if (!targetId) return {}
+          return {
+            sessions: s.sessions.map((sess) =>
+              sess.id === targetId
+                ? { ...sess, status: 'interrupted' as SessionStatus, interruptedReason: reason }
+                : sess
+            ),
+          }
+        }),
+
+      setSessionStatus: (sessionId, status, reason) =>
+        set((s) => ({
+          sessions: s.sessions.map((sess) =>
+            sess.id === sessionId
+              ? {
+                  ...sess,
+                  status,
+                  interruptedReason:
+                    reason !== undefined
+                      ? reason
+                      : status === 'completed' || status === 'running'
+                      ? undefined
+                      : sess.interruptedReason,
+                }
+              : sess
+          ),
+        })),
+
       deleteSession: (id) => {
         set((s) => ({ sessions: s.sessions.filter((sess) => sess.id !== id) }))
       },
@@ -393,7 +543,7 @@ export const useCodingAgentStore = create<CodingAgentState>()(
     }),
     {
       name: 'coding-agent-store',
-      version: 0,
+      version: 1,
       storage: createJSONStorage(() => ({
         getItem: (name) => (typeof window !== 'undefined' ? localStorage.getItem(name) : null),
         setItem: (name, value) => {
@@ -424,12 +574,28 @@ export const useCodingAgentStore = create<CodingAgentState>()(
       }),
       onRehydrateStorage: () => (state) => {
         if (state) {
+          const wasRunning = state.isRunning
           state.isRunning = false
           state.pendingDiffs = []
-          state.sessions = state.sessions.map((session) => ({
-            ...session,
-            pendingDiffs: normalizePendingDiffs(session.pendingDiffs).filter((diff) => diff.status !== 'pending'),
-          }))
+          state.sessions = state.sessions.map((session) => {
+            const normalizedDiffs = normalizePendingDiffs(session.pendingDiffs).filter((diff) => diff.status !== 'pending')
+            const isInterruptedRun =
+              session.status === 'running' ||
+              (wasRunning && session.id === state.activeSessionId && session.status !== 'completed' && session.status !== 'failed')
+
+            if (isInterruptedRun) {
+              return {
+                ...session,
+                pendingDiffs: normalizedDiffs,
+                status: 'interrupted',
+                interruptedReason: session.interruptedReason || 'Application restarted while run was active',
+              }
+            }
+            return {
+              ...session,
+              pendingDiffs: normalizedDiffs,
+            }
+          })
         }
       },
     }
