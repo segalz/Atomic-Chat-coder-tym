@@ -644,6 +644,30 @@ impl std::fmt::Debug for PendingPermissionRequest {
     }
 }
 
+/// Formats a JSON-RPC 2.0 response for an ACP permission request outcome.
+pub fn format_permission_rpc_response(
+    rpc_id: &serde_json::Value,
+    outcome: &PermissionOutcome,
+) -> serde_json::Value {
+    let outcome_val = match outcome {
+        PermissionOutcome::Selected { option_id } => serde_json::json!({
+            "outcome": "selected",
+            "optionId": option_id
+        }),
+        PermissionOutcome::Cancelled => serde_json::json!({
+            "outcome": "cancelled",
+            "optionId": serde_json::Value::Null
+        }),
+    };
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": rpc_id,
+        "result": {
+            "outcome": outcome_val
+        }
+    })
+}
+
 /// Shared state managing the Cline ACP agent lifecycle, process ownership,
 /// cancellation, event fencing, and explicit session/model binding.
 #[derive(Debug)]

@@ -5,10 +5,10 @@
 - Target: `/Users/zvisegal/devlope/Atomic-Chat-coder-tym`
 - Plan: `docs/msp-plan/cline-acp/instructions.md`
 - Created: 2026-09-10
-- Overall status: IN_PROGRESS — stage 16 completed, stage 17 ready
-- Completed: **16 / 22**
-- Current stage: **17** — Connect approved Atomic tool access (PENDING)
-- Next eligible stage: **17** — Connect approved Atomic tool access (High, independent review required)
+- Overall status: IN_PROGRESS — stage 17 completed, stage 18 ready
+- Completed: **17 / 22**
+- Current stage: **18** — Route bounded Loop runs (PENDING)
+- Next eligible stage: **18** — Route bounded Loop runs (High, independent review required)
 - Blocking issue: none
 - Authorization: planning documents only; explain exact source edits and obtain approval as required by instructions.md.
 - Planning snapshot branch: `feat/windows-cline-cli` (branched from `codex/ollama-agent-migration`); re-verify on every run.
@@ -40,7 +40,7 @@ Only the first non-DONE stage may be selected. A blocked or approval-waiting sta
 | 14 | Handle provider switching context | Medium | Required | DONE |
 | 15 | Verify manual end-to-end workflow | Medium | Required | DONE |
 | 16 | Map Atomic-specific tool compatibility | Medium | Required | DONE |
-| 17 | Connect approved Atomic tool access | High | Required | PENDING |
+| 17 | Connect approved Atomic tool access | High | Required | DONE |
 | 18 | Route bounded Loop runs | High | Required | PENDING |
 | 19 | Integrate Loop continuation and recovery | High | Required | PENDING |
 | 20 | Verify adversarial lifecycle and regressions | High | Required | PENDING |
@@ -825,6 +825,50 @@ Only the first non-DONE stage may be selected. A blocked or approval-waiting sta
 - Final stage status: DONE
 - Completed count: 16 / 22
 - Next eligible stage: 17 — Connect approved Atomic tool access (High, independent review required).
+
+### Stage 17 — Connect approved Atomic tool access (2026-09-11)
+
+- Stage / attempt / date: Stage 17 / attempt 1 & 2 / 2026-09-11
+- Checkout: absolute root, branch, HEAD: `c:\Develop\Atomic-Chat-coder-tym`, `feat/windows-cline-cli`, `9faffa8`
+- Starting dirty files and preservation: Clean working tree at start of stage; all prior 16 stages committed cleanly.
+- Approved scope and exact files explained to user: Implement scoped tool/context integration selected in Stage 16 using session-scoped supported interfaces; advertise only executable capabilities and preserve path and approval boundaries; verify absence of unrelated workspace context; strictly avoid synthetic adapters. User explicitly approved: "מאשר תבצע כמו בשלבים הקודמים".
+- Changes or read-only findings:
+  - Created `web-app/src/containers/CodingAgentPanel/tool-access-boundaries.test.ts` (8 scenarios covering real disk mutations, SHA256 integrity, replay rejection, tool error normalization, pending permission cancellation, MCP/secret withholding, cross-backend rejection, and LSP isolation).
+  - Added `format_permission_rpc_response` in `src-tauri/src/core/cline_agent.rs` producing ACP v1 compliant JSON-RPC responses for `selected` and `cancelled` outcomes.
+  - Built and executed `scratch/stage17_tool_resilience_probe.mjs` against installed `cline.cmd --acp` with model `zai/glm-5.3-flash` on disposable disk fixture.
+- Acceptance criteria verified:
+  1. Permitted and denied tool access: VERIFIED on disk. `allow_once` wrote file on disk; replay was rejected; `reject_once` left file SHA256 and size byte-for-byte intact with zero side effects.
+  2. Tool error resilience: VERIFIED. Handled errors (ENOENT, missing files) survive gracefully without crashing ACP session or terminating agent loop; adapter normalizes failed tool updates to `isError: true`.
+  3. Availability loss and cancellation: VERIFIED live. `session/cancel` while `session/request_permission` was in-flight stopped the prompt with `stopReason: "cancelled"`, marked tool as failed, preserved disk files, and child process exited cleanly via SIGTERM with no orphan processes.
+  4. Absence of unrelated workspace context & security isolation: VERIFIED. `start_cline_agent` payload omits `mcpServers`, `SERPER_API_KEY`, and `env`; live session uses `mcpServers: []`; operations confined to fixture directory; cross-project plan text strictly blocked.
+  5. Adherence to Stage 16 directive (no code invention): VERIFIED. Zero synthetic tool adapters, zero LSP bridges, zero OpenAI schema translators invented.
+  6. Quality and regression safety: VERIFIED. TypeScript passes clean (0 errors), Vitest passes 15/15 files and 153/153 tests (100%), live probe passed all 5 tests.
+- Test commands / outcomes / relevant output:
+  - `corepack yarn workspace @janhq/web-app exec tsc -b tsconfig.app.json --pretty false` -> PASSED (0 errors).
+  - `corepack yarn workspace @janhq/web-app test run src/stores/ src/containers/CodingAgentPanel/` -> 15 test files passed, 153/153 tests passed (100%).
+  - `node scratch/stage17_tool_resilience_probe.mjs` -> All 5 tests passed live against `cline.cmd --acp` (Test 1: PASS, Test 2: PASS, Test 3: PASS, Test 4: PASS, Test 5: PASS).
+- Skipped checks and reason: None.
+- Reviewer name/tool and availability result:
+  - Grok CLI (`C:\Users\segal\.grok\bin\grok.exe`, model Grok 3 / `grok-beta`), executed locally.
+- Review round 1 verdict and findings:
+  - Verdict: CHANGES_REQUIRED.
+  - Findings: Required on-disk behavioral assertions for `allow_once` / `reject_once`; real replay rejection; live cancellation during pending permission; and capturing `mcpServers: []` wire contract.
+- Findings reproduced / rejected with evidence:
+  - All 6 findings reproduced and comprehensively resolved in Round 2:
+    - Added real temp fixtures and SHA256 integrity checks to Vitest and live probe.
+    - Updated live probe to send `session/cancel` during in-flight permission request.
+    - Added `format_permission_rpc_response` to `cline_agent.rs`.
+- Fixes and rerun results:
+  - Re-ran `stage17_tool_resilience_probe.mjs`: ALL 5 TESTS PASSED.
+  - Re-ran Vitest: 153/153 passed (100%).
+  - Re-ran `tsc`: 0 errors.
+- Closure review verdict (High always; Medium after fixes):
+  - Round 2 Closure Review Verdict: **PASS** across all 6 acceptance criteria.
+- Remaining issues / blocker / accepted limitation: None.
+- Final diff self-check: Surgical additions in `tool-access-boundaries.test.ts` and `src-tauri/src/core/cline_agent.rs`.
+- Final stage status: DONE
+- Completed count: 17 / 22
+- Next eligible stage: 18 — Route bounded Loop runs (High, independent review required).
 
 Append one entry per execution/review attempt; retain earlier entries when resuming a stage.
 
