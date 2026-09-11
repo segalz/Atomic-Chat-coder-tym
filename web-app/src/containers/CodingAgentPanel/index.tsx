@@ -58,6 +58,14 @@ import {
   type NormalizedAgentEvent,
   type TextDeltaPayload,
 } from './agent-event-adapter'
+import {
+  isOllamaHealthCheckRequired,
+  isOllamaRestartRequired,
+  isSendBlockedByOllamaError,
+  routeSendAgentPrompt,
+  routeStopAgent,
+  type ActiveRun,
+} from './backend-router'
 import { CodeModelSelector } from './CodeModelSelector'
 import './ConversationSummary.css'
 import { ContextBudgetIndicator } from './ContextBudgetIndicator'
@@ -402,6 +410,7 @@ export function CodingAgentPanel() {
   const [agentStatus, setAgentStatus] = useState<AgentStatus>('idle')
   const [lastFailureMessage, setLastFailureMessage] = useState<string | null>(null)
   const [pendingEditIntent, setPendingEditIntent] = useState<PendingEditIntent | null>(null)
+  const [activeRun, setActiveRun] = useState<ActiveRun | null>(null)
   const autoApproveRef = useRef(true)
   const [lspEnabled, setLspEnabled] = useState(() => {
     if (typeof window !== 'undefined') return window.localStorage.getItem('coding-agent-lsp') === 'true'
@@ -484,10 +493,12 @@ export function CodingAgentPanel() {
   }, [])
 
   useEffect(() => {
-    invoke<OllamaModelCapabilities[]>('list_ollama_model_capabilities')
-      .then((models) => setModelCapabilities(buildModelCapabilitiesByName(models)))
-      .catch(() => setModelCapabilities({}))
-  }, [])
+    if (isOllamaHealthCheckRequired(agentBackend)) {
+      invoke<OllamaModelCapabilities[]>('list_ollama_model_capabilities')
+        .then((models) => setModelCapabilities(buildModelCapabilitiesByName(models)))
+        .catch(() => setModelCapabilities({}))
+    }
+  }, [agentBackend])
 
   const handleCodeModelChange = useCallback((model: string) => {
     if (!isCodeAgentToolCompatible(model, modelCapabilities)) return
@@ -524,7 +535,11 @@ export function CodingAgentPanel() {
     }
   }, [checkOllama])
 
-  useEffect(() => { checkOllama() }, [checkOllama])
+  useEffect(() => {
+    if (isOllamaHealthCheckRequired(agentBackend)) {
+      checkOllama()
+    }
+  }, [agentBackend, checkOllama])
 
   const clearLoopSchedule = useCallback(() => {
     clearTimeout(loopTimerRef.current!)
@@ -557,9 +572,20 @@ export function CodingAgentPanel() {
     }
 
     useCodingAgentStore.getState().saveCurrentSession()
-    setAgentStatus('restarting')
-    invoke('restart_ollama').catch(() => {}).finally(() => setAgentStatus(success ? 'free' : 'failed'))
-  }, [appendLog, clearLoopSchedule, loopEnabled, setRunning])
+    const runBackend = activeRun?.backend ?? agentBackend
+    if (isOllamaRestartRequired(runBackend)) {
+      setAgentStatus('restarting')
+      invoke('restart_ollama')
+        .catch(() => {})
+        .finally(() => {
+          setActiveRun(null)
+          setAgentStatus(success ? 'free' : 'failed')
+        })
+    } else {
+      setActiveRun(null)
+      setAgentStatus(success ? 'free' : 'failed')
+    }
+  }, [activeRun, agentBackend, appendLog, clearLoopSchedule, loopEnabled, setRunning])
 
   const handleNormalizedAgentEvent = useCallback((event: NormalizedAgentEvent) => {
     switch (event.type) {
@@ -743,13 +769,8 @@ export function CodingAgentPanel() {
 
   // ── Handlers ─────────────────────────────────────────────
   const stopSelectedBackend = useCallback(async () => {
-    if (agentBackend === 'direct-ollama') {
-      await invoke('stop_ollama_agent')
-      return
-    }
-
-    await invoke('stop_code_agent')
-  }, [agentBackend])
+    await routeStopAgent(activeRun, agentBackend, invoke)
+  }, [activeRun, agentBackend])
 
   const handleSelectFolder = useCallback(async () => {
     try {
@@ -775,6 +796,15 @@ export function CodingAgentPanel() {
   ): Promise<boolean> => {
     if (!projectDir || !prompt.trim()) return false
 
+    if (activeRun) {
+      appendLog({
+        type: 'error',
+        content: `An agent run is already active on backend '${activeRun.backend}'. Stop it first.`,
+        timestamp: Date.now(),
+      })
+      return false
+    }
+
     const source = options.source ?? 'manual'
     const includeConversationContext = options.includeConversationContext ?? source === 'manual'
     const includeSummaryContext = options.includeSummaryContext ?? includeConversationContext
@@ -786,37 +816,43 @@ export function CodingAgentPanel() {
     const activeSession = storeState.sessions.find((session) => session.id === storeState.activeSessionId)
     const shouldStartNewSession = !activeSession || activeSession.projectDir !== projectDir || activeSession.source !== source
     const candidateModel = selectedCodeModel || agentConfig?.code_model || CODE_AGENT_DEFAULT_MODEL
-    let model = isCodeAgentToolCompatible(candidateModel, modelCapabilities) ? candidateModel : CODE_AGENT_DEFAULT_MODEL
-    try {
-      const installedModels = await invoke<string[]>('list_ollama_models')
-      let capabilities = modelCapabilities
+    let model = candidateModel
+    if (isOllamaHealthCheckRequired(agentBackend)) {
+      const candidateCompatModel = isCodeAgentToolCompatible(candidateModel, modelCapabilities) ? candidateModel : CODE_AGENT_DEFAULT_MODEL
+      model = candidateCompatModel
       try {
-        const modelCapabilityList = await invoke<OllamaModelCapabilities[]>('list_ollama_model_capabilities')
-        capabilities = buildModelCapabilitiesByName(modelCapabilityList)
-        setModelCapabilities(capabilities)
-      } catch (capabilityErr) {
-        console.warn('Failed to refresh Ollama model capabilities before Code Agent run:', capabilityErr)
-      }
+        const installedModels = await invoke<string[]>('list_ollama_models')
+        let capabilities = modelCapabilities
+        try {
+          const modelCapabilityList = await invoke<OllamaModelCapabilities[]>('list_ollama_model_capabilities')
+          capabilities = buildModelCapabilitiesByName(modelCapabilityList)
+          setModelCapabilities(capabilities)
+        } catch (capabilityErr) {
+          console.warn('Failed to refresh Ollama model capabilities before Code Agent run:', capabilityErr)
+        }
 
-      const installedCodeModel = resolveInstalledCodeModel(model, agentConfig?.code_model, installedModels, capabilities)
-      if (!installedCodeModel) {
-        appendLog({
-          type: 'error',
-          content: 'No installed code-compatible Ollama model was found. Install or select a code model before running Code Agent.',
-          timestamp: Date.now(),
-        })
-        setLastFailureMessage('✗ No installed code-compatible Ollama model was found.')
-        setAgentStatus('failed')
-        return false
-      }
+        const installedCodeModel = resolveInstalledCodeModel(model, agentConfig?.code_model, installedModels, capabilities)
+        if (!installedCodeModel) {
+          appendLog({
+            type: 'error',
+            content: 'No installed code-compatible Ollama model was found. Install or select a code model before running Code Agent.',
+            timestamp: Date.now(),
+          })
+          setLastFailureMessage('✗ No installed code-compatible Ollama model was found.')
+          setAgentStatus('failed')
+          return false
+        }
 
-      model = installedCodeModel
-      if (model !== selectedCodeModel) {
-        setSelectedCodeModel(model)
-        persistSelectedCodeModel(model)
+        model = installedCodeModel
+        if (model !== selectedCodeModel) {
+          setSelectedCodeModel(model)
+          persistSelectedCodeModel(model)
+        }
+      } catch (err) {
+        console.warn('Failed to refresh Ollama models before Code Agent run:', err)
       }
-    } catch (err) {
-      console.warn('Failed to refresh Ollama models before Code Agent run:', err)
+    } else if (agentBackend === 'cline-acp') {
+      model = selectedCodeModel || 'zai/glm-5.3-flash'
     }
     const promptForAgent = buildCodingAgentPrompt({
       prompt,
@@ -859,11 +895,17 @@ export function CodingAgentPanel() {
         }
       }
 
-      if (agentBackend === 'direct-ollama') {
-        await invoke('start_ollama_agent', {
+      const sendResult = await routeSendAgentPrompt(
+        {
+          backend: agentBackend,
           projectDir,
-          prompt: finalPrompt,
+          prompt:
+            agentBackend === 'direct-ollama' || agentBackend === 'cline-acp'
+              ? finalPrompt
+              : withLegacyEditInstruction(finalPrompt, editPermission),
           model,
+          sessionId: activeSession?.id,
+          activeRun,
           ollamaBaseUrl: agentConfig?.ollama_url ?? 'http://localhost:11434',
           editPermission,
           lspEnabled,
@@ -871,17 +913,13 @@ export function CodingAgentPanel() {
           currentRun,
           maxRuns,
           loopId: activeLoopId,
-        })
-      } else {
-        await invoke('spawn_code_agent', {
-          projectDir,
-          prompt: withLegacyEditInstruction(promptForAgent, editPermission),
-          ollamaModel: model,
-          permissionMode: 'auto_accept',
-        })
-      }
+        },
+        invoke
+      )
+      setActiveRun(sendResult.activeRun)
       return true
     } catch (err) {
+      setActiveRun(null)
       appendLog({ type: 'error', content: String(err), timestamp: Date.now() })
       setRunning(false)
       if (loopEnabled) {
@@ -898,7 +936,7 @@ export function CodingAgentPanel() {
       setAgentStatus('idle')
       return false
     }
-  }, [projectDir, selectedCodeModel, agentConfig, agentBackend, setRunning, appendLog, startNewSession, continueSession, clearPendingDiffs, loopEnabled, clearLoopSchedule])
+  }, [projectDir, selectedCodeModel, agentConfig, agentBackend, activeRun, setRunning, appendLog, startNewSession, continueSession, clearPendingDiffs, loopEnabled, clearLoopSchedule])
 
   const sendPromptRef = useRef(sendPrompt)
 
@@ -1110,12 +1148,14 @@ export function CodingAgentPanel() {
             </p>
           )}
         </div>
-        <HardwareSetup
-          ollamaUrl={agentConfig?.ollama_url ?? 'http://localhost:11434'}
-          selectedCodeModel={selectedCodeModel}
-          disabled={isRunning}
-          onCodeModelChange={handleCodeModelChange}
-        />
+        {isOllamaHealthCheckRequired(agentBackend) && (
+          <HardwareSetup
+            ollamaUrl={agentConfig?.ollama_url ?? 'http://localhost:11434'}
+            selectedCodeModel={selectedCodeModel}
+            disabled={isRunning}
+            onCodeModelChange={handleCodeModelChange}
+          />
+        )}
         <div className="flex-1 overflow-auto flex flex-col min-h-0">
           {/* Session history */}
           {sessions.length > 0 && (
@@ -1161,7 +1201,7 @@ export function CodingAgentPanel() {
       {/* ── Main: Log + input ────────────────────────────── */}
       <div className="flex-1 flex flex-col min-w-0">
         {/* Ollama error banner */}
-        {ollamaError && (
+        {isSendBlockedByOllamaError(agentBackend, ollamaError) && ollamaError && (
           <div className="bg-destructive/10 border-b border-destructive/20 px-4 py-2 flex items-center gap-3 shrink-0">
             <IconAlertCircle size={16} className="text-destructive shrink-0" />
             <p className="flex-1 text-sm text-destructive truncate">{ollamaError}</p>
@@ -1222,7 +1262,7 @@ export function CodingAgentPanel() {
             </span>
           )}
           <div className="ml-auto flex items-center gap-1">
-            {!isRunning && (
+            {!isRunning && isOllamaHealthCheckRequired(agentBackend) && (
               <Button
                 size="sm" variant="ghost"
                 className="h-6 text-xs gap-1 text-muted-foreground"
@@ -1302,11 +1342,11 @@ export function CodingAgentPanel() {
               onChange={(e) => setDraftPrompt(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder={
-                ollamaError ? 'Ollama required' :
+                isSendBlockedByOllamaError(agentBackend, ollamaError) ? 'Ollama required' :
                 projectDir ? 'Describe what to build or fix…' :
                 'Select a project folder first'
               }
-              disabled={!projectDir || isRunning || !!ollamaError}
+              disabled={!projectDir || isRunning || isSendBlockedByOllamaError(agentBackend, ollamaError)}
               className="flex-1 resize-none bg-transparent px-4 py-3 text-sm outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50"
               rows={3}
               style={{ maxHeight: '200px', fieldSizing: 'content' } as React.CSSProperties}
@@ -1375,7 +1415,7 @@ export function CodingAgentPanel() {
               ) : (
                 <Button
                   size="icon-sm" className="rounded-full" onClick={handleSend}
-                  disabled={!projectDir || !draftPrompt.trim() || !!ollamaError}
+                  disabled={!projectDir || !draftPrompt.trim() || isSendBlockedByOllamaError(agentBackend, ollamaError)}
                   title="Send"
                 >
                   <IconArrowUp size={15} />

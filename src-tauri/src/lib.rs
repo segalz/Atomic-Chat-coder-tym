@@ -130,6 +130,9 @@ pub fn run() {
         core::ollama_agent::reject_agent_edit_intent,
         core::ollama_agent::approve_agent_diff,
         core::ollama_agent::reject_agent_diff,
+        // Cline ACP Agent
+        core::cline_agent::start_cline_agent,
+        core::cline_agent::stop_cline_agent,
         // Loop supervision read-only commands
         core::loop_supervision::loop_status,
         core::loop_supervision::read_loop_progress,
@@ -293,6 +296,7 @@ pub fn run() {
     let app_builder = app_builder
         .manage(core::code_agent::CodeAgentState::default())
         .manage(core::ollama_agent::OllamaAgentState::default())
+        .manage(core::cline_agent::ClineAgentState::default())
         .manage(core::loop_supervision::LoopSupervisionState::with_base_dir(
             loop_supervision_base_dir,
         ))

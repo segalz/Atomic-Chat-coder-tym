@@ -938,6 +938,81 @@ impl ClineAgentState {
             );
         }
     }
+
+    /// Checks cross-backend concurrency and starts a run if no other backend is running.
+    pub async fn try_start_run(
+        &self,
+        ollama_running: bool,
+        project_dir: &std::path::Path,
+        run_id: Option<RunId>,
+        session_id: Option<&str>,
+    ) -> Result<RunId, String> {
+        if ollama_running {
+            return Err("An Ollama agent is already running. Stop it first.".to_string());
+        }
+        if self.fence.is_active() || matches!(self.fence.current_phase(), RunPhase::Stopping { .. }) {
+            return Err("A Cline agent run is already in progress. Stop it first.".to_string());
+        }
+        Self::validate_project_dir(project_dir).map_err(|e| e.to_string())?;
+        let active_run_id = run_id.unwrap_or_else(RunId::generate);
+        self.fence.start_run(active_run_id.clone())?;
+        let sess_id = session_id.unwrap_or("none");
+        self.fence.activate_run(&active_run_id, sess_id)?;
+        Ok(active_run_id)
+    }
+}
+
+// ── Tauri Commands ────────────────────────────────────────────────────────────
+
+/// Starts a Cline ACP agent run.
+///
+/// Guards against cross-backend (Ollama) and same-backend concurrent execution.
+#[tauri::command]
+pub async fn start_cline_agent<R: tauri::Runtime>(
+    _app: tauri::AppHandle<R>,
+    state: tauri::State<'_, ClineAgentState>,
+    ollama_state: tauri::State<'_, crate::core::ollama_agent::OllamaAgentState>,
+    project_dir: String,
+    prompt: String,
+    model: Option<String>,
+    run_id: Option<String>,
+    session_id: Option<String>,
+) -> Result<String, String> {
+    let ollama_is_running = {
+        let running = ollama_state.running.lock().await;
+        *running
+    };
+    let project_path = std::path::PathBuf::from(&project_dir);
+    let run = run_id.map(RunId::new);
+
+    let active_run_id = state
+        .try_start_run(ollama_is_running, &project_path, run, session_id.as_deref())
+        .await?;
+
+    let bound_model = model.unwrap_or_else(|| SessionModelConfig::default().model_id);
+    log::info!(
+        "[ClineAgent] Started run {} for project {} with model {} (session: {})",
+        active_run_id,
+        project_dir,
+        bound_model,
+        session_id.as_deref().unwrap_or("none")
+    );
+
+    Ok(active_run_id.to_string())
+}
+
+/// Stops an active Cline ACP agent run.
+///
+/// Targets the specified run_id or the currently active run.
+#[tauri::command]
+pub async fn stop_cline_agent(
+    state: tauri::State<'_, ClineAgentState>,
+    run_id: Option<String>,
+) -> Result<(), String> {
+    let target = run_id.map(RunId::new);
+    state
+        .stop_active_run(target.as_ref(), "User requested stop")
+        .map(|_| ())
 }
 
 #[cfg(test)]
@@ -1518,6 +1593,71 @@ mod tests {
             }
             other => panic!("Expected Done, got {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn test_try_start_run_concurrency_rejected() {
+        let state = ClineAgentState::default();
+        #[cfg(target_os = "windows")]
+        let valid_path = PathBuf::from("C:\\test\\workspace");
+        #[cfg(not(target_os = "windows"))]
+        let valid_path = PathBuf::from("/test/workspace");
+
+        // 1. Cross-backend concurrency rejection when Ollama is running
+        let res = state
+            .try_start_run(true, &valid_path, None, None)
+            .await;
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("Ollama agent is already running"));
+
+        // 2. Successful start when Ollama is not running
+        let run1 = state
+            .try_start_run(false, &valid_path, Some(RunId::new("run-cline-1")), Some("sess-1"))
+            .await;
+        assert!(run1.is_ok());
+        assert_eq!(run1.unwrap().as_str(), "run-cline-1");
+
+        // 3. Same-backend concurrency rejection while run 1 is active
+        let run2 = state
+            .try_start_run(false, &valid_path, Some(RunId::new("run-cline-2")), None)
+            .await;
+        assert!(run2.is_err());
+        assert!(run2.unwrap_err().contains("Cline agent run is already in progress"));
+    }
+
+    #[tokio::test]
+    async fn test_stop_active_run_targeting_and_mismatch() {
+        let state = ClineAgentState::default();
+        #[cfg(target_os = "windows")]
+        let valid_path = PathBuf::from("C:\\test\\workspace");
+        #[cfg(not(target_os = "windows"))]
+        let valid_path = PathBuf::from("/test/workspace");
+
+        let run_id = state
+            .try_start_run(false, &valid_path, Some(RunId::new("run-stop-target")), Some("sess-stop"))
+            .await
+            .unwrap();
+
+        // 1. Stop targeting mismatched run ID fails
+        let wrong_target = RunId::new("run-other");
+        let err = state.stop_active_run(Some(&wrong_target), "Wrong stop");
+        assert!(err.is_err());
+        assert!(err.unwrap_err().contains("Run ID mismatch"));
+
+        // 2. Stop targeting matching run ID succeeds
+        let ok = state.stop_active_run(Some(&run_id), "Clean stop");
+        assert!(ok.is_ok());
+        match ok.unwrap() {
+            RunTerminalOutcome::Cancelled { reason } => {
+                assert_eq!(reason.as_deref(), Some("Clean stop"));
+            }
+            other => panic!("Expected Cancelled, got {:?}", other),
+        }
+
+        // 3. Stop after terminal outcome fails
+        let double_stop = state.stop_active_run(Some(&run_id), "Late stop");
+        assert!(double_stop.is_err());
+        assert!(double_stop.unwrap_err().contains("already terminated"));
     }
 }
 

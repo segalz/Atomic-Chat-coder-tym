@@ -3106,6 +3106,7 @@ pub async fn start_ollama_agent<R: Runtime>(
     app: AppHandle<R>,
     state: State<'_, OllamaAgentState>,
     loop_supervision: State<'_, LoopSupervisionState>,
+    cline_state: State<'_, crate::core::cline_agent::ClineAgentState>,
     project_dir: String,
     prompt: String,
     model: String,
@@ -3117,6 +3118,16 @@ pub async fn start_ollama_agent<R: Runtime>(
     max_runs: Option<u32>,
     loop_id: Option<String>,
 ) -> Result<(), String> {
+    // Guard: cross-backend check - ensure Cline agent is not running
+    if cline_state.fence().is_active()
+        || matches!(
+            cline_state.fence().current_phase(),
+            crate::core::cline_agent::RunPhase::Stopping { .. }
+        )
+    {
+        return Err("A Cline agent is already running. Stop it first.".to_string());
+    }
+
     // Guard: only one agent at a time
     {
         let mut running = state.running.lock().await;

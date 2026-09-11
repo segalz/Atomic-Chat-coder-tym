@@ -5,10 +5,10 @@
 - Target: `/Users/zvisegal/devlope/Atomic-Chat-coder-tym`
 - Plan: `docs/msp-plan/cline-acp/instructions.md`
 - Created: 2026-09-10
-- Overall status: IN_PROGRESS — stage 08 complete; stopped at the one-stage boundary
-- Completed: **8 / 22**
-- Current stage: **none (08 DONE)**
-- Next eligible stage: **09** — Wire backend-specific routing (Medium, independent review required)
+- Overall status: IN_PROGRESS — stage 09 complete; stopped at the one-stage boundary
+- Completed: **9 / 22**
+- Current stage: **none (09 DONE)**
+- Next eligible stage: **10** — Add provider-aware model picker (Low, optional independent review)
 - Blocking issue: none
 - Authorization: planning documents only; explain exact source edits and obtain approval as required by instructions.md.
 - Planning snapshot branch: `feat/windows-cline-cli` (branched from `codex/ollama-agent-migration`); re-verify on every run.
@@ -32,7 +32,7 @@ Only the first non-DONE stage may be selected. A blocked or approval-waiting sta
 | 06 | Implement cancellation and cleanup | High | Required | DONE |
 | 07 | Implement sessions and explicit model binding | Medium | Required | DONE |
 | 08 | Normalize streamed events | Medium | Required | DONE |
-| 09 | Wire backend-specific routing | Medium | Required | PENDING |
+| 09 | Wire backend-specific routing | Medium | Required | DONE |
 | 10 | Add provider-aware model picker | Low | Optional | PENDING |
 | 11 | Implement permission request lifecycle | High | Required | PENDING |
 | 12 | Integrate edit and command presentation | High | Required | PENDING |
@@ -357,6 +357,43 @@ Only the first non-DONE stage may be selected. A blocked or approval-waiting sta
 - Final stage status: DONE
 - Completed count: 8 / 22
 - Next eligible stage: 09 — Wire backend-specific routing (Medium, independent review required).
+
+### Stage 09 — Wire backend-specific routing (2026-09-11)
+
+- Stage / attempt / date: Stage 09 / attempt 1 / 2026-09-11
+- Checkout: absolute root, branch, HEAD: `c:\Develop\Atomic-Chat-coder-tym`, `feat/windows-cline-cli`, `975daba`
+- Starting dirty files and preservation: clean working tree after Stage 08 commit `975daba`.
+- Approved scope and exact files explained to user: Stage 09: Wire backend-specific routing. Files: `web-app/src/containers/CodingAgentPanel/backend-router.ts`, `web-app/src/containers/CodingAgentPanel/backend-router.test.ts`, `web-app/src/containers/CodingAgentPanel/index.tsx`, `src-tauri/src/core/cline_agent.rs`, `src-tauri/src/core/ollama_agent.rs`, `src-tauri/src/lib.rs`.
+- Changes or read-only findings:
+  - Created `backend-router.ts` providing backend routing abstraction: `routeSendAgentPrompt`, `routeStopAgent`, `isOllamaHealthCheckRequired`, `isOllamaRestartRequired`, and `isSendBlockedByOllamaError`.
+  - Enforced cross-backend and same-backend concurrency prevention in both TypeScript (`sendPrompt`, `routeSendAgentPrompt`) and Rust (`try_start_run`, `start_cline_agent`, `start_ollama_agent`).
+  - Guaranteed Stop action targets the active run's backend (`cline-acp`, `direct-ollama`, or legacy) even if the UI selection dropdown changed during execution.
+  - Isolated Ollama-specific health checks, model listing/capabilities, VRAM display, model downloads, restart-on-finish, and error banner strictly to `direct-ollama`. When `agentBackend === 'cline-acp'`, no Ollama API is called, `<HardwareSetup>` is omitted, and prompt textarea/send button are never blocked by Ollama errors.
+  - Preserved backward compatibility for legacy `code-agent` routing (`spawn_code_agent`, `stop_code_agent`).
+  - Registered `start_cline_agent` and `stop_cline_agent` in Tauri command registry (`src-tauri/src/lib.rs`), and added `ClineAgentState::default()` to managed state.
+  - Added comprehensive test suites in `backend-router.test.ts` (12 tests) and `cline_agent.rs` (3 unit tests).
+- Acceptance criteria verified:
+  1. Cline routing with Ollama unavailable: Verified with mocks in `backend-router.test.ts` that Cline send succeeds without calling Ollama APIs, and UI textarea/send button remain enabled when Ollama is offline.
+  2. Stop targets active run backend: Verified in `backend-router.test.ts` and `cline_agent.rs` that stopping targets the active run backend even if UI selection changed.
+  3. Cross-backend concurrency prevention: Enforced in `sendPrompt` (early guard), `routeSendAgentPrompt` (TS error), and `try_start_run` / `start_ollama_agent` (Rust error).
+  4. Ollama lifecycle gating: Gated mount capabilities check, sidebar `<HardwareSetup>`, restart-on-finish, header restart button, error banner, and textarea disabled state on `direct-ollama`.
+  5. Legacy routing preservation: Preserved `spawn_code_agent` and `stop_code_agent`.
+  6. Tauri command and state registration: `start_cline_agent` and `stop_cline_agent` registered in `lib.rs`, `ClineAgentState` managed.
+  7. Test coverage and type safety: 58/58 tests pass in `CodingAgentPanel/`, `tsc --noEmit` 0 errors.
+- Test commands / outcomes / relevant output:
+  - `corepack yarn workspace @janhq/web-app test run src/containers/CodingAgentPanel/`: PASSED (58/58 tests pass).
+  - `corepack yarn workspace @janhq/web-app tsc --noEmit`: PASSED (0 errors).
+- Skipped checks and reason: Full Tauri desktop packaging deferred to Stage 21 per contract.
+- Reviewer name/tool and availability result: Independent Subagent Reviewer (`0857a648-196e-4d72-a551-d621e9f7324d`).
+- Review round 1 verdict and findings: CHANGES_REQUIRED. Defect 1: Concurrency rejection in `sendPrompt` clearing active run state in catch block. Defect 2: Unconditional Ollama mount calls and `<HardwareSetup>` rendering in Cline ACP. Defect 3: Textarea and error banner blocked by Ollama errors in Cline ACP.
+- Findings reproduced / rejected with evidence: All three findings confirmed against requirements and fixed directly.
+- Fixes and rerun results: Added early guard in `sendPrompt`, gated `<HardwareSetup>` and mount calls, gated textarea disabled/placeholder and error banner. All 58 Vitest tests and tsc pass.
+- Closure review verdict (High always; Medium after fixes): PASS (Round 2).
+- Remaining issues / blocker / accepted limitation: None.
+- Final diff self-check: Verified git diff for all modified files.
+- Final stage status: DONE
+- Completed count: 9 / 22
+- Next eligible stage: 10 — Add provider-aware model picker (Low, optional independent review).
 
 Append one entry per execution/review attempt; retain earlier entries when resuming a stage.
 
