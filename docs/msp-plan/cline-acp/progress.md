@@ -5,10 +5,10 @@
 - Target: `/Users/zvisegal/devlope/Atomic-Chat-coder-tym`
 - Plan: `docs/msp-plan/cline-acp/instructions.md`
 - Created: 2026-09-10
-- Overall status: IN_PROGRESS — stage 05 complete; stopped at the one-stage boundary
-- Completed: **5 / 22**
-- Current stage: none (05 DONE)
-- Next eligible stage: **06** — Implement cancellation and cleanup (High, independent review required)
+- Overall status: IN_PROGRESS — stage 06 complete; stopped at the one-stage boundary
+- Completed: **6 / 22**
+- Current stage: none (06 DONE)
+- Next eligible stage: **07** — Implement sessions and explicit model binding (Medium, independent review required)
 - Blocking issue: none
 - Authorization: planning documents only; explain exact source edits and obtain approval as required by instructions.md.
 - Planning snapshot branch: `feat/windows-cline-cli` (branched from `codex/ollama-agent-migration`); re-verify on every run.
@@ -29,7 +29,7 @@ Only the first non-DONE stage may be selected. A blocked or approval-waiting sta
 | 03 | Freeze integration contract | Medium | Required | DONE |
 | 04 | Add backend and model identity types | Low | Optional | DONE |
 | 05 | Implement ACP transport | High | Required | DONE |
-| 06 | Implement cancellation and cleanup | High | Required | PENDING |
+| 06 | Implement cancellation and cleanup | High | Required | DONE |
 | 07 | Implement sessions and explicit model binding | Medium | Required | PENDING |
 | 08 | Normalize streamed events | Medium | Required | PENDING |
 | 09 | Wire backend-specific routing | Medium | Required | PENDING |
@@ -235,6 +235,48 @@ Only the first non-DONE stage may be selected. A blocked or approval-waiting sta
 - Final stage status: DONE
 - Completed count: 5 / 22
 - Next eligible stage: 06 — Implement cancellation and cleanup (High, independent review required).
+
+### Stage 06 — Implement cancellation and cleanup (2026-09-11)
+
+- Stage / attempt / date: Stage 06 / attempt 1 / 2026-09-11
+- Checkout: absolute root, branch, HEAD: `C:\Develop\Atomic-Chat-coder-tym`, `feat/windows-cline-cli`, `cd8e770a923085860fcb2ddd1585f0d7f81b6fab`
+- Starting dirty files and preservation: clean tree upon stage start; Stage 05 committed cleanly.
+- Approved scope and exact files explained to user: User explicitly reviewed and approved Stage 06 implementation plan, delegating development to Cline CLI in micro-steps under continuous supervision.
+- Changes or read-only findings:
+  - Created `src-tauri/src/core/cline_agent.rs`:
+    - `RunId`: Monotonic, timestamped execution identifier for strict run-fencing and event isolation.
+    - `RunTerminalOutcome`: Strongly-typed terminal outcomes (`Completed { stop_reason }`, `Cancelled { reason }`, `TimedOut { duration_ms }`, `Failed { error }`).
+    - `RunPhase`: State machine (`Idle`, `Starting`, `Active`, `Stopping`, `Terminated`).
+    - `RunFence`: Thread-safe event fence enforcing run isolation, dropping late messages arriving after stop/termination or from stale runs, and guaranteeing **exactly one terminal outcome** is ever recorded per run.
+    - `OwnedChildProcess`: Child process lifecycle manager tracking owned OS PID; platform-specific process tree termination (`taskkill /F /T /PID` on Windows with `CREATE_NO_WINDOW`, process group SIGKILL on Unix with reserved PID safety `pid <= 1`); `Drop` guard preventing orphan child processes (`node.exe` under `cline.cmd`).
+    - `TimeoutConfig`: Configurable timeouts (`startup_timeout` 15s, `turn_timeout` 600s, `stop_grace_period` 3s).
+    - `ClineAgentState`: Shared state managing child process registration/clear/exit lifecycle, in-flight cancellation tokens (`CancellationToken`), graceful stop escalation, crash diagnostics capturing stderr tail, timeout escalation, and application shutdown cleanup.
+    - 16 comprehensive unit tests covering all lifecycle transitions, fences, drop semantics, error branches, and edge cases.
+  - Exported desktop-only module `cline_agent` in `src-tauri/src/core/mod.rs`.
+- Acceptance criteria verified:
+  - Stop during startup: immediately aborts, marks run as `Cancelled`, and terminates process.
+  - Stop during streaming: transitions to `Stopping`, cancels in-flight async tokens, force-kills process tree, and records `Cancelled`.
+  - Late messages: events from stale runs or arriving during `Stopping` / `Terminated` return `false` from `validate_event`.
+  - Exactly one terminal outcome: verified under concurrent / duplicate terminal recording attempts.
+  - Crash: unexpected child exit captures exit code and stderr tail diagnostics, recording `Failed` (or `Cancelled` if stop was already requested).
+  - Timeout: expires, force-kills child process, and records `TimedOut`.
+  - Process ownership & cleanup: kills only owned PIDs, kills entire tree on Windows (`taskkill /F /T`), rejects reserved PIDs (`pid <= 1`), and leaves no orphan children.
+  - CodingAgentPanel test suite: 37/37 tests pass.
+  - TypeScript typecheck: 0 errors.
+- Test commands / outcomes / relevant output:
+  - `corepack yarn workspace @janhq/web-app test run src/containers/CodingAgentPanel/`: PASSED (5 test files, 37/37 tests passed).
+  - `corepack yarn workspace @janhq/web-app tsc --noEmit`: PASSED (0 errors).
+- Skipped checks and reason: Full Tauri desktop build deferred to Stage 21 per contract.
+- Reviewer name/tool and availability result: Independent Subagent Reviewer (`bc6145e1-f8e7-41af-a8d1-ea1182dc7a9b`).
+- Review round 1 verdict and findings: CHANGES_REQUIRED. Five findings: `stop_active_run` masked terminated outcomes with `Cancelled`; missing `terminal_outcome` accessors; `clear_child` triggered drop kill on dead child; `kill_process_tree` allowed `pid == 1` causing Unix `kill(-1, SIGKILL)` broadcast; missing tests for crash during stopping, stopping terminated runs, and child exit lifecycle.
+- Findings reproduced / rejected with evidence: All five findings reproduced and resolved in `src-tauri/src/core/cline_agent.rs`.
+- Fixes and rerun results: Added phase check to `stop_active_run`, added `terminal_outcome` accessors, added `mark_child_exited` and updated `clear_child`, guarded `pid <= 1` in `kill_process_tree`, and added 5 new unit tests (16 tests total).
+- Closure review verdict (High always; Medium after fixes): PASS on Round 2 from independent reviewer.
+- Remaining issues / blocker / accepted limitation: None.
+- Final diff self-check: Checked git status and diff; only targeted Stage 06 files and tracker updated.
+- Final stage status: DONE
+- Completed count: 6 / 22
+- Next eligible stage: 07 — Implement sessions and explicit model binding (Medium, independent review required).
 
 Append one entry per execution/review attempt; retain earlier entries when resuming a stage.
 

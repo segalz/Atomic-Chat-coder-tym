@@ -4,6 +4,8 @@ pub mod cli;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub mod cline_acp_transport;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub mod cline_agent;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub mod code_agent;
 pub mod downloads;
 pub mod extensions;
