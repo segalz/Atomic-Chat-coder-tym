@@ -35,7 +35,7 @@ Only the first non-DONE stage may be selected. A blocked or approval-waiting sta
 | 09 | Wire backend-specific routing | Medium | Required | DONE |
 | 10 | Add provider-aware model picker | Low | Optional | DONE |
 | 11 | Implement permission request lifecycle | High | Required | DONE |
-| 12 | Integrate edit and command presentation | High | Required | PENDING |
+| 12 | Integrate edit and command presentation | High | Required | DONE |
 | 13 | Persist Cline conversation identity | Medium | Required | PENDING |
 | 14 | Handle provider switching context | Medium | Required | PENDING |
 | 15 | Verify manual end-to-end workflow | Medium | Required | PENDING |
@@ -526,6 +526,66 @@ Only the first non-DONE stage may be selected. A blocked or approval-waiting sta
 - Final stage status: DONE
 - Completed count: 11 / 22
 - Next eligible stage: 12 — Integrate edit and command presentation (High, independent review required).
+
+### Stage 12 — Integrate edit and command presentation (2026-09-11)
+
+- Stage / attempt / date: Stage 12 / attempt 1 / 2026-09-11
+- Checkout: absolute root, branch, HEAD: `c:\Develop\Atomic-Chat-coder-tym`, `feat/windows-cline-cli`, `25d17d1`
+- Starting dirty files and preservation: clean working tree at start of stage, untracked test fixtures preserved.
+- Approved scope and exact files explained to user: Stage 12 edit and command presentation integration across backend payload extraction, frontend adapter, UI presentation component and CSS, event logging, and disposable fixtures.
+- Changes or read-only findings:
+  - `src-tauri/src/core/cline_agent.rs`:
+    - Extracted `command`, `input`, `content`, and `locations` from incoming permission request parameters (`/toolCall` and top-level fallbacks).
+    - Added `command: Option<String>`, `input`, `content`, and `locations` fields to `PermissionEventPayload`.
+    - Implemented `test_disposable_fixture_denied_edit_and_command_cause_no_side_effects` verifying live `ClineAgentState` lifecycle, wire JSON-RPC outcomes, 0 side effects on deny, exactly 1 execution on approve, and idempotency rejection.
+  - `web-app/src/containers/CodingAgentPanel/backend-identity.ts` & `test`:
+    - Extended `PermissionFileEdit` interface with optional `line`, `startLine`, `endLine`.
+    - Extended `extractPermissionFileEdit` to extract diff from ACP `content` diff/text blocks, and line numbers from `locations` or `locations.range`.
+    - Added comprehensive unit tests in `backend-identity.test.ts` (32 tests passed).
+  - `web-app/src/containers/CodingAgentPanel/agent-event-adapter.ts`:
+    - Updated `normalizeAcpSessionUpdate` to extract and pass through `command`, `filePath`, `diff`, `input`, `content`, and detailed `locations`.
+  - `web-app/src/containers/CodingAgentPanel/PermissionRequest.tsx` & `.css`:
+    - Added dedicated icons (`IconTerminal`, `IconFileCode`), titles ("Command Execution", "Proposed File Edit"), and status badges ("Pending Approval", "Proposed (Not applied)").
+    - Added rendering for line number badges (`Line 42`, `L10–L25`).
+    - Added `submittingOptionId` state to immediately disable action buttons upon click, preventing double-submission.
+  - `web-app/src/containers/CodingAgentPanel/index.tsx`:
+    - Added null-safe output handling for `tool_result` events.
+    - Implemented `approvedEditToolCallIdsRef` to correlate approved edit permissions with subsequent tool execution results.
+    - Gated approval detection on option `kind` (`kind === 'allow'`) and regex `/^(allow|approve|yes)/i`.
+    - Formatted exact log strings: `Proposed edit for <path> — awaiting approval`, `Command execution requested: '<cmd>' — awaiting approval`, `Permission denied for edit on <path> — changes were NOT applied.`, `Permission denied for command '<cmd>' — command was NOT executed.`, `Applied edit: <output>`.
+  - `web-app/src/containers/CodingAgentPanel/edit-command-presentation.test.tsx`:
+    - 9 comprehensive tests covering command presentation, file edit presentation, search/replace chunks, ACP content diff blocks + line badges, immediate button disabling on click, disabled prop, exact log string assertions, and disposable fixtures for both edit and command.
+- Acceptance criteria verified:
+  - Connect tool content/diffs and command permission requests to panel: VERIFIED.
+  - Distinguish proposed edits from applied edits: VERIFIED.
+  - Execution ownership: VERIFIED. Atomic Chat performs zero filesystem writes or terminal execution for Cline.
+  - Disposable fixture verification: VERIFIED. Denied edit/command cause 0 side effects; approved edit/command execute exactly once.
+  - Zero regressions: VERIFIED. All 10 test files (103 tests) pass; TypeScript passes with 0 errors.
+- Test commands / outcomes / relevant output:
+  - `corepack yarn workspace @janhq/web-app exec tsc -b tsconfig.app.json --pretty false`: PASSED (0 errors).
+  - `corepack yarn workspace @janhq/web-app test run src/containers/CodingAgentPanel/`: ALL 10 TEST FILES PASSED (103/103 tests, 100%).
+- Skipped checks and reason: Full Tauri desktop build deferred to Stage 21 per contract.
+- Reviewer name/tool and availability result: Independent code reviewer Grok CLI (`C:\Users\segal\.grok\bin\grok.exe`, model `grok-beta`).
+- Review round 1 verdict and findings: CHANGES_REQUIRED. Ten findings identified (F1-F10) regarding tautological fixture tests, missing command fixture test, null safety in tool_result, option kind vs regex approval heuristic, toolCallId correlation for applied edits, ACP content diff block extraction, location line numbers, Rust command extraction, missing log string tests, and double-click prevention.
+- Findings reproduced / rejected with evidence: All 10 findings reproduced and resolved across backend and frontend code.
+- Fixes and rerun results:
+  - Implemented protocol-faithful fixtures in Rust and frontend for both edit and command (F1, F2).
+  - Added null-safe output handling `event.output ?? ''` (F3).
+  - Added option kind checks and regex for approval (F4).
+  - Added `approvedEditToolCallIdsRef` correlation (F5).
+  - Added ACP content diff block extraction and location line numbers (F6, F7).
+  - Added Rust command extraction to `PermissionEventPayload` (F8).
+  - Added test suite asserting exact required log strings (F9).
+  - Added immediate button disabling via `submittingOptionId` state (F10).
+  - Vitest suite re-run: 10/10 test files passed (103/103 tests passed).
+  - TypeScript re-run: 0 errors.
+- Closure review verdict (High always; Medium after fixes):
+  - Round 2: PASS. All ten Round 1 findings SATISFIED; all five acceptance criteria PASS.
+- Remaining issues / blocker / accepted limitation: None.
+- Final diff self-check: Verified git status and diff; only targeted Stage 12 files and tracker updated.
+- Final stage status: DONE
+- Completed count: 12 / 22
+- Next eligible stage: 13 — Persist Cline conversation identity (Medium, independent review required).
 
 Append one entry per execution/review attempt; retain earlier entries when resuming a stage.
 

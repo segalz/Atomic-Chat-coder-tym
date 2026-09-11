@@ -1,4 +1,4 @@
-﻿import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import {
   CLINE_ACP_AGENT_NAME,
   CLINE_ACP_BACKEND,
@@ -8,6 +8,8 @@ import {
   CLINE_DEFAULT_PROVIDER_ID,
   CODING_AGENT_BACKEND_STORAGE_KEY,
   DEFAULT_CODING_AGENT_BACKEND,
+  extractPermissionCommand,
+  extractPermissionFileEdit,
   getBackendCapabilities,
   getInitialCodingAgentBackend,
   isCodingAgentBackend,
@@ -139,6 +141,151 @@ describe('backend-identity (Stage 04)', () => {
       expect(caps.loadSession).toBe(true)
       expect(caps.cancel).toBe(true)
       expect(caps.requestPermissions).toBe(true)
+    })
+  })
+  describe('extractPermissionCommand & extractPermissionFileEdit', () => {
+    describe('extractPermissionCommand', () => {
+      it('extracts the command from the top-level command field', () => {
+        expect(extractPermissionCommand({ command: 'npm test' })).toBe('npm test')
+      })
+
+      it('extracts the command from input.command and input.cmd', () => {
+        expect(extractPermissionCommand({ input: { command: 'pnpm lint' } })).toBe('pnpm lint')
+        expect(extractPermissionCommand({ input: { cmd: 'cargo build' } })).toBe('cargo build')
+        expect(extractPermissionCommand({ input: { command: '', cmd: 'fallback' } })).toBe('fallback')
+      })
+
+      it('prefers the top-level command over input fields', () => {
+        expect(
+          extractPermissionCommand({ command: 'top-level', input: { command: 'input-level' } })
+        ).toBe('top-level')
+      })
+
+      it('trims surrounding whitespace from the command', () => {
+        expect(extractPermissionCommand({ command: '   npm run build   ' })).toBe('npm run build')
+        expect(extractPermissionCommand({ input: { cmd: '\tmake all\n' } })).toBe('make all')
+      })
+
+      it('returns null when no command is present', () => {
+        expect(extractPermissionCommand({})).toBe(null)
+        expect(extractPermissionCommand({ input: { foo: 'bar' } })).toBe(null)
+      })
+
+      it('returns null when the command is empty or whitespace-only', () => {
+        expect(extractPermissionCommand({ command: '' })).toBe(null)
+        expect(extractPermissionCommand({ command: '   ' })).toBe(null)
+        expect(extractPermissionCommand({ input: { command: '' } })).toBe(null)
+        expect(extractPermissionCommand({ input: { cmd: '' } })).toBe(null)
+      })
+    })
+
+    describe('extractPermissionFileEdit', () => {
+      it('extracts the path from filePath and the diff from diff', () => {
+        expect(
+          extractPermissionFileEdit({ filePath: 'src/app.ts', diff: '@@ -1,2 +1,3 @@' })
+        ).toEqual({ path: 'src/app.ts', diff: '@@ -1,2 +1,3 @@' })
+      })
+
+      it('extracts the path from input.path and input.filePath', () => {
+        expect(extractPermissionFileEdit({ input: { path: 'src/b.ts' } })).toEqual({
+          path: 'src/b.ts',
+        })
+        expect(extractPermissionFileEdit({ input: { filePath: 'src/c.ts' } })).toEqual({
+          path: 'src/c.ts',
+        })
+      })
+
+      it('extracts the path from the first usable locations entry', () => {
+        expect(
+          extractPermissionFileEdit({
+            locations: [
+              { path: 'src/first.ts' },
+              { path: 'src/second.ts' },
+            ],
+          })
+        ).toEqual({ path: 'src/first.ts' })
+      })
+
+      it('extracts the diff from input.diff and input.newContent', () => {
+        expect(
+          extractPermissionFileEdit({ input: { path: 'src/d.ts', diff: '-old\n+new' } })
+        ).toEqual({ path: 'src/d.ts', diff: '-old\n+new' })
+        expect(
+          extractPermissionFileEdit({ input: { path: 'src/e.ts', newContent: 'export const x = 1' } })
+        ).toEqual({ path: 'src/e.ts', diff: 'export const x = 1' })
+      })
+
+      it('synthesizes the edit body from input.search and input.replace', () => {
+        expect(
+          extractPermissionFileEdit({
+            input: { path: 'src/f.ts', search: 'const old', replace: 'const next' },
+          })
+        ).toEqual({ path: 'src/f.ts', search: 'const old', replace: 'const next' })
+      })
+
+      it('extracts diff from ACP content blocks when top-level or input diff is absent', () => {
+        expect(
+          extractPermissionFileEdit({
+            filePath: 'src/content-diff.ts',
+            content: [{ type: 'diff', diff: '@@ -10,3 +10,4 @@' }],
+          })
+        ).toEqual({ path: 'src/content-diff.ts', diff: '@@ -10,3 +10,4 @@' })
+
+        expect(
+          extractPermissionFileEdit({
+            filePath: 'src/content-patch.ts',
+            content: [{ type: 'text', text: '--- a/src/content-patch.ts\n+++ b/src/content-patch.ts\n@@ -1 +1 @@' }],
+          })
+        ).toEqual({
+          path: 'src/content-patch.ts',
+          diff: '--- a/src/content-patch.ts\n+++ b/src/content-patch.ts\n@@ -1 +1 @@',
+        })
+      })
+
+      it('extracts line and range information from locations', () => {
+        expect(
+          extractPermissionFileEdit({
+            locations: [{ path: 'src/line-test.ts', line: 42 }],
+          })
+        ).toEqual({ path: 'src/line-test.ts', line: 42 })
+
+        expect(
+          extractPermissionFileEdit({
+            locations: [{ path: 'src/range-test.ts', startLine: 10, endLine: 25 }],
+          })
+        ).toEqual({ path: 'src/range-test.ts', startLine: 10, endLine: 25 })
+
+        expect(
+          extractPermissionFileEdit({
+            locations: [
+              {
+                path: 'src/nested-range.ts',
+                range: { start: { line: 5 }, end: { line: 15 } },
+              },
+            ],
+          })
+        ).toEqual({ path: 'src/nested-range.ts', startLine: 5, endLine: 15 })
+      })
+
+      it('keeps the path when no diff body is available', () => {
+        expect(extractPermissionFileEdit({ filePath: 'src/standalone.ts' })).toEqual({
+          path: 'src/standalone.ts',
+        })
+      })
+
+      it('trims whitespace from resolved paths', () => {
+        expect(extractPermissionFileEdit({ filePath: '  src/trim.ts  ' })).toEqual({
+          path: 'src/trim.ts',
+        })
+      })
+
+      it('returns null when neither a path nor a diff can be resolved', () => {
+        expect(extractPermissionFileEdit({})).toBe(null)
+        expect(extractPermissionFileEdit({ input: { diff: 'diff body without a target file' } })).toBe(
+          null
+        )
+        expect(extractPermissionFileEdit({ locations: [] })).toBe(null)
+      })
     })
   })
 })

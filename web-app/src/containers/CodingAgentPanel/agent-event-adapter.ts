@@ -3,6 +3,10 @@ import type {
   PermissionOption,
   AcpPermissionRequestPayload,
 } from './backend-identity'
+import {
+  extractPermissionCommand,
+  extractPermissionFileEdit,
+} from './backend-identity'
 
 export {
   type CodingAgentBackend,
@@ -24,6 +28,9 @@ export {
   type PermissionOption,
   type PermissionOutcome,
   type AcpPermissionRequestPayload,
+  type PermissionFileEdit,
+  extractPermissionCommand,
+  extractPermissionFileEdit,
 } from './backend-identity'
 
 export interface TextDeltaPayload {
@@ -108,6 +115,12 @@ export type NormalizedAgentEvent =
       title?: string
       kind?: string
       options: PermissionOption[]
+      input?: Record<string, unknown>
+      content?: unknown[]
+      locations?: Array<{ path: string; line?: number }>
+      command?: string
+      filePath?: string
+      diff?: string
     } & AcpEventContext)
   | ({ type: 'done'; success: boolean; error?: string | null } & AcpEventContext)
   | ({ type: 'error'; message: string } & AcpEventContext)
@@ -206,7 +219,12 @@ export function normalizeAcpPermissionRequest(
   payload: AcpPermissionRequestPayload,
   context?: AcpEventContext
 ): NormalizedAgentEvent {
-  return {
+  const command = extractPermissionCommand(payload)
+  const fileEdit = extractPermissionFileEdit(payload)
+  const filePath = fileEdit?.path
+  const diff = fileEdit?.diff ?? payload.diff
+
+  const event: NormalizedAgentEvent = {
     type: 'permission_request',
     runId: payload.runId || context?.runId || '',
     sessionId: payload.sessionId || context?.sessionId || '',
@@ -217,6 +235,15 @@ export function normalizeAcpPermissionRequest(
     options: payload.options,
     ...context,
   }
+
+  if (payload.input && Object.keys(payload.input).length > 0) event.input = payload.input
+  if (payload.content && payload.content.length > 0) event.content = payload.content
+  if (payload.locations && payload.locations.length > 0) event.locations = payload.locations
+  if (command) event.command = command
+  if (filePath) event.filePath = filePath
+  if (diff) event.diff = diff
+
+  return event
 }
 
 /**
@@ -322,6 +349,28 @@ export function normalizeAcpSessionUpdate(
       }
     }).filter((o) => Boolean(o.optionId))
 
+    // Extract tool-call details from `target` or `target.toolCall`.
+    const rawInput = toolCall.input ?? target.input
+    const input = rawInput ? toRecord(rawInput) : undefined
+    const rawContent = toolCall.content ?? target.content
+    const content = Array.isArray(rawContent) ? rawContent : undefined
+    const rawLocations = toolCall.locations ?? target.locations
+    const locations = Array.isArray(rawLocations)
+      ? (rawLocations as Array<Record<string, unknown>>).map((loc: Record<string, unknown>) => ({
+          path: String(loc.path ?? ''),
+          line: typeof loc.line === 'number' ? loc.line : undefined,
+          startLine: typeof loc.startLine === 'number' ? loc.startLine : undefined,
+          endLine: typeof loc.endLine === 'number' ? loc.endLine : undefined,
+        })).filter((loc) => loc.path.length > 0)
+      : undefined
+
+    const rawCommand = toolCall.command ?? target.command
+    const command = typeof rawCommand === 'string' ? rawCommand : undefined
+    const rawFilePath = toolCall.filePath ?? target.filePath
+    const filePath = typeof rawFilePath === 'string' ? rawFilePath : undefined
+    const rawDiff = toolCall.diff ?? target.diff
+    const diff = typeof rawDiff === 'string' ? rawDiff : undefined
+
     return [
       normalizeAcpPermissionRequest(
         {
@@ -332,6 +381,12 @@ export function normalizeAcpSessionUpdate(
           title: typeof toolCall.title === 'string' ? toolCall.title : (typeof target.title === 'string' ? target.title : undefined),
           kind: typeof toolCall.kind === 'string' ? toolCall.kind : (typeof target.kind === 'string' ? target.kind : undefined),
           options,
+          command,
+          filePath,
+          diff,
+          input,
+          content,
+          locations,
         },
         context
       ),

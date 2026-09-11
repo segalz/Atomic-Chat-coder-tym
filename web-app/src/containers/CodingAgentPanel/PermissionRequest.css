@@ -116,3 +116,121 @@
   background: var(--accent);
   color: var(--accent-foreground);
 }
+
+.permission-request-banner__icon--command {
+  color: oklch(0.65 0.18 240);
+}
+
+.permission-request-banner__icon--edit {
+  color: oklch(0.67 0.14 65);
+}
+
+.permission-request-banner__status-badge {
+  flex: none;
+  font-size: 9px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 4px;
+  letter-spacing: 0.02em;
+}
+
+.permission-request-banner__status-badge.proposed {
+  background: color-mix(in oklab, oklch(0.67 0.14 65) 20%, transparent);
+  color: oklch(0.75 0.14 65);
+  border: 1px solid color-mix(in oklab, oklch(0.67 0.14 65) 40%, transparent);
+}
+
+.permission-request-banner__status-badge.pending {
+  background: color-mix(in oklab, oklch(0.65 0.18 240) 20%, transparent);
+  color: oklch(0.75 0.18 240);
+  border: 1px solid color-mix(in oklab, oklch(0.65 0.18 240) 40%, transparent);
+}
+
+.permission-request-banner__command-box,
+.permission-request-banner__edit-box {
+  margin-top: 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: color-mix(in oklab, var(--background) 95%, black);
+  overflow: hidden;
+}
+
+.permission-request-banner__command-header,
+.permission-request-banner__file-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  font-size: 10px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in oklab, var(--muted) 50%, transparent);
+  color: var(--muted-foreground);
+}
+
+.permission-request-banner__file-label {
+  font-size: 10px;
+  color: var(--muted-foreground);
+}
+
+.permission-request-banner__file-path {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 10px;
+  color: var(--foreground);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.permission-request-banner__line-badge {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 9px;
+  font-weight: 500;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: color-mix(in oklab, var(--muted) 70%, transparent);
+  color: var(--muted-foreground);
+  margin-left: auto;
+}
+
+.permission-request-banner__code-block,
+.permission-request-banner__diff-block {
+  margin: 0;
+  padding: 6px 8px;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 10px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 160px;
+  overflow-y: auto;
+  color: var(--foreground);
+}
+
+.permission-request-banner__search-replace {
+  padding: 4px 8px;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 10px;
+  line-height: 1.4;
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.permission-request-banner__diff-chunk {
+  padding: 2px 4px;
+  border-radius: 2px;
+  margin: 2px 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.permission-request-banner__diff-chunk.diff-del {
+  background: color-mix(in oklab, oklch(0.63 0.2 25) 15%, transparent);
+  color: oklch(0.7 0.2 25);
+}
+
+.permission-request-banner__diff-chunk.diff-add {
+  background: color-mix(in oklab, oklch(0.55 0.14 145) 15%, transparent);
+  color: oklch(0.65 0.14 145);
+}
+

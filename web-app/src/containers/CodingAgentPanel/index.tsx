@@ -35,6 +35,8 @@ import { Tool, ToolContent, ToolHeader, ToolInput, ToolOutput } from '@/componen
 import { Reasoning, ReasoningContent, ReasoningTrigger } from '@/components/ai-elements/reasoning'
 import {
   CLINE_DEFAULT_MODEL_ID,
+  extractPermissionCommand,
+  extractPermissionFileEdit,
   getInitialCodingAgentBackend,
   normalizeAcpPermissionRequest,
   normalizeCompatDiffProposed,
@@ -427,6 +429,7 @@ export function CodingAgentPanel() {
     if (typeof window !== 'undefined') window.localStorage.setItem('coding-agent-lsp', String(lspEnabled))
   }, [lspEnabled])
   const lastAgentErrorRef = useRef<string | null>(null)
+  const approvedEditToolCallIdsRef = useRef<Set<string>>(new Set())
 
   useEffect(() => {
     if (lspEnabled && projectDir) {
@@ -634,14 +637,31 @@ export function CodingAgentPanel() {
           timestamp: Date.now(),
         })
         break
-      case 'tool_result':
+      case 'tool_result': {
+        const rawOutput = event.output ?? ''
+        const wasApprovedEdit = Boolean(event.id && approvedEditToolCallIdsRef.current.has(event.id))
+        if (wasApprovedEdit && event.id) {
+          approvedEditToolCallIdsRef.current.delete(event.id)
+        }
+        const isEditTool = Boolean(event.name && /edit|write|replace/i.test(event.name))
+        const shouldPrefixApplied =
+          (wasApprovedEdit || isEditTool) &&
+          !event.isError &&
+          !rawOutput.toLowerCase().includes('applied')
+
+        const content = event.isError
+          ? `Error: ${rawOutput}`
+          : shouldPrefixApplied
+          ? `Applied edit: ${rawOutput || 'success'}`
+          : rawOutput
         appendLog({
           type: 'tool_result',
-          content: event.isError ? `Error: ${event.output}` : event.output,
+          content,
           toolName: event.name,
           timestamp: Date.now(),
         })
         break
+      }
       case 'diff_proposed':
         if (!event.id) {
           appendLog({
@@ -675,14 +695,23 @@ export function CodingAgentPanel() {
           })
         }
         break
-      case 'permission_request':
+      case 'permission_request': {
         setPendingPermission(event)
+        const cmd = event.command ?? extractPermissionCommand(event)
+        const fileEdit = event.filePath ? { path: event.filePath } : extractPermissionFileEdit(event)
+        let logContent = `Permission requested: ${event.title || event.toolCallId}`
+        if (fileEdit) {
+          logContent = `Proposed edit for ${fileEdit.path} — awaiting approval`
+        } else if (cmd) {
+          logContent = `Command execution requested: '${cmd}' — awaiting approval`
+        }
         appendLog({
           type: 'text_delta',
-          content: `Permission requested: ${event.title || event.toolCallId}`,
+          content: logContent,
           timestamp: Date.now(),
         })
         break
+      }
       case 'done':
         setPendingPermission(null)
         if (completionHandledRef.current) return
@@ -820,9 +849,33 @@ export function CodingAgentPanel() {
         },
         invoke
       )
+
+      const selectedOption = pendingPermission.options?.find((o) => o.optionId === optionId)
+      const isApproved =
+        selectedOption?.kind === 'allow' ||
+        /^(allow|approve|yes)/i.test(optionId)
+
+      const fileEdit = extractPermissionFileEdit(pendingPermission)
+      const cmd = extractPermissionCommand(pendingPermission)
+
+      if (isApproved && fileEdit && pendingPermission.toolCallId) {
+        approvedEditToolCallIdsRef.current.add(pendingPermission.toolCallId)
+      }
+
+      let outcomeLog = `Permission '${optionId}': ${pendingPermission.title || pendingPermission.toolCallId}`
+      if (fileEdit) {
+        outcomeLog = isApproved
+          ? `Permission approved for edit on ${fileEdit.path}. Awaiting agent execution...`
+          : `Permission denied for edit on ${fileEdit.path} — changes were NOT applied.`
+      } else if (cmd) {
+        outcomeLog = isApproved
+          ? `Permission approved for command '${cmd}'. Awaiting execution...`
+          : `Permission denied for command '${cmd}' — command was NOT executed.`
+      }
+
       appendLog({
         type: 'text_delta',
-        content: `Permission '${optionId}': ${pendingPermission.title || pendingPermission.toolCallId}`,
+        content: outcomeLog,
         timestamp: Date.now(),
       })
       setPendingPermission(null)

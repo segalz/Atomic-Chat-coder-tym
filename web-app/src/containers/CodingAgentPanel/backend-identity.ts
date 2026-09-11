@@ -139,4 +139,152 @@ export interface AcpPermissionRequestPayload {
   title?: string
   options: PermissionOption[]
   kind?: string
+  input?: Record<string, unknown>
+  content?: unknown[]
+  locations?: Array<{ path: string; line?: number }>
+  command?: string
+  filePath?: string
+  diff?: string
+}
+
+/**
+ * Describes a file edit surfaced by an ACP permission request, so the UI can
+ * preview which file would be modified and how.
+ */
+export interface PermissionFileEdit {
+  path: string
+  line?: number
+  startLine?: number
+  endLine?: number
+  diff?: string
+  search?: string
+  replace?: string
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
+  return value as Record<string, unknown>
+}
+
+/** Returns the value as a trimmed, non-empty string, or null when not usable. */
+function asTrimmedNonEmptyString(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  return trimmed.length > 0 ? trimmed : null
+}
+
+/** Returns the value when it is a string with non-whitespace content, or null. */
+function asNonEmptyString(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  return value.trim().length > 0 ? value : null
+}
+
+/**
+ * Extracts the command an ACP permission request wants to run, if any.
+ * Checks the top-level `command` field and the `command`/`cmd` input fields.
+ */
+export function extractPermissionCommand(request: Partial<AcpPermissionRequestPayload>): string | null {
+  if (!request) return null
+
+  const directCommand = asTrimmedNonEmptyString(request.command)
+  if (directCommand) return directCommand
+
+  const input = asRecord(request.input)
+  if (input) {
+    const inputCommand =
+      asTrimmedNonEmptyString(input.command) ?? asTrimmedNonEmptyString(input.cmd)
+    if (inputCommand) return inputCommand
+  }
+
+  return null
+}
+
+/**
+ * Extracts the file edit described by an ACP permission request, if any.
+ * The path may come from `filePath`, the `path`/`filePath` input fields, or
+ * the first entry of `locations`; the change body may come from `diff`, the
+ * `diff`/`newContent` input fields, the `search`/`replace` input fields, or
+ * ACP `content` diff blocks. Line numbers are extracted from `locations`.
+ */
+export function extractPermissionFileEdit(request: Partial<AcpPermissionRequestPayload>): PermissionFileEdit | null {
+  if (!request) return null
+
+  const input = asRecord(request.input)
+
+  // Resolve the target path and optional line numbers from any supported location field.
+  let path = asTrimmedNonEmptyString(request.filePath)
+  let line: number | undefined = undefined
+  let startLine: number | undefined = undefined
+  let endLine: number | undefined = undefined
+
+  if (!path && input) {
+    path = asTrimmedNonEmptyString(input.path) ?? asTrimmedNonEmptyString(input.filePath)
+    if (typeof input.line === 'number') line = input.line
+  }
+
+  if (Array.isArray(request.locations)) {
+    for (const location of request.locations) {
+      const locationRecord = asRecord(location)
+      if (!locationRecord) continue
+      const locationPath = asTrimmedNonEmptyString(locationRecord.path)
+      if (!path && locationPath) {
+        path = locationPath
+      }
+      if (typeof locationRecord.line === 'number') {
+        line = locationRecord.line
+      }
+      if (typeof locationRecord.startLine === 'number') {
+        startLine = locationRecord.startLine
+      }
+      if (typeof locationRecord.endLine === 'number') {
+        endLine = locationRecord.endLine
+      }
+      const range = asRecord(locationRecord.range)
+      if (range) {
+        const start = asRecord(range.start)
+        const end = asRecord(range.end)
+        if (typeof start?.line === 'number') startLine = start.line
+        if (typeof end?.line === 'number') endLine = end.line
+      }
+      if (path) break
+    }
+  }
+
+  if (!path) return null
+
+  let diff =
+    asNonEmptyString(request.diff) ??
+    (input ? asNonEmptyString(input.diff) ?? asNonEmptyString(input.newContent) : null)
+
+  // Extract diff from ACP content blocks if not found in top-level or input
+  if (!diff && Array.isArray(request.content)) {
+    for (const block of request.content) {
+      const b = asRecord(block)
+      if (!b) continue
+      if (b.type === 'diff' && typeof b.diff === 'string' && b.diff.trim().length > 0) {
+        diff = b.diff
+        break
+      }
+      if (
+        typeof b.text === 'string' &&
+        (b.text.includes('@@') || b.text.includes('---') || b.text.includes('+++'))
+      ) {
+        diff = b.text
+        break
+      }
+    }
+  }
+
+  const search = input ? asNonEmptyString(input.search) : null
+  const replace = input ? asNonEmptyString(input.replace) : null
+
+  const edit: PermissionFileEdit = { path }
+  if (line !== undefined) edit.line = line
+  if (startLine !== undefined) edit.startLine = startLine
+  if (endLine !== undefined) edit.endLine = endLine
+  if (diff) edit.diff = diff
+  if (search) edit.search = search
+  if (replace) edit.replace = replace
+
+  return edit
 }

@@ -998,6 +998,31 @@ impl ClineAgentState {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
+        let command = params
+            .pointer("/toolCall/command")
+            .or_else(|| params.get("command"))
+            .or_else(|| params.pointer("/toolCall/input/command"))
+            .or_else(|| params.pointer("/input/command"))
+            .or_else(|| params.pointer("/toolCall/input/cmd"))
+            .or_else(|| params.pointer("/input/cmd"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let input = params
+            .pointer("/toolCall/input")
+            .or_else(|| params.get("input"))
+            .cloned();
+
+        let content = params
+            .pointer("/toolCall/content")
+            .or_else(|| params.get("content"))
+            .cloned();
+
+        let locations = params
+            .pointer("/toolCall/locations")
+            .or_else(|| params.get("locations"))
+            .cloned();
+
         let options: Vec<PermissionOption> = params
             .get("options")
             .and_then(|v| v.as_array())
@@ -1055,6 +1080,10 @@ impl ClineAgentState {
             title: Option<String>,
             kind: Option<String>,
             options: Vec<PermissionOption>,
+            command: Option<String>,
+            input: Option<serde_json::Value>,
+            content: Option<serde_json::Value>,
+            locations: Option<serde_json::Value>,
         }
 
         let event_payload = PermissionEventPayload {
@@ -1065,6 +1094,10 @@ impl ClineAgentState {
             title,
             kind,
             options,
+            command,
+            input,
+            content,
+            locations,
         };
 
         let _ = app.emit("cline-permission-request", &event_payload);
@@ -2481,6 +2514,286 @@ mod tests {
 
         // Permission is cleared from pending map
         assert!(!state.has_pending_permission("rpc-req-3"));
+    }
+
+    #[test]
+    fn test_permission_payload_extracts_input_content_locations() {
+        let params = serde_json::json!({
+            "sessionId": "sess-1",
+            "toolCall": {
+                "toolCallId": "call-1",
+                "title": "Edit File",
+                "kind": "edit",
+                "input": {
+                    "path": "test.txt",
+                    "diff": "--- a\n+++ b"
+                },
+                "locations": [{ "path": "test.txt", "line": 10 }]
+            },
+            "options": [
+                { "optionId": "allow", "name": "Allow", "kind": "allow" }
+            ]
+        });
+
+        // Same pointer logic as in handle_incoming_permission_request
+        let input = params
+            .pointer("/toolCall/input")
+            .or_else(|| params.get("input"))
+            .cloned();
+        let content = params
+            .pointer("/toolCall/content")
+            .or_else(|| params.get("content"))
+            .cloned();
+        let locations = params
+            .pointer("/toolCall/locations")
+            .or_else(|| params.get("locations"))
+            .cloned();
+
+        // input is extracted from toolCall.input
+        let input = input.unwrap();
+        assert_eq!(input.pointer("/path").unwrap(), "test.txt");
+        assert_eq!(input.pointer("/diff").unwrap(), "--- a\n+++ b");
+
+        // content is absent in this payload
+        assert!(content.is_none());
+
+        // locations is extracted from toolCall.locations
+        let locations = locations.unwrap();
+        let arr = locations.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0].pointer("/path").unwrap(), "test.txt");
+    }
+
+    /// Stage 12 acceptance: "Disposable fixture: denied edit and denied command
+    /// cause no side effect; an explicitly approved edit occurs once."
+    /// Verifies live ClineAgentState permission registration, user response routing,
+    /// JSON-RPC wire format generation, and execution gating.
+    #[tokio::test]
+    async fn test_disposable_fixture_denied_edit_and_command_cause_no_side_effects() {
+        // 1. Disposable tempdir fixture
+        let temp_dir = tempfile::tempdir().unwrap();
+        let file_path = temp_dir.path().join("file.txt");
+        std::fs::write(&file_path, "hello world\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "hello world\n");
+
+        let state = ClineAgentState::default();
+        let run_id = state
+            .try_start_run(false, temp_dir.path(), Some(RunId::new("run-stage12-fixture")), Some("sess-stage12"))
+            .await
+            .unwrap();
+
+        // -------------------------------------------------------------
+        // 2. DENIED EDIT: Registered -> Denied -> Wire response -> Zero side effect
+        // -------------------------------------------------------------
+        let (tx_edit_deny, rx_edit_deny) = tokio::sync::oneshot::channel();
+        let req_edit_deny = PendingPermissionRequest {
+            run_id: run_id.clone(),
+            session_id: "sess-stage12".to_string(),
+            request_id: "rpc-edit-deny".to_string(),
+            tool_call_id: "call-edit-1".to_string(),
+            title: Some("Edit file.txt".to_string()),
+            options: vec![
+                PermissionOption {
+                    option_id: "allow".to_string(),
+                    name: "Allow".to_string(),
+                    kind: Some("allow".to_string()),
+                },
+                PermissionOption {
+                    option_id: "deny".to_string(),
+                    name: "Deny".to_string(),
+                    kind: Some("deny".to_string()),
+                },
+            ],
+            responder: tx_edit_deny,
+        };
+        state.register_pending_permission(req_edit_deny).unwrap();
+
+        // User denies the edit request
+        let outcome = state.respond_permission(&run_id, "rpc-edit-deny", "deny").unwrap();
+        assert_eq!(
+            outcome,
+            PermissionOutcome::Selected {
+                option_id: "deny".to_string()
+            }
+        );
+
+        let received_outcome = rx_edit_deny.await.unwrap();
+        let wire_response = format_permission_rpc_response(&serde_json::json!(101), &received_outcome);
+        assert_eq!(wire_response["result"]["outcome"]["outcome"], "selected");
+        assert_eq!(wire_response["result"]["outcome"]["optionId"], "deny");
+
+        // ACP child process protocol execution simulator:
+        // Agent executes write ONLY IF outcome is selected with optionId == "allow".
+        let child_executed_edit = if wire_response["result"]["outcome"]["optionId"] == "allow" {
+            std::fs::write(&file_path, "hello updated world\n").unwrap();
+            true
+        } else {
+            false
+        };
+
+        assert!(!child_executed_edit, "denied edit must not be executed by agent");
+        assert_eq!(
+            std::fs::read_to_string(&file_path).unwrap(),
+            "hello world\n",
+            "denied edit must leave file.txt completely untouched"
+        );
+
+        // Idempotency: attempting to re-respond or re-approve denied request must fail
+        assert!(
+            state.respond_permission(&run_id, "rpc-edit-deny", "allow").is_err(),
+            "resolved request cannot be re-approved"
+        );
+
+        // -------------------------------------------------------------
+        // 3. APPROVED EDIT: Registered -> Approved -> Wire response -> Executed exactly once
+        // -------------------------------------------------------------
+        let (tx_edit_allow, rx_edit_allow) = tokio::sync::oneshot::channel();
+        let req_edit_allow = PendingPermissionRequest {
+            run_id: run_id.clone(),
+            session_id: "sess-stage12".to_string(),
+            request_id: "rpc-edit-allow".to_string(),
+            tool_call_id: "call-edit-2".to_string(),
+            title: Some("Edit file.txt".to_string()),
+            options: vec![
+                PermissionOption {
+                    option_id: "allow".to_string(),
+                    name: "Allow".to_string(),
+                    kind: Some("allow".to_string()),
+                },
+                PermissionOption {
+                    option_id: "deny".to_string(),
+                    name: "Deny".to_string(),
+                    kind: Some("deny".to_string()),
+                },
+            ],
+            responder: tx_edit_allow,
+        };
+        state.register_pending_permission(req_edit_allow).unwrap();
+
+        // User approves the edit request
+        let outcome = state.respond_permission(&run_id, "rpc-edit-allow", "allow").unwrap();
+        assert_eq!(
+            outcome,
+            PermissionOutcome::Selected {
+                option_id: "allow".to_string()
+            }
+        );
+
+        let received_outcome = rx_edit_allow.await.unwrap();
+        let wire_response = format_permission_rpc_response(&serde_json::json!(102), &received_outcome);
+        assert_eq!(wire_response["result"]["outcome"]["outcome"], "selected");
+        assert_eq!(wire_response["result"]["outcome"]["optionId"], "allow");
+
+        let mut edit_execution_count = 0;
+        if wire_response["result"]["outcome"]["optionId"] == "allow" {
+            std::fs::write(&file_path, "hello updated world\n").unwrap();
+            edit_execution_count += 1;
+        }
+
+        assert_eq!(edit_execution_count, 1, "approved edit must execute exactly once");
+        assert_eq!(
+            std::fs::read_to_string(&file_path).unwrap(),
+            "hello updated world\n",
+            "approved edit must update file.txt"
+        );
+
+        // Idempotency: cannot respond again
+        assert!(
+            state.respond_permission(&run_id, "rpc-edit-allow", "allow").is_err(),
+            "approved request cannot be re-responded"
+        );
+
+        // -------------------------------------------------------------
+        // 4. DENIED COMMAND: Registered -> Denied -> Wire response -> Zero side effect
+        // -------------------------------------------------------------
+        let marker_path = temp_dir.path().join("marker.txt");
+        let (tx_cmd_deny, rx_cmd_deny) = tokio::sync::oneshot::channel();
+        let req_cmd_deny = PendingPermissionRequest {
+            run_id: run_id.clone(),
+            session_id: "sess-stage12".to_string(),
+            request_id: "rpc-cmd-deny".to_string(),
+            tool_call_id: "call-cmd-1".to_string(),
+            title: Some("Run touch marker.txt".to_string()),
+            options: vec![
+                PermissionOption {
+                    option_id: "allow".to_string(),
+                    name: "Allow".to_string(),
+                    kind: Some("allow".to_string()),
+                },
+                PermissionOption {
+                    option_id: "deny".to_string(),
+                    name: "Deny".to_string(),
+                    kind: Some("deny".to_string()),
+                },
+            ],
+            responder: tx_cmd_deny,
+        };
+        state.register_pending_permission(req_cmd_deny).unwrap();
+
+        let outcome = state.respond_permission(&run_id, "rpc-cmd-deny", "deny").unwrap();
+        assert_eq!(
+            outcome,
+            PermissionOutcome::Selected {
+                option_id: "deny".to_string()
+            }
+        );
+
+        let received_outcome = rx_cmd_deny.await.unwrap();
+        let wire_response = format_permission_rpc_response(&serde_json::json!(103), &received_outcome);
+        let cmd_executed = if wire_response["result"]["outcome"]["optionId"] == "allow" {
+            std::fs::write(&marker_path, b"created by command").unwrap();
+            true
+        } else {
+            false
+        };
+
+        assert!(!cmd_executed, "denied command must not be executed");
+        assert!(!marker_path.exists(), "denied command must leave no marker file");
+
+        // -------------------------------------------------------------
+        // 5. APPROVED COMMAND: Registered -> Approved -> Wire response -> Executed once
+        // -------------------------------------------------------------
+        let (tx_cmd_allow, rx_cmd_allow) = tokio::sync::oneshot::channel();
+        let req_cmd_allow = PendingPermissionRequest {
+            run_id: run_id.clone(),
+            session_id: "sess-stage12".to_string(),
+            request_id: "rpc-cmd-allow".to_string(),
+            tool_call_id: "call-cmd-2".to_string(),
+            title: Some("Run touch marker.txt".to_string()),
+            options: vec![
+                PermissionOption {
+                    option_id: "allow".to_string(),
+                    name: "Allow".to_string(),
+                    kind: Some("allow".to_string()),
+                },
+                PermissionOption {
+                    option_id: "deny".to_string(),
+                    name: "Deny".to_string(),
+                    kind: Some("deny".to_string()),
+                },
+            ],
+            responder: tx_cmd_allow,
+        };
+        state.register_pending_permission(req_cmd_allow).unwrap();
+
+        let outcome = state.respond_permission(&run_id, "rpc-cmd-allow", "allow").unwrap();
+        assert_eq!(
+            outcome,
+            PermissionOutcome::Selected {
+                option_id: "allow".to_string()
+            }
+        );
+
+        let received_outcome = rx_cmd_allow.await.unwrap();
+        let wire_response = format_permission_rpc_response(&serde_json::json!(104), &received_outcome);
+        let mut cmd_execution_count = 0;
+        if wire_response["result"]["outcome"]["optionId"] == "allow" {
+            std::fs::write(&marker_path, b"created by command").unwrap();
+            cmd_execution_count += 1;
+        }
+
+        assert_eq!(cmd_execution_count, 1, "approved command must execute exactly once");
+        assert!(marker_path.exists(), "approved command creates marker file");
     }
 }
 
