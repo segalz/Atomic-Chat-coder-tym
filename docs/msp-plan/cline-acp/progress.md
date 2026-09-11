@@ -921,8 +921,61 @@ Only the first non-DONE stage may be selected. A blocked or approval-waiting sta
 - Remaining issues / blocker / accepted limitation: None.
 - Final diff self-check: Clean additions in `loop-lifecycle.ts`, `loop-lifecycle.test.ts`, and surgical default adjustment in `conversation-context.ts`.
 - Final stage status: DONE
-- Completed count: 18 / 22
-- Next eligible stage: 19 — Enforce tool access boundaries and error handling (High, independent review required).
+### Stage 19 — Integrate Loop continuation and recovery (2026-09-11)
+
+- Stage / attempt / date: Stage 19 / attempt 1 / 2026-09-11
+- Checkout: absolute root, branch, HEAD: `C:\Develop\Atomic-Chat-coder-tym`, `feat/windows-cline-cli`, `7c321ad`
+- Starting dirty files and preservation: Clean working directory at start of Stage 19.
+- Approved scope and exact files explained to user: User authorized Stage 19. Focused files: `web-app/src/containers/CodingAgentPanel/loop-continuation.ts`, `loop-continuation.test.ts`, `index.tsx`, and live probe script `stage19_loop_continuation_probe.mjs`.
+- Changes or read-only findings:
+  - Created `web-app/src/containers/CodingAgentPanel/loop-continuation.ts` defining:
+    - `LoopCheckpointData`: Type-safe snapshot of deterministic loop supervision checkpoints.
+    - `validateContinuationSafety`: Evaluates interruption before/after terminal results, stale checkpoint detection (loopId, projectDir, run sequence), app restart recovery (discarding defunct externalSessionId and requesting fresh ACP session), and provider mismatch handling. Enforces the strict "fail visibly when continuation safety cannot be established" contract.
+    - `buildLoopResumePrompt`: Formats schema-driven resume prompts highlighting `completed_actions`, `files_changed`, and `do_not_repeat` constraints to prevent redundant execution of already-completed actions.
+    - `parseResumePromptToCheckpoint`: Parses textual resume prompts into structured objects for validation.
+  - Wired continuation safety validation into `web-app/src/containers/CodingAgentPanel/index.tsx` in the Loop continuation path (`source === 'loop' && currentRun > 1`): fails visibly with error logging and stops the loop if safety cannot be established.
+  - Created `web-app/src/containers/CodingAgentPanel/loop-continuation.test.ts` covering 10 comprehensive test scenarios:
+    1. Interruption before terminal result -> rejected with visible error.
+    2. Interruption after terminal result -> safely resumes next run from checkpoint.
+    3. Stale checkpoint (loopId mismatch) -> rejected with visible error.
+    4. Stale checkpoint (projectDir mismatch) -> rejected with visible error.
+    5. Stale checkpoint (run sequence mismatch) -> rejected with visible error.
+    6. App restart recovery -> discards defunct externalSessionId, requests fresh external ACP session with checkpoint prompt.
+    7. Provider mismatch -> prevents cross-backend session leakage, resets external session state.
+    8. Action deduplication -> injects completed actions and do_not_repeat constraints.
+    9. Manual history isolation -> verifies manual history and plan text are excluded.
+    10. Textual resume prompt parsing and validation.
+  - Authored and executed live protocol probe `scratch/stage19_loop_continuation_probe.mjs` against installed `cline.cmd` (3.0.61, model `zai/glm-5.3-flash`) on disposable fixture: confirmed multi-turn execution with checkpoint creation, deduplicated continuation on disk (verifying step 1 was not re-executed), cancel-before-terminal rejection, stale checkpoint fail-visibly, process-kill restart recovery on disk, and clean teardown without orphan processes.
+- Acceptance criteria verified:
+  1. Interruption before/after terminal result: verified in safety validator, unit tests, and live probe.
+  2. Stale checkpoint detection & fail visibly: verified across loopId, projectDir, and run sequence.
+  3. Restart recovery: verified discarding defunct session and starting fresh ACP session with checkpoint prompt.
+  4. Provider mismatch handling: verified preventing foreign session bleed.
+  5. Action deduplication: verified prompt constraints and on-disk non-re-execution.
+  6. Manual history isolation: verified prompt assembly excludes manual history.
+  7. Quality & regression safety: tsc 0 errors, Vitest 172/172 passing across 17 files, live probe ALL TESTS PASSED.
+- Test commands / outcomes / relevant output:
+  - `corepack yarn workspace @janhq/web-app exec tsc -b tsconfig.app.json --pretty false`: PASSED (0 errors).
+  - `corepack yarn workspace @janhq/web-app test run src/stores/ src/containers/CodingAgentPanel/`: PASSED, 17 test files, 172/172 tests passed (100%).
+  - `node scratch/stage19_loop_continuation_probe.mjs`: ALL 6 PROBE TESTS PASSED.
+- Skipped checks and reason: None.
+- Reviewer name/tool and availability result:
+  - Grok CLI (`C:\Users\segal\.grok\bin\grok.exe`, model Grok 3 / `grok-beta`), executed locally.
+- Review round 1 verdict and findings:
+  - Verdict: **PASS** across all 7 acceptance criteria.
+  - Findings: Residual items noted as non-blocking follow-up observations (regex label matching alignment applied).
+- Findings reproduced / rejected with evidence:
+  - Aligned `parseResumePromptToCheckpoint` regex to match both `Completed:` and `Completed actions (DO NOT REPEAT):`.
+- Fixes and rerun results:
+  - Vitest 172/172 passed (100%).
+  - TypeScript 0 errors.
+- Closure review verdict (High always; Medium after fixes):
+  - Round 1 Closure Review Verdict: **PASS** across all criteria.
+- Remaining issues / blocker / accepted limitation: None.
+- Final diff self-check: Clean additions in `loop-continuation.ts`, `loop-continuation.test.ts`, and surgical continuation wiring in `index.tsx`.
+- Final stage status: DONE
+- Completed count: 19 / 22
+- Next eligible stage: 20 — Verify adversarial lifecycle and regressions (High, independent review required).
 
 Append one entry per execution/review attempt; retain earlier entries when resuming a stage.
 

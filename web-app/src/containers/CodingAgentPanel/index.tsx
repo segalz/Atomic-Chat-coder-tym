@@ -83,6 +83,7 @@ import './ConversationSummary.css'
 import { ContextBudgetIndicator } from './ContextBudgetIndicator'
 import { buildConversationSummary } from './conversation-summary'
 import { buildCodingAgentPrompt } from './conversation-context'
+import { validateContinuationSafety, parseResumePromptToCheckpoint } from './loop-continuation'
 import type { EditPermission } from './edit-permission'
 import {
   buildModelCapabilitiesByName,
@@ -1043,17 +1044,44 @@ export function CodingAgentPanel() {
 
     try {
       let finalPrompt = promptForAgent
-      if (source === 'loop' && currentRun > 1 && activeLoopId) {
-        try {
-          const resumePrompt = await invoke<string | null>('get_loop_resume_prompt', {
-            loopId: activeLoopId,
-            runNumber: currentRun - 1,
-          })
-          if (resumePrompt) {
-            finalPrompt = `${resumePrompt}\n\n${promptForAgent}`
+      if (source === 'loop' && currentRun > 1) {
+        let resumePrompt: string | null = null
+        if (activeLoopId) {
+          try {
+            resumePrompt = await invoke<string | null>('get_loop_resume_prompt', {
+              loopId: activeLoopId,
+              runNumber: currentRun - 1,
+            })
+          } catch (err) {
+            console.warn('[Loop] Failed to load resume prompt:', err)
           }
-        } catch (err) {
-          console.warn('[Loop] Failed to load resume prompt:', err)
+        }
+
+        const checkpoint = resumePrompt && activeLoopId
+          ? parseResumePromptToCheckpoint(resumePrompt, activeLoopId, projectDir, maxRuns)
+          : null
+
+        const safety = validateContinuationSafety({
+          activeLoopId,
+          currentRun,
+          maxRuns,
+          projectDir,
+          targetBackend: agentBackend,
+          activeSession,
+          checkpoint,
+        })
+
+        if (!safety.safe) {
+          const errorMsg = safety.error || 'Continuation safety failure'
+          appendLog({ type: 'text_delta', content: `[Loop Safety Error] ${errorMsg}`, timestamp: Date.now() })
+          setAgentStatus('failed')
+          setRunning(false)
+          setLastFailureMessage(errorMsg)
+          return false
+        }
+
+        if (safety.resumePrompt) {
+          finalPrompt = `${safety.resumePrompt}\n\n${promptForAgent}`
         }
       }
 
