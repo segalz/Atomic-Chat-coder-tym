@@ -151,3 +151,40 @@ export async function routeSendAgentPrompt(
     command: 'spawn_code_agent',
   }
 }
+
+export interface RouteRespondPermissionParams {
+  backend: CodingAgentBackend
+  runId: string
+  requestId: string
+  optionId: string
+}
+
+export interface RouteRespondPermissionResult {
+  command: string
+  backend: CodingAgentBackend
+}
+
+/**
+ * Routes permission responses by backend.
+ * - cline-acp: invokes respond_cline_permission({ runId, requestId, optionId })
+ * - direct-ollama: rejected (Ollama uses diff approval channels instead of ACP permissions)
+ * Strictly guarantees that Cline permissions are NEVER sent to Ollama diff channels and vice versa.
+ */
+export async function routeRespondPermission(
+  params: RouteRespondPermissionParams,
+  invokeFn: InvokeFunction
+): Promise<RouteRespondPermissionResult> {
+  if (params.backend === 'cline-acp') {
+    await invokeFn('respond_cline_permission', {
+      runId: params.runId,
+      requestId: params.requestId,
+      optionId: params.optionId,
+    })
+    return { command: 'respond_cline_permission', backend: 'cline-acp' }
+  }
+
+  throw new Error(
+    `routeRespondPermission is only valid for 'cline-acp', but backend was '${params.backend}'. Ollama uses diff approval channels.`
+  )
+}
+

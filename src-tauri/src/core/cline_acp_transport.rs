@@ -379,12 +379,18 @@ impl RequestId {
     }
 }
 
-/// An incoming, id-less message that carries a method (a notification).
+/// An incoming message from the agent that carries a method.
+///
+/// Can be an unprompted notification (e.g. `"session/update"`, where `id` is `None`)
+/// or a reverse request requiring a client response (e.g. `"session/request_permission"`,
+/// where `id` is `Some(RequestId)`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct IncomingNotification {
-    /// Notification method name (e.g. `"session/update"`).
+    /// Optional JSON-RPC request ID if this is an incoming agent-to-client request.
+    pub id: Option<RequestId>,
+    /// Notification / request method name (e.g. `"session/update"` or `"session/request_permission"`).
     pub method: String,
-    /// Optional `params` payload carried by the notification.
+    /// Optional `params` payload carried by the notification or request.
     pub params: Option<serde_json::Value>,
 }
 
@@ -431,10 +437,11 @@ impl RequestCorrelator {
 
     /// Routes one incoming JSON message.
     ///
-    /// Messages carrying a non-null `"id"` are treated as responses to pending
+    /// Messages carrying a non-null `"id"` without `"method"` are treated as responses to pending
     /// requests and are resolved via their oneshot channel (returning `Ok(None)`).
-    /// Messages without an id but with a `"method"` are surfaced as
-    /// [`IncomingNotification`] values. Anything else is ignored.
+    /// Messages with a `"method"` are surfaced as [`IncomingNotification`] values, preserving
+    /// the optional `"id"` for reverse requests (e.g. `session/request_permission`).
+    /// Anything else is ignored.
     pub async fn handle_incoming(
         &self,
         value: serde_json::Value,
@@ -470,7 +477,13 @@ impl RequestCorrelator {
                 ))),
             }
         } else if let Some(method) = value.get("method") {
+            let id = if has_id {
+                RequestId::from_value(&value["id"])
+            } else {
+                None
+            };
             Ok(Some(IncomingNotification {
+                id,
                 method: method.as_str().unwrap_or("").to_string(),
                 params: value.get("params").cloned(),
             }))
@@ -1047,7 +1060,8 @@ mod tests {
             .expect("agent reverse request should pass through without stale ID error");
 
         match handled {
-            Some(IncomingNotification { method, params }) => {
+            Some(IncomingNotification { id, method, params }) => {
+                assert_eq!(id, Some(RequestId::Number(99)));
                 assert_eq!(method, "session/request_permission");
                 assert_eq!(params, Some(serde_json::json!({"toolCallId": "call_1"})));
             }

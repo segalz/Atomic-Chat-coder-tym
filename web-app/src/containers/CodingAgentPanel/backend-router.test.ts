@@ -1,8 +1,9 @@
-﻿import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   isOllamaHealthCheckRequired,
   isOllamaRestartRequired,
   isSendBlockedByOllamaError,
+  routeRespondPermission,
   routeSendAgentPrompt,
   routeStopAgent,
   type ActiveRun,
@@ -260,6 +261,68 @@ describe('backend-router (Stage 09: Wire backend-specific routing)', () => {
       expect(result.targetBackend).toBe('cline-acp')
       expect(result.command).toBe('stop_cline_agent')
       expect(calls[0].cmd).toBe('stop_cline_agent')
+    })
+  })
+
+  describe('routeRespondPermission (Stage 11: Permission routing)', () => {
+    it('routes to respond_cline_permission when backend is cline-acp', async () => {
+      const calls: Array<{ cmd: string; args?: Record<string, unknown> }> = []
+      const mockInvoke: InvokeFunction = async (cmd, args) => {
+        calls.push({ cmd, args })
+        return {}
+      }
+
+      const result = await routeRespondPermission(
+        {
+          backend: 'cline-acp',
+          runId: 'run-perm-123',
+          requestId: 'req-perm-456',
+          optionId: 'allow',
+        },
+        mockInvoke
+      )
+
+      expect(result.backend).toBe('cline-acp')
+      expect(result.command).toBe('respond_cline_permission')
+      expect(calls.length).toBe(1)
+      expect(calls[0].cmd).toBe('respond_cline_permission')
+      expect(calls[0].args).toEqual({
+        runId: 'run-perm-123',
+        requestId: 'req-perm-456',
+        optionId: 'allow',
+      })
+    })
+
+    it('rejects routing for direct-ollama, enforcing isolation from diff approvals', async () => {
+      const mockInvoke: InvokeFunction = async () => ({})
+
+      await expect(
+        routeRespondPermission(
+          {
+            backend: 'direct-ollama',
+            runId: 'run-perm-123',
+            requestId: 'req-perm-456',
+            optionId: 'allow',
+          },
+          mockInvoke
+        )
+      ).rejects.toThrow(/only valid for 'cline-acp'/)
+    })
+
+    it('rejects routing for legacy backends', async () => {
+      const mockInvoke: InvokeFunction = async () => ({})
+
+      await expect(
+        routeRespondPermission(
+          {
+            backend: 'legacy-claude',
+            runId: 'run-perm-123',
+            requestId: 'req-perm-456',
+            optionId: 'allow',
+          },
+          mockInvoke
+        )
+      ).rejects.toThrow(/only valid for 'cline-acp'/)
     })
   })
 })

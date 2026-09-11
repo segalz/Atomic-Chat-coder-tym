@@ -36,6 +36,7 @@ import { Reasoning, ReasoningContent, ReasoningTrigger } from '@/components/ai-e
 import {
   CLINE_DEFAULT_MODEL_ID,
   getInitialCodingAgentBackend,
+  normalizeAcpPermissionRequest,
   normalizeCompatDiffProposed,
   normalizeCompatToolResult,
   normalizeCompatToolStart,
@@ -47,6 +48,7 @@ import {
   normalizeLegacyCodeAgentOutput,
   normalizeTextDelta,
   persistCodingAgentBackend,
+  type AcpPermissionRequestPayload,
   type AgentDonePayload,
   type AgentErrorPayload,
   type CodingAgentBackend,
@@ -64,12 +66,14 @@ import {
   isOllamaHealthCheckRequired,
   isOllamaRestartRequired,
   isSendBlockedByOllamaError,
+  routeRespondPermission,
   routeSendAgentPrompt,
   routeStopAgent,
   type ActiveRun,
 } from './backend-router'
 import { CodeModelSelector } from './CodeModelSelector'
 import { ProviderModelPicker } from './ProviderModelPicker'
+import { PermissionRequest } from './PermissionRequest'
 import './ConversationSummary.css'
 import { ContextBudgetIndicator } from './ContextBudgetIndicator'
 import { buildConversationSummary } from './conversation-summary'
@@ -482,6 +486,7 @@ export function CodingAgentPanel() {
   const [selectedCodeModel, setSelectedCodeModel] = useState(() => getStoredCodeModel() ?? '')
   const [modelCapabilities, setModelCapabilities] = useState<ModelCapabilitiesByName>({})
   const [agentBackend, setAgentBackend] = useState<CodingAgentBackend>(() => getInitialCodingAgentBackend())
+  const [pendingPermission, setPendingPermission] = useState<AcpPermissionRequestPayload | null>(null)
 
   useEffect(() => {
     invoke<CodingAgentConfig>('get_coding_agent_config')
@@ -584,6 +589,7 @@ export function CodingAgentPanel() {
     }
 
     useCodingAgentStore.getState().saveCurrentSession()
+    setPendingPermission(null)
     const runBackend = activeRun?.backend ?? agentBackend
     if (isOllamaRestartRequired(runBackend)) {
       setAgentStatus('restarting')
@@ -669,12 +675,22 @@ export function CodingAgentPanel() {
           })
         }
         break
+      case 'permission_request':
+        setPendingPermission(event)
+        appendLog({
+          type: 'text_delta',
+          content: `Permission requested: ${event.title || event.toolCallId}`,
+          timestamp: Date.now(),
+        })
+        break
       case 'done':
+        setPendingPermission(null)
         if (completionHandledRef.current) return
         completionHandledRef.current = true
         finishAgentRun(event.success, event.success ? null : (event.error ?? lastAgentErrorRef.current ?? 'Agent stopped by user'))
         break
       case 'error':
+        setPendingPermission(null)
         lastAgentErrorRef.current = event.message
         appendLog({ type: 'error', content: event.message, timestamp: Date.now() })
         break
@@ -765,10 +781,16 @@ export function CodingAgentPanel() {
         })
       })
 
+      const uPerm = await listen<AcpPermissionRequestPayload>('cline-permission-request', (e) => {
+        if (!cancelled && activeRun && e.payload.runId === activeRun.runId) {
+          handleNormalizedAgentEvent(normalizeAcpPermissionRequest(e.payload))
+        }
+      })
+
       if (cancelled) {
-        for (const unlisten of [uRaw, u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11, u12, u13]) unlisten()
+        for (const unlisten of [uRaw, u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11, u12, u13, uPerm]) unlisten()
       } else {
-        unlisteners.push(uRaw, u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11, u12, u13)
+        unlisteners.push(uRaw, u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11, u12, u13, uPerm)
       }
     }
 
@@ -777,12 +799,41 @@ export function CodingAgentPanel() {
       cancelled = true
       unlisteners.forEach((u) => u())
     }
-  }, [handleNormalizedAgentEvent])
+  }, [activeRun, handleNormalizedAgentEvent])
 
   // ── Handlers ─────────────────────────────────────────────
   const stopSelectedBackend = useCallback(async () => {
+    setPendingPermission(null)
     await routeStopAgent(activeRun, agentBackend, invoke)
   }, [activeRun, agentBackend])
+
+  const handleRespondPermission = useCallback(async (requestId: string, optionId: string) => {
+    if (!pendingPermission || pendingPermission.requestId !== requestId) return
+
+    try {
+      await routeRespondPermission(
+        {
+          backend: 'cline-acp',
+          runId: pendingPermission.runId,
+          requestId,
+          optionId,
+        },
+        invoke
+      )
+      appendLog({
+        type: 'text_delta',
+        content: `Permission '${optionId}': ${pendingPermission.title || pendingPermission.toolCallId}`,
+        timestamp: Date.now(),
+      })
+      setPendingPermission(null)
+    } catch (err) {
+      appendLog({
+        type: 'error',
+        content: `Failed to respond to permission request: ${err}`,
+        timestamp: Date.now(),
+      })
+    }
+  }, [appendLog, pendingPermission])
 
   const handleSelectFolder = useCallback(async () => {
     try {
@@ -1329,6 +1380,17 @@ export function CodingAgentPanel() {
             <ConversationScrollButton />
           </StickToBottom>
         </div>
+
+        {/* Permission Request */}
+        {pendingPermission && (
+          <div className="shrink-0 px-4 pt-2">
+            <PermissionRequest
+              request={pendingPermission}
+              onRespond={handleRespondPermission}
+              disabled={!isRunning}
+            />
+          </div>
+        )}
 
         {/* Input */}
         <div className="shrink-0 px-4 pb-4 pt-3 border-t">

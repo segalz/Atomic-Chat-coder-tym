@@ -1,4 +1,8 @@
-import type { CodingAgentBackend } from './backend-identity'
+import type {
+  CodingAgentBackend,
+  PermissionOption,
+  AcpPermissionRequestPayload,
+} from './backend-identity'
 
 export {
   type CodingAgentBackend,
@@ -17,6 +21,9 @@ export {
   CLINE_DEFAULT_MODEL_DISPLAY_NAME,
   CLINE_DEFAULT_PROVIDER_ID,
   CLINE_DEFAULT_MODEL_IDENTITY,
+  type PermissionOption,
+  type PermissionOutcome,
+  type AcpPermissionRequestPayload,
 } from './backend-identity'
 
 export interface TextDeltaPayload {
@@ -92,6 +99,16 @@ export type NormalizedAgentEvent =
   | ({ type: 'tool_start'; id?: string; name: string; input: Record<string, unknown> } & AcpEventContext)
   | ({ type: 'tool_result'; id?: string; name?: string; output: string; isError: boolean } & AcpEventContext)
   | ({ type: 'diff_proposed'; id: string; filePath: string; search: string; replace: string } & AcpEventContext)
+  | ({
+      type: 'permission_request'
+      runId: string
+      sessionId: string
+      requestId: string
+      toolCallId: string
+      title?: string
+      kind?: string
+      options: PermissionOption[]
+    } & AcpEventContext)
   | ({ type: 'done'; success: boolean; error?: string | null } & AcpEventContext)
   | ({ type: 'error'; message: string } & AcpEventContext)
 
@@ -185,6 +202,23 @@ export function normalizeAcpPromptDone(
   }
 }
 
+export function normalizeAcpPermissionRequest(
+  payload: AcpPermissionRequestPayload,
+  context?: AcpEventContext
+): NormalizedAgentEvent {
+  return {
+    type: 'permission_request',
+    runId: payload.runId || context?.runId || '',
+    sessionId: payload.sessionId || context?.sessionId || '',
+    requestId: payload.requestId,
+    toolCallId: payload.toolCallId,
+    title: payload.title,
+    kind: payload.kind,
+    options: payload.options,
+    ...context,
+  }
+}
+
 /**
  * Normalizes raw session/update notification payloads from Cline ACP.
  * Note: session_info_update is intentionally suppressed (returns [])
@@ -268,7 +302,43 @@ export function normalizeAcpSessionUpdate(
     }
   }
 
-  // 5. session_info_update, mode, or config updates are intentionally suppressed
+  // 5. Permission request from agent
+  if (updateType === 'permission_request' || updateType === 'request_permission') {
+    const toolCall = (target.toolCall && typeof target.toolCall === 'object'
+      ? target.toolCall
+      : target) as Record<string, unknown>
+    const toolCallId = String(toolCall.toolCallId ?? toolCall.id ?? target.toolCallId ?? '')
+    const requestId = String(target.requestId ?? target.id ?? '')
+    const sessionId = String(target.sessionId ?? context?.sessionId ?? '')
+    const runId = String(target.runId ?? context?.runId ?? '')
+
+    const rawOptions = Array.isArray(target.options) ? target.options : []
+    const options: PermissionOption[] = rawOptions.map((opt: unknown) => {
+      const o = (opt && typeof opt === 'object' ? opt : {}) as Record<string, unknown>
+      return {
+        optionId: String(o.optionId ?? o.id ?? ''),
+        name: String(o.name ?? o.label ?? o.optionId ?? ''),
+        kind: typeof o.kind === 'string' ? o.kind : undefined,
+      }
+    }).filter((o) => Boolean(o.optionId))
+
+    return [
+      normalizeAcpPermissionRequest(
+        {
+          runId,
+          sessionId,
+          requestId,
+          toolCallId,
+          title: typeof toolCall.title === 'string' ? toolCall.title : (typeof target.title === 'string' ? target.title : undefined),
+          kind: typeof toolCall.kind === 'string' ? toolCall.kind : (typeof target.kind === 'string' ? target.kind : undefined),
+          options,
+        },
+        context
+      ),
+    ]
+  }
+
+  // 6. session_info_update, mode, or config updates are intentionally suppressed
   if (updateType === 'session_info_update' || updateType === 'config_update') {
     return []
   }

@@ -134,6 +134,7 @@ pub fn run() {
         core::cline_agent::start_cline_agent,
         core::cline_agent::stop_cline_agent,
         core::cline_agent::check_cline_installed,
+        core::cline_agent::respond_cline_permission,
         // Loop supervision read-only commands
         core::loop_supervision::loop_status,
         core::loop_supervision::read_loop_progress,
@@ -446,6 +447,11 @@ pub fn run() {
                         log::warn!("Failed to cleanup llama processes: {}", e);
                     } else {
                         log::info!("Llama processes cleaned up successfully");
+                    }
+
+                    if let Some(cline_state) = app_handle.try_state::<core::cline_agent::ClineAgentState>() {
+                        cline_state.shutdown();
+                        log::info!("Cline agent state shut down successfully");
                     }
 
                     #[cfg(feature = "mlx")]

@@ -247,4 +247,38 @@ describe('agent-event-adapter (Stage 08 ACP stream normalization)', () => {
     expect(filter.accept(errorEvent)).toBe(false)
     expect(filter.accept(doneEvent)).toBe(false)
   })
+
+  it('normalizes permission_request with offered options, title, and toolCallId', () => {
+    const rawPermission = {
+      type: 'permission_request',
+      sessionId: 'session-acp-456',
+      requestId: 'req-perm-1',
+      toolCall: {
+        toolCallId: 'tool-call-777',
+        title: 'Modify src-tauri/src/lib.rs',
+        kind: 'edit',
+      },
+      options: [
+        { optionId: 'allow', name: 'Allow', kind: 'allow' },
+        { optionId: 'deny', name: 'Deny', kind: 'deny' },
+      ],
+    }
+
+    const events = normalizeAcpSessionUpdate(rawPermission, testContext)
+    expect(events).toHaveLength(1)
+    expect(events[0]).toEqual({
+      type: 'permission_request',
+      runId: 'run-test-123',
+      sessionId: 'session-acp-456',
+      backend: 'cline-acp',
+      requestId: 'req-perm-1',
+      toolCallId: 'tool-call-777',
+      title: 'Modify src-tauri/src/lib.rs',
+      kind: 'edit',
+      options: [
+        { optionId: 'allow', name: 'Allow', kind: 'allow' },
+        { optionId: 'deny', name: 'Deny', kind: 'deny' },
+      ],
+    })
+  })
 })

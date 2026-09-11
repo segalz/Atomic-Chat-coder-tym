@@ -599,6 +599,51 @@ impl Default for TimeoutConfig {
     }
 }
 
+/// An offered permission option from the ACP agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionOption {
+    #[serde(rename = "optionId")]
+    pub option_id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+}
+
+/// Outcome of a permission request decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum PermissionOutcome {
+    Selected {
+        #[serde(rename = "optionId")]
+        option_id: String,
+    },
+    Cancelled,
+}
+
+/// A pending permission request awaiting explicit user decision.
+pub struct PendingPermissionRequest {
+    pub run_id: RunId,
+    pub session_id: String,
+    pub request_id: String,
+    pub tool_call_id: String,
+    pub title: Option<String>,
+    pub options: Vec<PermissionOption>,
+    pub responder: tokio::sync::oneshot::Sender<PermissionOutcome>,
+}
+
+impl std::fmt::Debug for PendingPermissionRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingPermissionRequest")
+            .field("run_id", &self.run_id)
+            .field("session_id", &self.session_id)
+            .field("request_id", &self.request_id)
+            .field("tool_call_id", &self.tool_call_id)
+            .field("title", &self.title)
+            .field("options", &self.options)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Shared state managing the Cline ACP agent lifecycle, process ownership,
 /// cancellation, event fencing, and explicit session/model binding.
 #[derive(Debug)]
@@ -609,6 +654,7 @@ pub struct ClineAgentState {
     cancel_token: Arc<std::sync::Mutex<Option<CancellationToken>>>,
     active_session: Arc<std::sync::Mutex<Option<SessionIdentity>>>,
     sessions_by_external_id: Arc<std::sync::Mutex<std::collections::HashMap<String, SessionIdentity>>>,
+    pending_permissions: Arc<std::sync::Mutex<std::collections::HashMap<String, PendingPermissionRequest>>>,
     restore_epoch: Arc<AtomicU64>,
 }
 
@@ -628,6 +674,7 @@ impl ClineAgentState {
             cancel_token: Arc::new(std::sync::Mutex::new(None)),
             active_session: Arc::new(std::sync::Mutex::new(None)),
             sessions_by_external_id: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            pending_permissions: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             restore_epoch: Arc::new(AtomicU64::new(1)),
         }
     }
@@ -808,6 +855,262 @@ impl ClineAgentState {
         }
     }
 
+    /// Registers a pending permission request for an in-flight run.
+    ///
+    /// Fails if the run is not active, does not match the active run ID,
+    /// or if a request with the same request_id is already registered.
+    /// Re-checks the run fence atomically under the pending_permissions lock.
+    pub fn register_pending_permission(&self, req: PendingPermissionRequest) -> Result<(), String> {
+        let mut guard = self.pending_permissions.lock().map_err(|e| e.to_string())?;
+
+        let current_run = self.fence.current_run_id();
+        if !self.fence.is_active() || current_run.as_ref() != Some(&req.run_id) {
+            return Err(format!(
+                "Cannot register permission request {}: run {} is not active (current active: {:?})",
+                req.request_id, req.run_id, current_run
+            ));
+        }
+
+        if guard.contains_key(&req.request_id) {
+            return Err(format!(
+                "Cannot register duplicate permission request ID '{}'",
+                req.request_id
+            ));
+        }
+        guard.insert(req.request_id.clone(), req);
+        Ok(())
+    }
+
+    /// Responds to a pending permission request with the selected option.
+    ///
+    /// Strict acceptance contract:
+    /// - Re-checks that the run is still active.
+    /// - Rejects unknown or stale request IDs.
+    /// - Rejects run ID mismatches.
+    /// - Rejects option IDs not offered by the agent (never defaults to approval on errors!).
+    /// - Removes the pending entry and sends PermissionOutcome::Selected.
+    pub fn respond_permission(
+        &self,
+        run_id: &RunId,
+        request_id: &str,
+        option_id: &str,
+    ) -> Result<PermissionOutcome, String> {
+        let mut guard = self.pending_permissions.lock().map_err(|e| e.to_string())?;
+
+        // Re-check fence: if run is no longer active, reject the response
+        let current_run = self.fence.current_run_id();
+        if !self.fence.is_active() || current_run.as_ref() != Some(run_id) {
+            return Err(format!(
+                "Cannot respond to permission request '{request_id}': run {run_id} is no longer active"
+            ));
+        }
+
+        let req = guard
+            .get(request_id)
+            .ok_or_else(|| format!("Unknown or already resolved permission request '{request_id}'"))?;
+
+        if req.run_id != *run_id {
+            return Err(format!(
+                "Run ID mismatch for permission request '{request_id}': expected {}, got {run_id}",
+                req.run_id
+            ));
+        }
+
+        // Validate that option_id is among the offered options
+        let is_valid_option = req.options.iter().any(|opt| opt.option_id == option_id);
+        if !is_valid_option {
+            return Err(format!(
+                "Invalid option_id '{option_id}': option is not among the allowed options offered by the agent"
+            ));
+        }
+
+        let req = guard.remove(request_id).expect("req existence checked above");
+        let outcome = PermissionOutcome::Selected {
+            option_id: option_id.to_string(),
+        };
+        let _ = req.responder.send(outcome.clone());
+        Ok(outcome)
+    }
+
+    /// Cancels all pending permissions for a specific run ID, sending PermissionOutcome::Cancelled.
+    pub fn cancel_pending_permissions_for_run(&self, run_id: &RunId) {
+        if let Ok(mut guard) = self.pending_permissions.lock() {
+            let matching_keys: Vec<String> = guard
+                .iter()
+                .filter(|(_, req)| req.run_id == *run_id)
+                .map(|(k, _)| k.clone())
+                .collect();
+
+            for key in matching_keys {
+                if let Some(req) = guard.remove(&key) {
+                    let _ = req.responder.send(PermissionOutcome::Cancelled);
+                }
+            }
+        }
+    }
+
+    /// Cancels all pending permissions across all runs.
+    pub fn cancel_all_pending_permissions(&self) {
+        if let Ok(mut guard) = self.pending_permissions.lock() {
+            for (_, req) in guard.drain() {
+                let _ = req.responder.send(PermissionOutcome::Cancelled);
+            }
+        }
+    }
+
+    /// Returns true if there is a pending permission request with the specified ID.
+    pub fn has_pending_permission(&self, request_id: &str) -> bool {
+        self.pending_permissions
+            .lock()
+            .map(|g| g.contains_key(request_id))
+            .unwrap_or(false)
+    }
+
+    /// Dispatches an incoming ACP permission request: registers in pending permissions,
+    /// emits `cline-permission-request` to the frontend, and awaits the user's decision.
+    /// Returns the JSON-RPC response Value ready to be written back to the child process.
+    pub async fn handle_incoming_permission_request<R: tauri::Runtime>(
+        &self,
+        app: &tauri::AppHandle<R>,
+        rpc_id: serde_json::Value,
+        run_id: &RunId,
+        session_id: &str,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        use tauri::Emitter;
+
+        let tool_call_id = params
+            .pointer("/toolCall/toolCallId")
+            .or_else(|| params.get("toolCallId"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown_tool")
+            .to_string();
+
+        let title = params
+            .pointer("/toolCall/title")
+            .or_else(|| params.get("title"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let kind = params
+            .pointer("/toolCall/kind")
+            .or_else(|| params.get("kind"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let options: Vec<PermissionOption> = params
+            .get("options")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|opt| serde_json::from_value(opt.clone()).ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // If options list is empty, immediately reject with cancelled rather than deadlocking the UI
+        if options.is_empty() {
+            log::warn!(
+                "[ClineAgent] Permission request {} has no options; rejecting as cancelled",
+                rpc_id
+            );
+            return Ok(format_permission_rpc_response(&rpc_id, &PermissionOutcome::Cancelled));
+        }
+
+        let request_id = match &rpc_id {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Number(n) => n.to_string(),
+            other => other.to_string(),
+        };
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        let req = PendingPermissionRequest {
+            run_id: run_id.clone(),
+            session_id: session_id.to_string(),
+            request_id: request_id.clone(),
+            tool_call_id: tool_call_id.clone(),
+            title: title.clone(),
+            options: options.clone(),
+            responder: tx,
+        };
+
+        // Always reply even if registration fails (e.g. stopped, inactive, or duplicate)
+        if let Err(err) = self.register_pending_permission(req) {
+            log::warn!(
+                "[ClineAgent] Failed to register permission request {}: {}; returning cancelled to unblock agent",
+                request_id,
+                err
+            );
+            return Ok(format_permission_rpc_response(&rpc_id, &PermissionOutcome::Cancelled));
+        }
+
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct PermissionEventPayload {
+            run_id: String,
+            session_id: String,
+            request_id: String,
+            tool_call_id: String,
+            title: Option<String>,
+            kind: Option<String>,
+            options: Vec<PermissionOption>,
+        }
+
+        let event_payload = PermissionEventPayload {
+            run_id: run_id.to_string(),
+            session_id: session_id.to_string(),
+            request_id: request_id.clone(),
+            tool_call_id,
+            title,
+            kind,
+            options,
+        };
+
+        let _ = app.emit("cline-permission-request", &event_payload);
+
+        match rx.await {
+            Ok(outcome) => Ok(format_permission_rpc_response(&rpc_id, &outcome)),
+            Err(_) => {
+                Ok(format_permission_rpc_response(&rpc_id, &PermissionOutcome::Cancelled))
+            }
+        }
+    }
+
+    /// Dispatches an incoming message from the ACP transport layer.
+    ///
+    /// If `msg.method == "session/request_permission"`, handles the reverse request,
+    /// emits the UI event, awaits user response, and returns `Some(json_rpc_response)`
+    /// to be written to the child process's stdin.
+    pub async fn dispatch_incoming_message<R: tauri::Runtime>(
+        &self,
+        app: &tauri::AppHandle<R>,
+        msg: crate::core::cline_acp_transport::IncomingNotification,
+        run_id: &RunId,
+        session_id: &str,
+    ) -> Option<serde_json::Value> {
+        if msg.method == "session/request_permission" {
+            let rpc_id = match msg.id {
+                Some(crate::core::cline_acp_transport::RequestId::Number(n)) => serde_json::json!(n),
+                Some(crate::core::cline_acp_transport::RequestId::String(s)) => serde_json::json!(s),
+                None => {
+                    log::warn!("[ClineAgent] Received session/request_permission without request ID");
+                    return None;
+                }
+            };
+            let params = msg.params.unwrap_or_else(|| serde_json::json!({}));
+            match self.handle_incoming_permission_request(app, rpc_id, run_id, session_id, &params).await {
+                Ok(response_value) => Some(response_value),
+                Err(err) => {
+                    log::error!("[ClineAgent] Error handling permission request: {}", err);
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    }
+
     /// Requests stop for an active or starting run.
     ///
     /// Triggers cancellation, begins stopping phase, forces process tree termination,
@@ -826,9 +1129,14 @@ impl ClineAgentState {
             }
         }
 
+        // Cancel any pending permission requests for this run
+        self.cancel_pending_permissions_for_run(&active_id);
+
         let current_phase = self.fence.current_phase();
         match current_phase {
-            RunPhase::Idle => return Err("No active run to stop".to_string()),
+            RunPhase::Idle => {
+                return Err("No active run to stop".to_string());
+            }
             RunPhase::Terminated { outcome } => {
                 return Err(format!(
                     "Cannot stop run {active_id}: run has already terminated with outcome {:?}",
@@ -864,6 +1172,9 @@ impl ClineAgentState {
             .record_terminal(&active_id, outcome.clone())
             .unwrap_or(outcome);
 
+        // Cancel any late pending permission requests again after terminal outcome
+        self.cancel_pending_permissions_for_run(&active_id);
+
         Ok(final_outcome)
     }
 
@@ -887,15 +1198,19 @@ impl ClineAgentState {
                     format!("Cline process exited unexpectedly with code {:?}", exit_code)
                 } else {
                     format!(
-                        "Cline process exited unexpectedly with code {:?}. Stderr tail:\n{}",
-                        exit_code, stderr_tail
+                        "Cline process exited unexpectedly (code {:?}): {}",
+                        exit_code,
+                        stderr_tail.trim()
                     )
                 };
-                RunTerminalOutcome::Failed { error: err_msg }
+                RunTerminalOutcome::Failed {
+                    error: err_msg,
+                    retryable: false,
+                }
             }
         };
 
-        // Clean up child process reference
+        self.cancel_pending_permissions_for_run(run_id);
         self.clear_child();
 
         self.fence.record_terminal(run_id, outcome)
@@ -910,6 +1225,8 @@ impl ClineAgentState {
                 let _ = child.terminate();
             }
         }
+
+        self.cancel_pending_permissions_for_run(run_id);
 
         let outcome = RunTerminalOutcome::TimedOut {
             duration_ms: duration.as_millis() as u64,
@@ -930,6 +1247,7 @@ impl ClineAgentState {
             }
         }
         if let Some(run_id) = self.fence.current_run_id() {
+            self.cancel_pending_permissions_for_run(&run_id);
             let _ = self.fence.record_terminal(
                 &run_id,
                 RunTerminalOutcome::Cancelled {
@@ -937,6 +1255,7 @@ impl ClineAgentState {
                 },
             );
         }
+        self.cancel_all_pending_permissions();
     }
 
     /// Checks cross-backend concurrency and starts a run if no other backend is running.
@@ -1012,6 +1331,23 @@ pub async fn stop_cline_agent(
     let target = run_id.map(RunId::new);
     state
         .stop_active_run(target.as_ref(), "User requested stop")
+        .map(|_| ())
+}
+
+/// Responds to an ACP permission request with explicit user selection.
+///
+/// Ensures run ID match, verifies offered options, rejects stale/unknown requests,
+/// and never defaults to approval on errors.
+#[tauri::command]
+pub async fn respond_cline_permission(
+    state: tauri::State<'_, ClineAgentState>,
+    run_id: String,
+    request_id: String,
+    option_id: String,
+) -> Result<(), String> {
+    let run = RunId::new(run_id);
+    state
+        .respond_permission(&run, &request_id, &option_id)
         .map(|_| ())
 }
 
@@ -1745,6 +2081,406 @@ mod tests {
             let ver = status.version.unwrap();
             assert!(!ver.is_empty(), "Version string must not be empty");
         }
+    }
+
+    #[tokio::test]
+    async fn test_permission_lifecycle_allow_and_deny() {
+        let state = ClineAgentState::default();
+        #[cfg(target_os = "windows")]
+        let valid_path = PathBuf::from("C:\\test\\workspace");
+        #[cfg(not(target_os = "windows"))]
+        let valid_path = PathBuf::from("/test/workspace");
+
+        let run_id = state
+            .try_start_run(false, &valid_path, Some(RunId::new("run-perm-1")), Some("sess-perm-1"))
+            .await
+            .unwrap();
+
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        let req = PendingPermissionRequest {
+            run_id: run_id.clone(),
+            session_id: "sess-perm-1".to_string(),
+            request_id: "rpc-req-1".to_string(),
+            tool_call_id: "call-123".to_string(),
+            title: Some("Edit src/main.rs".to_string()),
+            options: vec![
+                PermissionOption {
+                    option_id: "allow".to_string(),
+                    name: "Allow".to_string(),
+                    kind: Some("allow".to_string()),
+                },
+                PermissionOption {
+                    option_id: "deny".to_string(),
+                    name: "Deny".to_string(),
+                    kind: Some("deny".to_string()),
+                },
+            ],
+            responder: tx,
+        };
+
+        // 1. Register pending permission
+        assert!(state.register_pending_permission(req).is_ok());
+        assert!(state.has_pending_permission("rpc-req-1"));
+
+        // 2. Responding with offered option "allow" succeeds
+        let outcome = state.respond_permission(&run_id, "rpc-req-1", "allow");
+        assert!(outcome.is_ok());
+        assert_eq!(
+            outcome.unwrap(),
+            PermissionOutcome::Selected {
+                option_id: "allow".to_string()
+            }
+        );
+
+        // 3. Receiver receives Selected { optionId: "allow" }
+        let received = rx.try_recv().unwrap();
+        assert_eq!(
+            received,
+            PermissionOutcome::Selected {
+                option_id: "allow".to_string()
+            }
+        );
+
+        // 4. Request is no longer pending
+        assert!(!state.has_pending_permission("rpc-req-1"));
+
+        // 5. Duplicate response is rejected
+        let dup = state.respond_permission(&run_id, "rpc-req-1", "allow");
+        assert!(dup.is_err());
+        assert!(dup.unwrap_err().contains("Unknown or already resolved"));
+
+        // 6. Test "deny" path
+        let (tx_deny, mut rx_deny) = tokio::sync::oneshot::channel();
+        let req_deny = PendingPermissionRequest {
+            run_id: run_id.clone(),
+            session_id: "sess-perm-1".to_string(),
+            request_id: "rpc-req-deny".to_string(),
+            tool_call_id: "call-124".to_string(),
+            title: Some("Delete file".to_string()),
+            options: vec![
+                PermissionOption {
+                    option_id: "allow".to_string(),
+                    name: "Allow".to_string(),
+                    kind: Some("allow".to_string()),
+                },
+                PermissionOption {
+                    option_id: "deny".to_string(),
+                    name: "Deny".to_string(),
+                    kind: Some("deny".to_string()),
+                },
+            ],
+            responder: tx_deny,
+        };
+        assert!(state.register_pending_permission(req_deny).is_ok());
+        let outcome_deny = state.respond_permission(&run_id, "rpc-req-deny", "deny");
+        assert!(outcome_deny.is_ok());
+        assert_eq!(
+            outcome_deny.unwrap(),
+            PermissionOutcome::Selected {
+                option_id: "deny".to_string()
+            }
+        );
+        assert_eq!(
+            rx_deny.try_recv().unwrap(),
+            PermissionOutcome::Selected {
+                option_id: "deny".to_string()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_permission_duplicate_registration_rejected() {
+        let state = ClineAgentState::default();
+        #[cfg(target_os = "windows")]
+        let valid_path = PathBuf::from("C:\\test\\workspace");
+        #[cfg(not(target_os = "windows"))]
+        let valid_path = PathBuf::from("/test/workspace");
+
+        let run_id = state
+            .try_start_run(false, &valid_path, Some(RunId::new("run-perm-dup")), Some("sess-dup"))
+            .await
+            .unwrap();
+
+        let (tx1, _rx1) = tokio::sync::oneshot::channel();
+        let req1 = PendingPermissionRequest {
+            run_id: run_id.clone(),
+            session_id: "sess-dup".to_string(),
+            request_id: "req-dup-id".to_string(),
+            tool_call_id: "call-1".to_string(),
+            title: None,
+            options: vec![],
+            responder: tx1,
+        };
+        assert!(state.register_pending_permission(req1).is_ok());
+
+        let (tx2, _rx2) = tokio::sync::oneshot::channel();
+        let req2 = PendingPermissionRequest {
+            run_id: run_id.clone(),
+            session_id: "sess-dup".to_string(),
+            request_id: "req-dup-id".to_string(),
+            tool_call_id: "call-2".to_string(),
+            title: None,
+            options: vec![],
+            responder: tx2,
+        };
+        let err = state.register_pending_permission(req2);
+        assert!(err.is_err());
+        assert!(err.unwrap_err().contains("Cannot register duplicate"));
+    }
+
+    #[tokio::test]
+    async fn test_permission_registration_when_inactive_or_mismatched_run_rejected() {
+        let state = ClineAgentState::default();
+        #[cfg(target_os = "windows")]
+        let valid_path = PathBuf::from("C:\\test\\workspace");
+        #[cfg(not(target_os = "windows"))]
+        let valid_path = PathBuf::from("/test/workspace");
+
+        // 1. Register when no run is active
+        let (tx1, _rx1) = tokio::sync::oneshot::channel();
+        let req1 = PendingPermissionRequest {
+            run_id: RunId::new("run-inactive"),
+            session_id: "sess-1".to_string(),
+            request_id: "req-inactive".to_string(),
+            tool_call_id: "call-1".to_string(),
+            title: None,
+            options: vec![],
+            responder: tx1,
+        };
+        let err1 = state.register_pending_permission(req1);
+        assert!(err1.is_err());
+        assert!(err1.unwrap_err().contains("is not active"));
+
+        // 2. Start run, but try to register for different run ID
+        let _run_id = state
+            .try_start_run(false, &valid_path, Some(RunId::new("run-active-1")), Some("sess-1"))
+            .await
+            .unwrap();
+
+        let (tx2, _rx2) = tokio::sync::oneshot::channel();
+        let req2 = PendingPermissionRequest {
+            run_id: RunId::new("run-other-mismatched"),
+            session_id: "sess-1".to_string(),
+            request_id: "req-mismatch".to_string(),
+            tool_call_id: "call-2".to_string(),
+            title: None,
+            options: vec![],
+            responder: tx2,
+        };
+        let err2 = state.register_pending_permission(req2);
+        assert!(err2.is_err());
+        assert!(err2.unwrap_err().contains("is not active"));
+    }
+
+    #[tokio::test]
+    async fn test_permission_timeout_and_crash_cleanup() {
+        let state = ClineAgentState::default();
+        #[cfg(target_os = "windows")]
+        let valid_path = PathBuf::from("C:\\test\\workspace");
+        #[cfg(not(target_os = "windows"))]
+        let valid_path = PathBuf::from("/test/workspace");
+
+        let run_id = state
+            .try_start_run(false, &valid_path, Some(RunId::new("run-perm-timeout")), Some("sess-timeout"))
+            .await
+            .unwrap();
+
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        let req = PendingPermissionRequest {
+            run_id: run_id.clone(),
+            session_id: "sess-timeout".to_string(),
+            request_id: "req-timeout-1".to_string(),
+            tool_call_id: "call-t".to_string(),
+            title: None,
+            options: vec![],
+            responder: tx,
+        };
+        assert!(state.register_pending_permission(req).is_ok());
+
+        // 1. Timeout cancels pending permissions
+        let timeout_outcome = state.handle_timeout(&run_id, std::time::Duration::from_millis(5000));
+        assert!(timeout_outcome.is_some());
+        assert_eq!(rx.try_recv().unwrap(), PermissionOutcome::Cancelled);
+        assert!(!state.has_pending_permission("req-timeout-1"));
+
+        // 2. Process crash cancels pending permissions
+        let state2 = ClineAgentState::default();
+        let run2 = state2
+            .try_start_run(false, &valid_path, Some(RunId::new("run-crash-1")), Some("sess-crash"))
+            .await
+            .unwrap();
+        let (tx2, mut rx2) = tokio::sync::oneshot::channel();
+        let req2 = PendingPermissionRequest {
+            run_id: run2.clone(),
+            session_id: "sess-crash".to_string(),
+            request_id: "req-crash-1".to_string(),
+            tool_call_id: "call-c".to_string(),
+            title: None,
+            options: vec![],
+            responder: tx2,
+        };
+        assert!(state2.register_pending_permission(req2).is_ok());
+        let crash_outcome = state2.handle_process_crash(&run2, Some(1), "Fatal error in child");
+        assert!(crash_outcome.is_some());
+        assert_eq!(rx2.try_recv().unwrap(), PermissionOutcome::Cancelled);
+        assert!(!state2.has_pending_permission("req-crash-1"));
+    }
+
+    #[test]
+    fn test_format_permission_rpc_response() {
+        // Selected outcome format
+        let rpc_id = serde_json::json!(42);
+        let selected = PermissionOutcome::Selected {
+            option_id: "allow".to_string(),
+        };
+        let res1 = format_permission_rpc_response(&rpc_id, &selected);
+        assert_eq!(res1["jsonrpc"], "2.0");
+        assert_eq!(res1["id"], 42);
+        assert_eq!(res1["result"]["outcome"]["outcome"], "selected");
+        assert_eq!(res1["result"]["outcome"]["optionId"], "allow");
+
+        // Cancelled outcome format
+        let cancelled = PermissionOutcome::Cancelled;
+        let res2 = format_permission_rpc_response(&rpc_id, &cancelled);
+        assert_eq!(res2["jsonrpc"], "2.0");
+        assert_eq!(res2["id"], 42);
+        assert_eq!(res2["result"]["outcome"]["outcome"], "cancelled");
+        assert!(res2["result"]["outcome"]["optionId"].is_null());
+    }
+
+    #[tokio::test]
+    async fn test_permission_respond_when_terminal_or_inactive_rejected() {
+        let state = ClineAgentState::default();
+        #[cfg(target_os = "windows")]
+        let valid_path = PathBuf::from("C:\\test\\workspace");
+        #[cfg(not(target_os = "windows"))]
+        let valid_path = PathBuf::from("/test/workspace");
+
+        let run_id = state
+            .try_start_run(false, &valid_path, Some(RunId::new("run-perm-term")), Some("sess-term"))
+            .await
+            .unwrap();
+
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let req = PendingPermissionRequest {
+            run_id: run_id.clone(),
+            session_id: "sess-term".to_string(),
+            request_id: "req-term-1".to_string(),
+            tool_call_id: "call-1".to_string(),
+            title: None,
+            options: vec![PermissionOption {
+                option_id: "allow".to_string(),
+                name: "Allow".to_string(),
+                kind: Some("allow".to_string()),
+            }],
+            responder: tx,
+        };
+        assert!(state.register_pending_permission(req).is_ok());
+
+        // Stop run so it transitions to Terminated
+        let _ = state.stop_active_run(Some(&run_id), "Stop run");
+
+        // Attempting to respond to permission after run is no longer active is strictly rejected
+        let res = state.respond_permission(&run_id, "req-term-1", "allow");
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("is no longer active"));
+    }
+
+    #[tokio::test]
+    async fn test_permission_unknown_option_and_mismatched_run_rejected() {
+        let state = ClineAgentState::default();
+        #[cfg(target_os = "windows")]
+        let valid_path = PathBuf::from("C:\\test\\workspace");
+        #[cfg(not(target_os = "windows"))]
+        let valid_path = PathBuf::from("/test/workspace");
+
+        let run_id = state
+            .try_start_run(false, &valid_path, Some(RunId::new("run-perm-2")), Some("sess-perm-2"))
+            .await
+            .unwrap();
+
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        let req = PendingPermissionRequest {
+            run_id: run_id.clone(),
+            session_id: "sess-perm-2".to_string(),
+            request_id: "rpc-req-2".to_string(),
+            tool_call_id: "call-456".to_string(),
+            title: Some("Run terminal command".to_string()),
+            options: vec![
+                PermissionOption {
+                    option_id: "allow".to_string(),
+                    name: "Allow".to_string(),
+                    kind: Some("allow".to_string()),
+                },
+                PermissionOption {
+                    option_id: "deny".to_string(),
+                    name: "Deny".to_string(),
+                    kind: Some("deny".to_string()),
+                },
+            ],
+            responder: tx,
+        };
+
+        state.register_pending_permission(req).unwrap();
+
+        // 1. Mismatched run ID rejected
+        let wrong_run = RunId::new("run-wrong");
+        let mismatched = state.respond_permission(&wrong_run, "rpc-req-2", "allow");
+        assert!(mismatched.is_err());
+        let err_str = mismatched.unwrap_err();
+        assert!(err_str.contains("Run ID mismatch") || err_str.contains("run-wrong"));
+
+        // 2. Unknown option ID rejected (never defaults to approval!)
+        let unknown_opt = state.respond_permission(&run_id, "rpc-req-2", "auto_approve_always");
+        assert!(unknown_opt.is_err());
+        assert!(unknown_opt.unwrap_err().contains("Invalid option_id"));
+
+        // 3. Request remains pending (neither approved nor deleted)
+        assert!(state.has_pending_permission("rpc-req-2"));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_permission_cancellation_on_stop() {
+        let state = ClineAgentState::default();
+        #[cfg(target_os = "windows")]
+        let valid_path = PathBuf::from("C:\\test\\workspace");
+        #[cfg(not(target_os = "windows"))]
+        let valid_path = PathBuf::from("/test/workspace");
+
+        let run_id = state
+            .try_start_run(false, &valid_path, Some(RunId::new("run-perm-3")), Some("sess-perm-3"))
+            .await
+            .unwrap();
+
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        let req = PendingPermissionRequest {
+            run_id: run_id.clone(),
+            session_id: "sess-perm-3".to_string(),
+            request_id: "rpc-req-3".to_string(),
+            tool_call_id: "call-789".to_string(),
+            title: Some("File write".to_string()),
+            options: vec![PermissionOption {
+                option_id: "allow".to_string(),
+                name: "Allow".to_string(),
+                kind: Some("allow".to_string()),
+            }],
+            responder: tx,
+        };
+
+        state.register_pending_permission(req).unwrap();
+        assert!(state.has_pending_permission("rpc-req-3"));
+
+        // Stopping the active run automatically cancels all pending permissions for that run
+        let stop_res = state.stop_active_run(Some(&run_id), "User stopped run");
+        assert!(stop_res.is_ok());
+
+        // Receiver receives PermissionOutcome::Cancelled
+        let received = rx.try_recv().unwrap();
+        assert_eq!(received, PermissionOutcome::Cancelled);
+
+        // Permission is cleared from pending map
+        assert!(!state.has_pending_permission("rpc-req-3"));
     }
 }
 

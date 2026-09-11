@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Backend and Model Identity Types for Coding Agent Panel
  *
  * Implements Stage 04 of the Cline ACP Integration Roadmap.
@@ -119,4 +119,24 @@ export function persistCodingAgentBackend(backend: CodingAgentBackend): void {
 
 export function getBackendCapabilities(backend: CodingAgentBackend): BackendCapabilities {
   return BACKEND_CAPABILITIES[backend] ?? BACKEND_CAPABILITIES[DEFAULT_CODING_AGENT_BACKEND]
+}
+
+export interface PermissionOption {
+  optionId: string
+  name: string
+  kind?: 'allow' | 'deny' | string
+}
+
+export type PermissionOutcome =
+  | { outcome: 'selected'; optionId: string }
+  | { outcome: 'cancelled' }
+
+export interface AcpPermissionRequestPayload {
+  runId: string
+  sessionId: string
+  requestId: string
+  toolCallId: string
+  title?: string
+  options: PermissionOption[]
+  kind?: string
 }

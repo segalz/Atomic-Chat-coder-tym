@@ -5,10 +5,10 @@
 - Target: `/Users/zvisegal/devlope/Atomic-Chat-coder-tym`
 - Plan: `docs/msp-plan/cline-acp/instructions.md`
 - Created: 2026-09-10
-- Overall status: IN_PROGRESS — stage 10 completed, stage 11 ready
-- Completed: **10 / 22**
-- Current stage: **11** — Implement permission request lifecycle (PENDING)
-- Next eligible stage: **11** — Implement permission request lifecycle (High, independent review required)
+- Overall status: IN_PROGRESS — stage 11 completed, stage 12 ready
+- Completed: **11 / 22**
+- Current stage: **12** — Integrate edit and command presentation (PENDING)
+- Next eligible stage: **12** — Integrate edit and command presentation (High, independent review required)
 - Blocking issue: none
 - Authorization: planning documents only; explain exact source edits and obtain approval as required by instructions.md.
 - Planning snapshot branch: `feat/windows-cline-cli` (branched from `codex/ollama-agent-migration`); re-verify on every run.
@@ -34,7 +34,7 @@ Only the first non-DONE stage may be selected. A blocked or approval-waiting sta
 | 08 | Normalize streamed events | Medium | Required | DONE |
 | 09 | Wire backend-specific routing | Medium | Required | DONE |
 | 10 | Add provider-aware model picker | Low | Optional | DONE |
-| 11 | Implement permission request lifecycle | High | Required | PENDING |
+| 11 | Implement permission request lifecycle | High | Required | DONE |
 | 12 | Integrate edit and command presentation | High | Required | PENDING |
 | 13 | Persist Cline conversation identity | Medium | Required | PENDING |
 | 14 | Handle provider switching context | Medium | Required | PENDING |
@@ -447,6 +447,85 @@ Only the first non-DONE stage may be selected. A blocked or approval-waiting sta
 - Final stage status: DONE
 - Completed count: 10 / 22
 - Next eligible stage: 11 — Implement permission request lifecycle (High, independent review required).
+
+### Stage 11 — Implement permission request lifecycle (2026-09-11)
+
+- Stage / attempt / date: Stage 11 / attempt 1 / 2026-09-11
+- Checkout: absolute root, branch, HEAD: `C:\Develop\Atomic-Chat-coder-tym`, `feat/windows-cline-cli`, `a5e952f`
+- Starting dirty files and preservation: clean working tree after Stage 10 commit `a5e952f`.
+- Approved scope and exact files explained to user: User reviewed and authorized Stage 11 implementation plan, delegating development to Cline CLI in micro-steps under continuous supervision, followed by mandatory independent review with Grok CLI (`C:\Users\segal\.grok\bin\grok.exe`).
+- Changes or read-only findings:
+  - `src-tauri/src/core/cline_acp_transport.rs`:
+    - Preserved reverse request `id` (`pub id: Option<RequestId>`) in `IncomingNotification` and `handle_incoming` so ACP reverse requests can be correlated and answered.
+  - `src-tauri/src/core/cline_agent.rs`:
+    - Added permission types: `PermissionOption` (`id`, `label`, `is_primary`), `PermissionOutcome` (`Selected { option_id }`, `Cancelled`), and `PendingPermissionRequest`.
+    - Added `pending_permissions: Mutex<HashMap<String, PendingPermissionRequest>>` to `ClineAgentState`.
+    - Implemented `register_pending_permission` with atomic run fencing under `pending_permissions` lock and duplicate `request_id` rejection.
+    - Implemented `respond_permission` verifying run is active, run ID matches, and selected option is in the offered allow-list.
+    - Implemented `cancel_pending_permissions_for_run` and `cancel_all_pending_permissions`.
+    - Implemented `handle_incoming_permission_request` which emits `cline-permission-request` to the frontend, awaits the user decision, and always replies (replying `Cancelled` on register failure or empty options so the child process never hangs).
+    - Implemented `dispatch_incoming_message` to route incoming ACP reverse requests.
+    - Implemented `format_permission_rpc_response` producing ACP v1-compliant JSON-RPC responses.
+    - Restored `RunPhase::Idle => return Err("No active run to stop".to_string())` in `stop_active_run`.
+    - Comprehensive Rust unit tests added: allow/deny, duplicate rejection, inactive/mismatched run rejection, timeout and process crash cleanup, RPC envelope format, and inactive respond rejection.
+  - `src-tauri/src/lib.rs`:
+    - Registered `core::cline_agent::respond_cline_permission` in Tauri command registry.
+    - Hooked `cline_state.shutdown()` into Tauri `RunEvent::Exit`.
+  - `web-app/src/containers/CodingAgentPanel/backend-identity.ts`:
+    - Exported `PermissionOption`, `PermissionOutcome`, and `AcpPermissionRequestPayload`.
+  - `web-app/src/containers/CodingAgentPanel/agent-event-adapter.ts`:
+    - Re-exported permission types from `backend-identity.ts`.
+    - Normalized `permission_request` event payload.
+  - `web-app/src/containers/CodingAgentPanel/backend-router.ts`:
+    - Implemented `routeRespondPermission` enforcing strict backend routing: dispatches to `respond_cline_permission` for `cline-acp` and throws for `direct-ollama`.
+  - `web-app/src/containers/CodingAgentPanel/PermissionRequest.tsx` & `PermissionRequest.css`:
+    - Implemented `PermissionRequest` component displaying title, tool ID, kind badge, and dynamic option buttons with accessible `role="alertdialog"`.
+  - `web-app/src/containers/CodingAgentPanel/index.tsx`:
+    - Fenced `cline-permission-request` listener with `activeRun && e.payload.runId === activeRun.runId`.
+    - Clears `pendingPermission` on `done`, `error`, `finishAgentRun`, and `stopSelectedBackend`.
+    - `handleRespondPermission` only clears `pendingPermission` on success; retains banner on error for retry.
+    - Rendered `PermissionRequest` banner above the chat input box, disabled when `!isRunning`.
+  - `web-app/src/containers/CodingAgentPanel/permission-lifecycle.test.tsx`:
+    - Added 8 focused unit tests for permission UI rendering, button interaction, error handling, run fencing, and terminal clearing.
+- Acceptance criteria verified:
+  1. No auto-approval: ACP permissions strictly require explicit user button click; no auto-approval in backend or UI.
+  2. Always reply on the wire: If permission registration fails (run stopped/inactive/duplicate) or options is empty, `handle_incoming_permission_request` immediately returns an ACP `Cancelled` response.
+  3. Atomic fencing: `register_pending_permission` locks `pending_permissions` and verifies `self.fence.is_active()` under the lock, eliminating TOCTOU races with run stop/terminal transitions.
+  4. Backend separation: Ollama diff approval commands are never called for `cline-acp`; `routeRespondPermission` routes exclusively to `respond_cline_permission`.
+  5. UI banner and responsive options: Banner displays tool name, title, kind badge, and dynamically offered options; disables when run stops.
+  6. Test coverage and type safety: All 9 test files passed (78/78 tests passed, 100%), TypeScript type check passes cleanly with 0 errors.
+- Test commands / outcomes / relevant output:
+  - `corepack yarn workspace @janhq/web-app exec tsc -b tsconfig.app.json --pretty false`: PASSED (0 errors).
+  - `corepack yarn workspace @janhq/web-app test run src/containers/CodingAgentPanel/`: PASSED (9 test files, 78/78 tests passed).
+- Skipped checks and reason: Full Tauri desktop build deferred to Stage 21 per contract.
+- Reviewer name/tool and availability result: Independent code reviewer Grok CLI (`C:\Users\segal\.grok\bin\grok.exe`, model `grok-beta`).
+- Review round 1 verdict and findings: CHANGES_REQUIRED. Eight findings identified:
+  1. Reverse request correlation ID loss in `cline_acp_transport.rs`.
+  2. ACP v1 permission response wire format mismatch.
+  3. Missing Tauri command registration for `respond_cline_permission`.
+  4. Missing UI listener wiring for `cline-permission-request`.
+  5. `routeRespondPermission` missing from `backend-router.ts`.
+  6. Lack of permission cancellation on run stop/error/terminal outcomes.
+  7. Empty options list hanging edge case.
+  8. Unhandled race condition on concurrent permission requests.
+- Findings reproduced / rejected with evidence: All 8 findings reproduced and addressed across backend and frontend code.
+- Fixes and rerun results:
+  - Preserved reverse request `id` in `cline_acp_transport.rs`.
+  - Implemented ACP v1 response format in `format_permission_rpc_response`.
+  - Registered `respond_cline_permission` in `src-tauri/src/lib.rs`.
+  - Wired `cline-permission-request` listener and `PermissionRequest` component in `index.tsx`.
+  - Implemented and exported `routeRespondPermission` in `backend-router.ts`.
+  - Added `cancel_pending_permissions_for_run` and `cancel_all_pending_permissions` in `cline_agent.rs`.
+  - Handled empty options list by immediately replying `Cancelled`.
+  - Prevented races via atomic check under lock and duplicate request ID rejection.
+- Closure review verdict (High always; Medium after fixes):
+  - Round 2: CHANGES_REQUIRED. Verified the 8 findings were addressed, requested 5 final closure gates (ACP reader dispatch path, always-reply on register failure, restored RunPhase::Idle stop error, tightened UI fence/clearing, atomic fence re-check under pending lock).
+  - Round 3: PASS. All 5 closure gates satisfied, zero defects, wire safety invariants verified, code ready for commit.
+- Remaining issues / blocker / accepted limitation: None.
+- Final diff self-check: Checked git status and diff; only targeted Stage 11 files and tracker updated.
+- Final stage status: DONE
+- Completed count: 11 / 22
+- Next eligible stage: 12 — Integrate edit and command presentation (High, independent review required).
 
 Append one entry per execution/review attempt; retain earlier entries when resuming a stage.
 
