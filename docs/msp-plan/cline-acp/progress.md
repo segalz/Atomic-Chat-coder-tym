@@ -5,10 +5,10 @@
 - Target: `/Users/zvisegal/devlope/Atomic-Chat-coder-tym`
 - Plan: `docs/msp-plan/cline-acp/instructions.md`
 - Created: 2026-09-10
-- Overall status: IN_PROGRESS — stage 04 complete; stopped at the one-stage boundary
-- Completed: **4 / 22**
-- Current stage: none (04 DONE)
-- Next eligible stage: **05** — Implement ACP transport (High, independent review required)
+- Overall status: IN_PROGRESS — stage 05 complete; stopped at the one-stage boundary
+- Completed: **5 / 22**
+- Current stage: none (05 DONE)
+- Next eligible stage: **06** — Implement cancellation and cleanup (High, independent review required)
 - Blocking issue: none
 - Authorization: planning documents only; explain exact source edits and obtain approval as required by instructions.md.
 - Planning snapshot branch: `feat/windows-cline-cli` (branched from `codex/ollama-agent-migration`); re-verify on every run.
@@ -28,7 +28,7 @@ Only the first non-DONE stage may be selected. A blocked or approval-waiting sta
 | 02 | Probe installed ACP capabilities | Medium | Required | DONE |
 | 03 | Freeze integration contract | Medium | Required | DONE |
 | 04 | Add backend and model identity types | Low | Optional | DONE |
-| 05 | Implement ACP transport | High | Required | PENDING |
+| 05 | Implement ACP transport | High | Required | DONE |
 | 06 | Implement cancellation and cleanup | High | Required | PENDING |
 | 07 | Implement sessions and explicit model binding | Medium | Required | PENDING |
 | 08 | Normalize streamed events | Medium | Required | PENDING |
@@ -196,6 +196,45 @@ Only the first non-DONE stage may be selected. A blocked or approval-waiting sta
 - Final stage status: DONE
 - Completed count: 4 / 22
 - Next eligible stage: 05 — Implement ACP transport (High, independent review required).
+
+### Stage 05 — Implement ACP transport (2026-09-11)
+
+- Stage / attempt / date: Stage 05 / attempt 1 / 2026-09-11
+- Checkout: absolute root, branch, HEAD: `C:\Develop\Atomic-Chat-coder-tym`, `feat/windows-cline-cli`, `042162897e5bd3e83142e18f0624fa6b3ab9fab6`
+- Starting dirty files and preservation: clean tree upon branch checkout; Stage 04 modules and types preserved.
+- Approved scope and exact files explained to user: User explicitly reviewed and approved Stage 05 implementation plan and scope in conversation.
+- Changes or read-only findings:
+  - Added official ACP Rust SDK dependency `agent-client-protocol = { version = "2.1.0", default-features = false }` to `src-tauri/Cargo.toml`.
+  - Exported desktop-only module `cline_acp_transport` in `src-tauri/src/core/mod.rs`.
+  - Implemented `src-tauri/src/core/cline_acp_transport.rs`:
+    - `resolve_cline_executable`: resolves `cline.cmd` on Windows (`%APPDATA%\npm\cline.cmd`, `%LOCALAPPDATA%`, `%ProgramFiles%`) and Unix (`/usr/local/bin/cline`, `/usr/bin/cline`), plus PATH search. Enforces absolute paths and strictly rejects dangerous shell metacharacters (`&`, `|`, `;`, `$`, '`', `<`, `>`, `\n`, `\r`, `%`, `^`, `"`) and directory traversal sequences (`..`).
+    - `ClineAcpTransportConfig`: builder holding executable path, working directory, extra environment variables, max frame bytes (default 10 MiB), and max stderr tail bytes (default 64 KiB), bridging to official SDK `AcpAgentConfig::new(&self.executable_path).arg("--acp")` and `AcpAgent`.
+    - `StderrTailBuffer`: bounded to 64 KiB (65,536 bytes) with precise truncation logic and lossy UTF-8 rendering notice.
+    - `IncrementalMessageBuffer`: newline-delimited JSON-RPC 2.0 streaming parser handling split chunks, coalescing, oversized frame protection, and clean EOF.
+    - `RequestId`, `IncomingNotification`, and `RequestCorrelator`: thread-safe correlation tracking in-flight client requests, routing reverse agent requests/notifications (e.g. `session/request_permission`) without false stale-id errors, handling out-of-order responses, and cancelling all pending requests with `ConnectionClosed` on EOF/disconnect.
+    - `ClineAcpTransport`: aggregates configuration, correlator, incremental buffer, and stderr tail buffer.
+    - 19 comprehensive unit tests covering framing, correlation, truncation, boundaries, security sanitization, and path resolution.
+- Acceptance criteria verified:
+  - Framed JSON-RPC request correlation and incremental message buffer pass all tests.
+  - Stderr tail is strictly bounded to 64 KiB.
+  - Executable resolution enforces absolute paths and rejects shell injection and traversal.
+  - Reverse agent requests pass through without triggering stale client response errors.
+  - Zero regressions across existing CodingAgentPanel test suite (37/37 tests pass).
+  - TypeScript type check (`tsc --noEmit`) passes cleanly with 0 errors.
+- Test commands / outcomes / relevant output:
+  - `corepack yarn workspace @janhq/web-app test run src/containers/CodingAgentPanel/`: PASSED (5 test files, 37/37 tests passed).
+  - `corepack yarn workspace @janhq/web-app tsc --noEmit`: PASSED (0 errors).
+- Skipped checks and reason: Full Tauri desktop build deferred to Stage 21 per contract.
+- Reviewer name/tool and availability result: Independent Subagent Reviewer (`d841ffc4-3b44-4eb9-bfe5-b2eda17d8ff3`).
+- Review round 1 verdict and findings: CHANGES_REQUIRED. Five findings: StderrTailBuffer truncation on exact-limit push, contradictory assertions in test, missing directory traversal (`..`) and non-absolute path checks, missing Windows shell characters (`%`, `^`, `"`), and conflating reverse requests with responses in RequestCorrelator.
+- Findings reproduced / rejected with evidence: All five reproduced and fixed in `src-tauri/src/core/cline_acp_transport.rs`.
+- Fixes and rerun results: Fixed `StderrTailBuffer::push`, hardened `contains_dangerous_shell_chars` and `resolve_cline_executable`, fixed `RequestCorrelator::handle_incoming`, and added 3 new unit tests for 64 KiB exact boundary, relative/traversal rejection, and reverse requests.
+- Closure review verdict (High always; Medium after fixes): PASS on Round 2 from independent reviewer.
+- Remaining issues / blocker / accepted limitation: None.
+- Final diff self-check: Checked git status and diff; only targeted Stage 05 files and tracker updated.
+- Final stage status: DONE
+- Completed count: 5 / 22
+- Next eligible stage: 06 — Implement cancellation and cleanup (High, independent review required).
 
 Append one entry per execution/review attempt; retain earlier entries when resuming a stage.
 
