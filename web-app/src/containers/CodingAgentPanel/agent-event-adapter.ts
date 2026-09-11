@@ -1,27 +1,20 @@
-export type CodingAgentBackend = 'legacy-claude' | 'direct-ollama'
-
-export const DEFAULT_CODING_AGENT_BACKEND: CodingAgentBackend = 'direct-ollama'
-export const CODING_AGENT_BACKEND_STORAGE_KEY = 'coding-agent-backend'
-
-export function isCodingAgentBackend(value: string | null): value is CodingAgentBackend {
-  return value === 'legacy-claude' || value === 'direct-ollama'
-}
-
-export function getInitialCodingAgentBackend(): CodingAgentBackend {
-  const envBackend = import.meta.env.VITE_CODING_AGENT_BACKEND
-  if (isCodingAgentBackend(envBackend)) return envBackend
-
-  if (typeof window === 'undefined') return DEFAULT_CODING_AGENT_BACKEND
-
-  try {
-    const storedBackend = window.localStorage.getItem(CODING_AGENT_BACKEND_STORAGE_KEY)
-    if (isCodingAgentBackend(storedBackend)) return storedBackend
-  } catch {
-    // Ignore storage failures and keep the conservative default.
-  }
-
-  return DEFAULT_CODING_AGENT_BACKEND
-}
+export {
+  type CodingAgentBackend,
+  DEFAULT_CODING_AGENT_BACKEND,
+  CODING_AGENT_BACKEND_STORAGE_KEY,
+  isCodingAgentBackend,
+  resolveCodingAgentBackend,
+  getInitialCodingAgentBackend,
+  getBackendCapabilities,
+  type BackendCapabilities,
+  type ModelIdentity,
+  CLINE_ACP_BACKEND,
+  CLINE_ACP_AGENT_NAME,
+  CLINE_DEFAULT_MODEL_ID,
+  CLINE_DEFAULT_MODEL_DISPLAY_NAME,
+  CLINE_DEFAULT_PROVIDER_ID,
+  CLINE_DEFAULT_MODEL_IDENTITY,
+} from './backend-identity'
 
 export interface TextDeltaPayload {
   text: string

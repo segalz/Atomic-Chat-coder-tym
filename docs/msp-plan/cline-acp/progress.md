@@ -5,13 +5,13 @@
 - Target: `/Users/zvisegal/devlope/Atomic-Chat-coder-tym`
 - Plan: `docs/msp-plan/cline-acp/instructions.md`
 - Created: 2026-09-10
-- Overall status: IN_PROGRESS — stage 03 complete; stopped at the one-stage boundary
-- Completed: **3 / 22**
-- Current stage: none (03 DONE)
-- Next eligible stage: **04** — Add backend and model identity types (Low, independent review optional)
+- Overall status: IN_PROGRESS — stage 04 complete; stopped at the one-stage boundary
+- Completed: **4 / 22**
+- Current stage: none (04 DONE)
+- Next eligible stage: **05** — Implement ACP transport (High, independent review required)
 - Blocking issue: none
 - Authorization: planning documents only; explain exact source edits and obtain approval as required by instructions.md.
-- Planning snapshot branch: `codex/ollama-agent-migration`; re-verify on every run.
+- Planning snapshot branch: `feat/windows-cline-cli` (branched from `codex/ollama-agent-migration`); re-verify on every run.
 - Medium/High independent-review gate: mandatory; no waiver for unavailable reviewer.
 
 ## Status meanings
@@ -27,7 +27,7 @@ Only the first non-DONE stage may be selected. A blocked or approval-waiting sta
 | 01 | Verify checkout and baseline | Easy | Optional | DONE |
 | 02 | Probe installed ACP capabilities | Medium | Required | DONE |
 | 03 | Freeze integration contract | Medium | Required | DONE |
-| 04 | Add backend and model identity types | Low | Optional | PENDING |
+| 04 | Add backend and model identity types | Low | Optional | DONE |
 | 05 | Implement ACP transport | High | Required | PENDING |
 | 06 | Implement cancellation and cleanup | High | Required | PENDING |
 | 07 | Implement sessions and explicit model binding | Medium | Required | PENDING |
@@ -152,7 +152,50 @@ Only the first non-DONE stage may be selected. A blocked or approval-waiting sta
 - Final diff self-check: `git diff --check` PASSED; final checkout/status and Rust regressions rechecked; no Stage 04 implementation present.
 - Final stage status: DONE
 - Completed count: 3 / 22
-- Next eligible stage: 04 — Add backend and model identity types (Low, independent review optional). Not started in this execution.
+- Next eligible stage: 04 — Add backend and model identity types (Low, independent review optional).
+
+### Stage 04 — Add backend and model identity types (2026-09-11)
+
+- Stage / attempt / date: Stage 04 / attempt 1 / 2026-09-11
+- Checkout: absolute root, branch, HEAD: `C:\Develop\Atomic-Chat-coder-tym`, `feat/windows-cline-cli`, `a49ccd69623e1644e59ef6e8a049f7e522e84732`
+- Starting dirty files and preservation: clean tree upon branch checkout; untracked Stage 04 modules created.
+- Approved scope and exact files explained to user: User explicitly reviewed and approved Stage 04 files and scope in conversation.
+- Changes or read-only findings:
+  - Created `web-app/src/containers/CodingAgentPanel/backend-identity.ts` defining:
+    - `CodingAgentBackend = 'direct-ollama' | 'legacy-claude' | 'cline-acp'`
+    - `DEFAULT_CODING_AGENT_BACKEND: CodingAgentBackend = 'direct-ollama'`
+    - `CODING_AGENT_BACKEND_STORAGE_KEY = 'coding-agent-backend'`
+    - `CLINE_ACP_BACKEND: CodingAgentBackend = 'cline-acp'`
+    - `CLINE_ACP_AGENT_NAME = 'cline'`
+    - `CLINE_DEFAULT_MODEL_ID = 'zai/glm-5.3-flash'`
+    - `CLINE_DEFAULT_MODEL_DISPLAY_NAME = 'GLM 5.3 Flash'`
+    - `CLINE_DEFAULT_PROVIDER_ID = 'zai'`
+    - `BackendCapabilities` matrix for each backend
+    - Predicate `isCodingAgentBackend(value)` and safe resolver `resolveCodingAgentBackend(value, fallback)`
+    - Storage helper `getInitialCodingAgentBackend()` falling back conservatively to `direct-ollama`
+  - Updated `web-app/src/containers/CodingAgentPanel/agent-event-adapter.ts` to re-export types and helpers from `backend-identity.ts` for full backward compatibility.
+  - Created `web-app/src/containers/CodingAgentPanel/backend-identity.test.ts` with 16 focused unit tests covering predicate checks, legacy values, invalid values, default fallback, storage retrieval, model identity, and backend capability mappings.
+  - Verified no active execution route or visible UI dropdown is exposed yet for `cline-acp` (reserved for subsequent stages).
+- Acceptance criteria verified:
+  - Focused tests for old values, invalid values, and default resolution pass.
+  - `direct-ollama` remains the strict default.
+  - Zero regressions across existing CodingAgentPanel test suite (37/37 tests pass).
+  - TypeScript type check (`tsc --noEmit`) passes cleanly with 0 errors.
+- Test commands / outcomes / relevant output:
+  - `corepack yarn workspace @janhq/web-app test run src/containers/CodingAgentPanel/backend-identity.test.ts`: PASSED (16/16 tests passed).
+  - `corepack yarn workspace @janhq/web-app test run src/containers/CodingAgentPanel/`: PASSED (5 test files, 37/37 tests passed).
+  - `corepack yarn workspace @janhq/web-app tsc --noEmit`: PASSED (0 errors).
+- Skipped checks and reason: Independent external review (Low difficulty, optional per instructions.md; self-check passed).
+- Reviewer name/tool and availability result: N/A (Low difficulty, self-check passed).
+- Review round 1 verdict and findings: N/A
+- Findings reproduced / rejected with evidence: N/A
+- Fixes and rerun results: N/A
+- Closure review verdict (High always; Medium after fixes): N/A (Self-check PASSED).
+- Remaining issues / blocker / accepted limitation: None.
+- Final diff self-check: Checked git status and diff; only targeted Stage 04 files and tracker updated.
+- Final stage status: DONE
+- Completed count: 4 / 22
+- Next eligible stage: 05 — Implement ACP transport (High, independent review required).
 
 Append one entry per execution/review attempt; retain earlier entries when resuming a stage.
 
