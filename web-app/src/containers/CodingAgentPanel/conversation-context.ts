@@ -124,7 +124,7 @@ export function buildCodingAgentPrompt({
   backend,
   isContinuation,
   source,
-  includeHistory = true,
+  includeHistory = source === 'loop' ? false : true,
   includeSummaryContext = includeHistory,
 }: BuildCodingAgentPromptOptions): string {
   const currentPrompt = normalizeText(prompt)

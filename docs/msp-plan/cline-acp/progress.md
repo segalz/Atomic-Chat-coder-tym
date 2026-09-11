@@ -867,8 +867,62 @@ Only the first non-DONE stage may be selected. A blocked or approval-waiting sta
 - Remaining issues / blocker / accepted limitation: None.
 - Final diff self-check: Surgical additions in `tool-access-boundaries.test.ts` and `src-tauri/src/core/cline_agent.rs`.
 - Final stage status: DONE
-- Completed count: 17 / 22
-- Next eligible stage: 18 — Route bounded Loop runs (High, independent review required).
+### Stage 18 — Route bounded Loop runs (2026-09-11)
+
+- Stage / attempt / date: Stage 18 / attempt 2 / 2026-09-11
+- Checkout: absolute root, branch, HEAD: `C:\Develop\Atomic-Chat-coder-tym`, `feat/windows-cline-cli`, `0f14948`
+- Starting dirty files and preservation: Clean working directory at start of Stage 18.
+- Approved scope and exact files explained to user: User authorized Stage 18. Focused files: `web-app/src/containers/CodingAgentPanel/loop-lifecycle.ts`, `loop-lifecycle.test.ts`, `conversation-context.ts`, and live probe script `stage18_loop_resilience_probe.mjs`.
+- Changes or read-only findings:
+  - Created `web-app/src/containers/CodingAgentPanel/loop-lifecycle.ts` defining `evaluateLoopTurn`, `isPermissionAutoApprovalAllowed`, `validateLoopConcurrency`, `isManualContextIsolatedFromLoop`, `formatLoopTerminalMessage`, unified `stopLoopExecution` (with try/finally hardening and timer cancellation across running/countdown), and `validateLoopPermissionProcessing` (strictly rejecting lingering permissions in countdown/terminal phases and blocking blanket auto-approval).
+  - Updated `web-app/src/containers/CodingAgentPanel/conversation-context.ts` so `includeHistory` and `includeSummaryContext` default to `false` when `source === 'loop'`, with strict session source matching preventing manual history leaks into automated Loop runs.
+  - Created `web-app/src/containers/CodingAgentPanel/loop-lifecycle.test.ts` covering 9 comprehensive test scenarios:
+    1. Bounded multi-turn sequence up to maxRuns.
+    2. Immediate failure halting without retry or loop advancement.
+    3. User stop during active run and during countdown: cancelling active Cline agent, clearing timers, marking session 'interrupted', and setting isRunning: false.
+    4. Concurrency protection blocking overlapping runs across same and differing backends.
+    5. Strict prohibition of blanket auto-approval for Cline ACP in Loop and manual modes.
+    6. Prompt and session isolation preventing manual session leaks into Loop prompts.
+    7. Targeted stop routing preserving active backend identity regardless of UI dropdown state.
+    8. Event filter rejecting stale and duplicate terminal completion events.
+    9. Gated permission processing rejecting lingering permissions in countdown/terminal phases and rejecting blanket auto-approval.
+  - Authored and executed live protocol probe `scratch/stage18_loop_resilience_probe.mjs` against installed `cline.cmd` (3.0.61) on disposable fixture: verified multi-turn execution on disk, bounded completion at maxRuns, genuine live protocol failure halting (-32603 Internal error: unknown session) halting loop without subsequent dispatch, permission lingering guards, user stop cancellation, and clean process teardown.
+- Acceptance criteria verified:
+  1. Bounded run limits: verified in policy function, unit tests, and live probe on disk.
+  2. Failure halting: verified in policy function, unit tests, and live ACP protocol error probe.
+  3. User stop: verified in unified `stopLoopExecution`, unit tests, and live ACP cancel probe.
+  4. Concurrency protection: verified in `validateLoopConcurrency` and router tests.
+  5. Delayed events & permissions: verified via `createRunEventFilter` and `validateLoopPermissionProcessing`.
+  6. Prohibition of blanket auto-approval: fail-closed helper and permission validator verified.
+  7. Manual vs Loop separation: verified default exclusion and strict source isolation.
+  8. Quality & regression safety: tsc 0 errors, Vitest 162/162 passing across 16 files, live probe ALL TESTS PASSED.
+- Test commands / outcomes / relevant output:
+  - `corepack yarn workspace @janhq/web-app exec tsc -b tsconfig.app.json --pretty false`: PASSED (0 errors).
+  - `corepack yarn workspace @janhq/web-app test run src/stores/ src/containers/CodingAgentPanel/`: PASSED, 16 test files, 162/162 tests passed (100%).
+  - `node scratch/stage18_loop_resilience_probe.mjs`: ALL 7 PROBE TESTS PASSED.
+- Skipped checks and reason: None.
+- Reviewer name/tool and availability result:
+  - Grok CLI (`C:\Users\segal\.grok\bin\grok.exe`, model Grok 3 / `grok-beta`), executed locally.
+- Review round 1 verdict and findings:
+  - Verdict: CHANGES_REQUIRED.
+  - Findings: Stop handler (AC3) needed unified stopLoopExecution helper; live probe test 2 needed genuine ACP protocol error; permission linger needed explicit validation; prompt isolation needed default exclusion for Loop.
+- Findings reproduced / rejected with evidence:
+  - All 4 findings reproduced and resolved:
+    - Added `stopLoopExecution` with timer cancellation, active backend stop, and session interrupt.
+    - Updated live probe with real ACP protocol failure (-32603) and verified no subsequent dispatch.
+    - Added `validateLoopPermissionProcessing` with unit tests (Scenario 9) and probe verification (Test 2b).
+    - Updated `conversation-context.ts` defaulting history/summary to false for loop sessions.
+- Fixes and rerun results:
+  - Vitest 162/162 passed (100%).
+  - TypeScript 0 errors.
+  - Live probe ALL TESTS PASSED.
+- Closure review verdict (High always; Medium after fixes):
+  - Round 2 Closure Review Verdict: **PASS** across all 8 acceptance criteria.
+- Remaining issues / blocker / accepted limitation: None.
+- Final diff self-check: Clean additions in `loop-lifecycle.ts`, `loop-lifecycle.test.ts`, and surgical default adjustment in `conversation-context.ts`.
+- Final stage status: DONE
+- Completed count: 18 / 22
+- Next eligible stage: 19 — Enforce tool access boundaries and error handling (High, independent review required).
 
 Append one entry per execution/review attempt; retain earlier entries when resuming a stage.
 
