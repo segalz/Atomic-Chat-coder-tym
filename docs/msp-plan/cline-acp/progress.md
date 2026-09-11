@@ -5,10 +5,10 @@
 - Target: `/Users/zvisegal/devlope/Atomic-Chat-coder-tym`
 - Plan: `docs/msp-plan/cline-acp/instructions.md`
 - Created: 2026-09-10
-- Overall status: IN_PROGRESS — stage 06 complete; stopped at the one-stage boundary
-- Completed: **6 / 22**
-- Current stage: none (06 DONE)
-- Next eligible stage: **07** — Implement sessions and explicit model binding (Medium, independent review required)
+- Overall status: IN_PROGRESS — stage 07 complete; stopped at the one-stage boundary
+- Completed: **7 / 22**
+- Current stage: none (07 DONE)
+- Next eligible stage: **08** — Normalize streamed events (Medium, independent review required)
 - Blocking issue: none
 - Authorization: planning documents only; explain exact source edits and obtain approval as required by instructions.md.
 - Planning snapshot branch: `feat/windows-cline-cli` (branched from `codex/ollama-agent-migration`); re-verify on every run.
@@ -30,7 +30,7 @@ Only the first non-DONE stage may be selected. A blocked or approval-waiting sta
 | 04 | Add backend and model identity types | Low | Optional | DONE |
 | 05 | Implement ACP transport | High | Required | DONE |
 | 06 | Implement cancellation and cleanup | High | Required | DONE |
-| 07 | Implement sessions and explicit model binding | Medium | Required | PENDING |
+| 07 | Implement sessions and explicit model binding | Medium | Required | DONE |
 | 08 | Normalize streamed events | Medium | Required | PENDING |
 | 09 | Wire backend-specific routing | Medium | Required | PENDING |
 | 10 | Add provider-aware model picker | Low | Optional | PENDING |
@@ -277,6 +277,48 @@ Only the first non-DONE stage may be selected. A blocked or approval-waiting sta
 - Final stage status: DONE
 - Completed count: 6 / 22
 - Next eligible stage: 07 — Implement sessions and explicit model binding (Medium, independent review required).
+
+### Stage 07 — Implement sessions and explicit model binding (2026-09-11)
+
+- Stage / attempt / date: Stage 07 / attempt 1 / 2026-09-11
+- Checkout: absolute root, branch, HEAD: `C:\Develop\Atomic-Chat-coder-tym`, `feat/windows-cline-cli`, `909879e6f3dfad55a15eb5f190e3860bb4021ddc`
+- Starting dirty files and preservation: clean tree upon stage start; Stage 06 committed cleanly.
+- Approved scope and exact files explained to user: User explicitly reviewed and approved Stage 07 implementation plan, delegating development to Cline CLI in micro-steps under continuous supervision.
+- Changes or read-only findings:
+  - Extended `src-tauri/src/core/cline_agent.rs`:
+    - `SessionIdentity`: Strong session metadata struct storing `atomic_session_id`, `external_session_id`, `project_dir` (`PathBuf`), `backend` (`"cline-acp"`), `model_id` (`"zai/glm-5.3-flash"`), and `provider_id` (`Some("zai")`).
+    - `SessionModelConfig`: Encapsulates requested model identity and provider namespace with default to `zai/glm-5.3-flash`.
+    - `ClineSessionError`: Typed error surface representing `InvalidProjectDir`, `ProjectMismatch`, `ModelBindingFailed`, `StaleSessionId`, `ResumeFailed`, `ConcurrentPrompt`, and `Transport`.
+    - `validate_project_dir`: Enforces absolute project directories and rejects relative paths with `InvalidProjectDir`.
+    - `validate_model_binding`: Enforces exact equality match on model ID. Fails visibly with `ModelBindingFailed` on mismatch or missing confirmation, strictly upholding the contract guarantee: **NO silent fallback to Ollama or alternate models**.
+    - `register_session` and `get_session`: Stores and retrieves active/cached sessions by external ACP `sessionId`, returning `StaleSessionId` for unknown IDs.
+    - `validate_session_resume`: Enforces canonical project directory matching between requested directory and session's bound `project_dir`, returning `ProjectMismatch` on divergence.
+    - `prepare_prompt_turn`: Concurrency guard ensuring only one prompt turn is active on a session, rejecting concurrent attempts while active or stopping with `ConcurrentPrompt`.
+    - `restore_epoch`: Monotonic atomic counter isolating session restore notifications from live prompt turns.
+    - 7 comprehensive unit tests (23 tests total in `cline_agent.rs`) covering all Stage 07 acceptance criteria.
+- Acceptance criteria verified:
+  - Model selection errors / mismatch: `validate_model_binding` fails visibly with `ModelBindingFailed` (no silent fallback).
+  - Project boundary mismatch: `validate_session_resume` rejects mismatched project directory with `ProjectMismatch`.
+  - Relative project directory: rejected with `InvalidProjectDir`.
+  - Stale session ID: `get_session` rejects unknown session ID with `StaleSessionId`.
+  - Concurrency protection: `prepare_prompt_turn` rejects concurrent prompt attempts with `ConcurrentPrompt`.
+  - Restore epoch: monotonic advancement verified.
+  - CodingAgentPanel test suite: 37/37 tests pass.
+  - TypeScript typecheck: 0 errors.
+- Test commands / outcomes / relevant output:
+  - `corepack yarn workspace @janhq/web-app test run src/containers/CodingAgentPanel/`: PASSED (5 test files, 37/37 tests passed).
+  - `corepack yarn workspace @janhq/web-app tsc --noEmit`: PASSED (0 errors).
+- Skipped checks and reason: Full Tauri desktop build deferred to Stage 21 per contract.
+- Reviewer name/tool and availability result: Independent Subagent Reviewer (`68b8bb7e-20f5-4de3-9665-90ce0a8bae5b`).
+- Review round 1 verdict and findings: PASS. Two non-blocking polish recommendations: harden concurrency check in `prepare_prompt_turn` to also check `Stopping` phase, and manually implement `Default for ClineAgentState`. Both applied immediately.
+- Findings reproduced / rejected with evidence: Recommendations adopted directly.
+- Fixes and rerun results: Hardened `prepare_prompt_turn` and implemented manual `Default for ClineAgentState`. All tests verified.
+- Closure review verdict (High always; Medium after fixes): PASS on initial round.
+- Remaining issues / blocker / accepted limitation: None.
+- Final diff self-check: Checked git status and diff; only targeted Stage 07 files and tracker updated.
+- Final stage status: DONE
+- Completed count: 7 / 22
+- Next eligible stage: 08 — Normalize streamed events (Medium, independent review required).
 
 Append one entry per execution/review attempt; retain earlier entries when resuming a stage.
 

@@ -339,6 +339,72 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+use std::path::PathBuf;
+
+/// Authoritative identity for an active or restored Cline ACP session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionIdentity {
+    /// Atomic Chat internal conversation session ID.
+    pub atomic_session_id: String,
+    /// Opaque external session ID returned by Cline ACP (`sessionId`).
+    pub external_session_id: String,
+    /// Canonical workspace project directory.
+    pub project_dir: PathBuf,
+    /// Backend identifier (fixed to `"cline-acp"`).
+    pub backend: String,
+    /// Bound model catalog ID (e.g. `"zai/glm-5.3-flash"`).
+    pub model_id: String,
+    /// Verified provider namespace (e.g. `Some("zai")`).
+    pub provider_id: Option<String>,
+}
+
+/// Model binding specification for a Cline ACP session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionModelConfig {
+    /// The target model ID to bind (default `"zai/glm-5.3-flash"`).
+    pub model_id: String,
+    /// Optional provider ID (e.g. `"zai"`).
+    pub provider_id: Option<String>,
+}
+
+impl Default for SessionModelConfig {
+    fn default() -> Self {
+        Self {
+            model_id: "zai/glm-5.3-flash".to_string(),
+            provider_id: Some("zai".to_string()),
+        }
+    }
+}
+
+/// Typed errors for Cline ACP session creation, restoration, and model binding.
+#[derive(Debug, thiserror::Error)]
+pub enum ClineSessionError {
+    #[error("Invalid project directory: {0}")]
+    InvalidProjectDir(String),
+
+    #[error("Project mismatch: session belongs to '{expected}', but requested '{actual}'")]
+    ProjectMismatch { expected: String, actual: String },
+
+    #[error("Model binding failed: requested '{requested}', but agent returned '{actual}'. {error}")]
+    ModelBindingFailed {
+        requested: String,
+        actual: String,
+        error: String,
+    },
+
+    #[error("Stale or unknown external session ID: {0}")]
+    StaleSessionId(String),
+
+    #[error("Session resume failed for '{session_id}': {reason}")]
+    ResumeFailed { session_id: String, reason: String },
+
+    #[error("Concurrent prompt rejected: another prompt turn is currently active on session '{0}'")]
+    ConcurrentPrompt(String),
+
+    #[error("Transport or protocol error: {0}")]
+    Transport(String),
+}
+
 /// Configuration for timeouts governing run lifecycle.
 #[derive(Debug, Clone)]
 pub struct TimeoutConfig {
@@ -361,13 +427,22 @@ impl Default for TimeoutConfig {
 }
 
 /// Shared state managing the Cline ACP agent lifecycle, process ownership,
-/// cancellation, and event fencing.
-#[derive(Debug, Default)]
+/// cancellation, event fencing, and explicit session/model binding.
+#[derive(Debug)]
 pub struct ClineAgentState {
     fence: Arc<RunFence>,
     child_process: Arc<std::sync::Mutex<Option<OwnedChildProcess>>>,
     timeouts: TimeoutConfig,
     cancel_token: Arc<std::sync::Mutex<Option<CancellationToken>>>,
+    active_session: Arc<std::sync::Mutex<Option<SessionIdentity>>>,
+    sessions_by_external_id: Arc<std::sync::Mutex<std::collections::HashMap<String, SessionIdentity>>>,
+    restore_epoch: Arc<AtomicU64>,
+}
+
+impl Default for ClineAgentState {
+    fn default() -> Self {
+        Self::new(None)
+    }
 }
 
 impl ClineAgentState {
@@ -378,6 +453,9 @@ impl ClineAgentState {
             child_process: Arc::new(std::sync::Mutex::new(None)),
             timeouts: timeouts.unwrap_or_default(),
             cancel_token: Arc::new(std::sync::Mutex::new(None)),
+            active_session: Arc::new(std::sync::Mutex::new(None)),
+            sessions_by_external_id: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            restore_epoch: Arc::new(AtomicU64::new(1)),
         }
     }
 
@@ -390,6 +468,123 @@ impl ClineAgentState {
     pub fn timeouts(&self) -> &TimeoutConfig {
         &self.timeouts
     }
+
+    /// Returns a clone of the currently active session identity, if any.
+    pub fn active_session(&self) -> Option<SessionIdentity> {
+        self.active_session.lock().ok().and_then(|g| g.clone())
+    }
+
+    /// Returns the current restore epoch number.
+    pub fn current_restore_epoch(&self) -> u64 {
+        self.restore_epoch.load(Ordering::Relaxed)
+    }
+
+    /// Advances and returns a fresh restore epoch number to fence restore notifications.
+    pub fn next_restore_epoch(&self) -> u64 {
+        self.restore_epoch.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// Validates and ensures the given path is a valid absolute project directory.
+    pub fn validate_project_dir(path: &std::path::Path) -> Result<PathBuf, ClineSessionError> {
+        if !path.is_absolute() {
+            return Err(ClineSessionError::InvalidProjectDir(format!(
+                "Project directory must be absolute, got: '{}'",
+                path.display()
+            )));
+        }
+        Ok(path.to_path_buf())
+    }
+
+    /// Validates model binding response.
+    ///
+    /// GUARANTEE: If the agent did not successfully bind the exact requested model,
+    /// this function MUST return a ModelBindingFailed error. No silent fallback is allowed.
+    pub fn validate_model_binding(
+        requested: &SessionModelConfig,
+        returned_current_value: Option<&str>,
+    ) -> Result<(), ClineSessionError> {
+        let actual = returned_current_value.unwrap_or("none");
+        if actual != requested.model_id {
+            return Err(ClineSessionError::ModelBindingFailed {
+                requested: requested.model_id.clone(),
+                actual: actual.to_string(),
+                error: format!(
+                    "Agent config mismatch: expected model '{}', but agent confirmed '{}'",
+                    requested.model_id, actual
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// Registers a newly created or restored session in state.
+    pub fn register_session(&self, session: SessionIdentity) {
+        if let Ok(mut guard) = self.sessions_by_external_id.lock() {
+            guard.insert(session.external_session_id.clone(), session.clone());
+        }
+        if let Ok(mut guard) = self.active_session.lock() {
+            *guard = Some(session);
+        }
+    }
+
+    /// Retrieves a registered session by its external ACP session ID.
+    pub fn get_session(&self, external_session_id: &str) -> Result<SessionIdentity, ClineSessionError> {
+        let guard = self.sessions_by_external_id.lock().map_err(|e| {
+            ClineSessionError::Transport(format!("Failed to acquire session lock: {e}"))
+        })?;
+        guard
+            .get(external_session_id)
+            .cloned()
+            .ok_or_else(|| ClineSessionError::StaleSessionId(external_session_id.to_string()))
+    }
+
+    /// Validates that a session resume request matches the session's canonical project directory.
+    pub fn validate_session_resume(
+        &self,
+        external_session_id: &str,
+        requested_project_dir: &std::path::Path,
+    ) -> Result<SessionIdentity, ClineSessionError> {
+        let session = self.get_session(external_session_id)?;
+        if session.project_dir != requested_project_dir {
+            return Err(ClineSessionError::ProjectMismatch {
+                expected: session.project_dir.display().to_string(),
+                actual: requested_project_dir.display().to_string(),
+            });
+        }
+        Ok(session)
+    }
+
+    /// Prepares a prompt turn for the given session.
+    ///
+    /// Fails with `ConcurrentPrompt` if a turn is already active on this or another session.
+    pub fn prepare_prompt_turn(
+        &self,
+        run_id: RunId,
+        external_session_id: &str,
+    ) -> Result<RunId, ClineSessionError> {
+        // 1. Verify session exists
+        let _session = self.get_session(external_session_id)?;
+
+        // 2. Concurrency check via RunFence (reject if active or stopping)
+        if self.fence.is_active() || matches!(self.fence.current_phase(), RunPhase::Stopping { .. }) {
+            return Err(ClineSessionError::ConcurrentPrompt(
+                external_session_id.to_string(),
+            ));
+        }
+
+        // 3. Start and activate run in fence
+        self.fence
+            .start_run(run_id.clone())
+            .map_err(|e| ClineSessionError::Transport(e))?;
+
+        self.fence
+            .activate_run(&run_id, external_session_id)
+            .map_err(|e| ClineSessionError::Transport(e))?;
+
+        Ok(run_id)
+    }
+
+
 
     /// Registers the owned child process by PID.
     pub fn register_child(&self, pid: u32) {
@@ -863,5 +1058,158 @@ mod tests {
         assert_eq!(state.fence().terminal_outcome(), Some(outcome.clone()));
         assert_eq!(state.terminal_outcome(), Some(outcome));
     }
+
+    #[test]
+    fn test_validate_project_dir_absolute() {
+        let abs_path = std::env::temp_dir();
+        assert!(ClineAgentState::validate_project_dir(&abs_path).is_ok());
+
+        let rel_path = PathBuf::from("relative/sub/dir");
+        let res = ClineAgentState::validate_project_dir(&rel_path);
+        assert!(res.is_err());
+        match res.unwrap_err() {
+            ClineSessionError::InvalidProjectDir(msg) => {
+                assert!(msg.contains("must be absolute"));
+            }
+            other => panic!("Expected InvalidProjectDir, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_validate_model_binding_success() {
+        let cfg = SessionModelConfig::default();
+        assert_eq!(cfg.model_id, "zai/glm-5.3-flash");
+        assert!(ClineAgentState::validate_model_binding(&cfg, Some("zai/glm-5.3-flash")).is_ok());
+    }
+
+    #[test]
+    fn test_validate_model_binding_mismatch_fails_visibly_no_fallback() {
+        let cfg = SessionModelConfig::default();
+        // Returned model does not match requested
+        let res = ClineAgentState::validate_model_binding(&cfg, Some("other/unsupported-model"));
+        assert!(res.is_err());
+        match res.unwrap_err() {
+            ClineSessionError::ModelBindingFailed { requested, actual, error } => {
+                assert_eq!(requested, "zai/glm-5.3-flash");
+                assert_eq!(actual, "other/unsupported-model");
+                assert!(error.contains("mismatch"));
+            }
+            other => panic!("Expected ModelBindingFailed, got {:?}", other),
+        }
+
+        // None returned
+        let res_none = ClineAgentState::validate_model_binding(&cfg, None);
+        assert!(res_none.is_err());
+    }
+
+    #[test]
+    fn test_session_registration_and_retrieval() {
+        let state = ClineAgentState::new(None);
+        let session = SessionIdentity {
+            atomic_session_id: "atom-1".to_string(),
+            external_session_id: "ext-sess-123".to_string(),
+            project_dir: std::env::temp_dir(),
+            backend: "cline-acp".to_string(),
+            model_id: "zai/glm-5.3-flash".to_string(),
+            provider_id: Some("zai".to_string()),
+        };
+
+        state.register_session(session.clone());
+        assert_eq!(state.active_session(), Some(session.clone()));
+
+        let fetched = state.get_session("ext-sess-123").unwrap();
+        assert_eq!(fetched, session);
+
+        // Unknown session ID returns StaleSessionId
+        let unknown = state.get_session("unknown-ext-id");
+        assert!(unknown.is_err());
+        match unknown.unwrap_err() {
+            ClineSessionError::StaleSessionId(id) => assert_eq!(id, "unknown-ext-id"),
+            other => panic!("Expected StaleSessionId, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_validate_session_resume_project_mismatch() {
+        let state = ClineAgentState::new(None);
+        let proj_a = std::env::temp_dir().join("proj_a");
+        let proj_b = std::env::temp_dir().join("proj_b");
+
+        let session = SessionIdentity {
+            atomic_session_id: "atom-resume".to_string(),
+            external_session_id: "ext-sess-resume".to_string(),
+            project_dir: proj_a.clone(),
+            backend: "cline-acp".to_string(),
+            model_id: "zai/glm-5.3-flash".to_string(),
+            provider_id: Some("zai".to_string()),
+        };
+        state.register_session(session);
+
+        // Matching project directory succeeds
+        assert!(state.validate_session_resume("ext-sess-resume", &proj_a).is_ok());
+
+        // Mismatched project directory fails with ProjectMismatch
+        let res = state.validate_session_resume("ext-sess-resume", &proj_b);
+        assert!(res.is_err());
+        match res.unwrap_err() {
+            ClineSessionError::ProjectMismatch { expected, actual } => {
+                assert_eq!(expected, proj_a.display().to_string());
+                assert_eq!(actual, proj_b.display().to_string());
+            }
+            other => panic!("Expected ProjectMismatch, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_prepare_prompt_turn_concurrency_rejection() {
+        let state = ClineAgentState::new(None);
+        let session = SessionIdentity {
+            atomic_session_id: "atom-turn".to_string(),
+            external_session_id: "ext-turn-1".to_string(),
+            project_dir: std::env::temp_dir(),
+            backend: "cline-acp".to_string(),
+            model_id: "zai/glm-5.3-flash".to_string(),
+            provider_id: Some("zai".to_string()),
+        };
+        state.register_session(session);
+
+        let run1 = RunId::new("run-turn-1");
+        assert!(state.prepare_prompt_turn(run1.clone(), "ext-turn-1").is_ok());
+        assert!(state.fence().is_active());
+
+        // Concurrent prompt attempt while run1 is active MUST fail with ConcurrentPrompt
+        let run2 = RunId::new("run-turn-2");
+        let res = state.prepare_prompt_turn(run2, "ext-turn-1");
+        assert!(res.is_err());
+        match res.unwrap_err() {
+            ClineSessionError::ConcurrentPrompt(id) => assert_eq!(id, "ext-turn-1"),
+            other => panic!("Expected ConcurrentPrompt, got {:?}", other),
+        }
+
+        // Once run1 terminates, a subsequent prompt can be prepared
+        state.fence().record_terminal(
+            &run1,
+            RunTerminalOutcome::Completed {
+                stop_reason: "end_turn".to_string(),
+            },
+        );
+        state.fence().reset_to_idle().unwrap();
+
+        let run3 = RunId::new("run-turn-3");
+        assert!(state.prepare_prompt_turn(run3, "ext-turn-1").is_ok());
+    }
+
+    #[test]
+    fn test_restore_epoch_incrementation() {
+        let state = ClineAgentState::new(None);
+        let ep1 = state.current_restore_epoch();
+        let ep2 = state.next_restore_epoch();
+        let ep3 = state.next_restore_epoch();
+
+        assert_eq!(ep2, ep1 + 1);
+        assert_eq!(ep3, ep2 + 1);
+        assert_eq!(state.current_restore_epoch(), ep3);
+    }
 }
+
 
