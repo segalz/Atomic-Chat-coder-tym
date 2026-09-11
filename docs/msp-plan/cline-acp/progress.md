@@ -5,10 +5,10 @@
 - Target: `/Users/zvisegal/devlope/Atomic-Chat-coder-tym`
 - Plan: `docs/msp-plan/cline-acp/instructions.md`
 - Created: 2026-09-10
-- Overall status: IN_PROGRESS — stage 17 completed, stage 18 ready
-- Completed: **17 / 22**
-- Current stage: **18** — Route bounded Loop runs (PENDING)
-- Next eligible stage: **18** — Route bounded Loop runs (High, independent review required)
+- Overall status: IN_PROGRESS — stage 21 completed, stage 22 ready
+- Completed: **21 / 22**
+- Current stage: **22** — Finalize documentation and handoff (PENDING)
+- Next eligible stage: **22** — Finalize documentation and handoff (Easy, optional review)
 - Blocking issue: none
 - Authorization: planning documents only; explain exact source edits and obtain approval as required by instructions.md.
 - Planning snapshot branch: `feat/windows-cline-cli` (branched from `codex/ollama-agent-migration`); re-verify on every run.
@@ -41,10 +41,10 @@ Only the first non-DONE stage may be selected. A blocked or approval-waiting sta
 | 15 | Verify manual end-to-end workflow | Medium | Required | DONE |
 | 16 | Map Atomic-specific tool compatibility | Medium | Required | DONE |
 | 17 | Connect approved Atomic tool access | High | Required | DONE |
-| 18 | Route bounded Loop runs | High | Required | PENDING |
-| 19 | Integrate Loop continuation and recovery | High | Required | PENDING |
-| 20 | Verify adversarial lifecycle and regressions | High | Required | PENDING |
-| 21 | Desktop acceptance and release readiness | High | Required | PENDING |
+| 18 | Route bounded Loop runs | High | Required | DONE |
+| 19 | Integrate Loop continuation and recovery | High | Required | DONE |
+| 20 | Verify adversarial lifecycle and regressions | High | Required | DONE |
+| 21 | Desktop acceptance and release readiness | High | Required | DONE |
 | 22 | Finalize documentation and handoff | Easy | Optional | PENDING |
 
 ## Evidence log
@@ -1037,6 +1037,57 @@ Only the first non-DONE stage may be selected. A blocked or approval-waiting sta
 - Final stage status: DONE
 - Completed count: 20 / 22
 - Next eligible stage: 21 — Package Windows release configuration (Medium, independent review required).
+
+### Stage 21 — Desktop acceptance and release readiness (2026-09-12)
+
+- Stage / attempt / date: Stage 21 / attempt 1 / 2026-09-12
+- Checkout: absolute root, branch, HEAD: `c:\Develop\Atomic-Chat-coder-tym`, `feat/windows-cline-cli`, `01800d5`
+- Starting dirty files and preservation: clean working tree preserved.
+- Approved scope and exact files explained to user: Stage 21 desktop acceptance and release readiness; run live acceptance harness across desktop flows, verify production build, verify direct-Ollama regression isolation, document native packaging blocker.
+- Changes or read-only findings:
+  - Frontend production build verified: `corepack yarn workspace @janhq/core build` succeeded, followed by `corepack yarn workspace @janhq/web-app build` (`✓ built in 24.19s`, populating `web-app/dist`).
+  - Native host packaging blocker recorded: Host environment has `rustc 1.98.1` and `cargo 1.98.1`, but native MSVC linker (`link.exe`) and GNU MinGW (`dlltool.exe`) are not installed. In strict accordance with Stage 21 acceptance criteria ("Record any packaging blocker; no publishing, installer replacement or deployment is authorized"), this native linker absence is documented as an accepted packaging blocker; no installer publishing or replacement was performed.
+  - Live desktop acceptance test harness (`scratch/stage21_desktop_acceptance.mjs`) executed on disposable desktop fixture with all 9 tests passing (9/9 PASS):
+    1. Test 1 (Bounded Loop execution): verified 2 consecutive turns creating on-disk artifacts (`stage21_step1.txt`, `stage21_step2.txt`); turn 2 respected checkpoint resume instructions and left turn 1 untouched.
+    2. Test 2 (Denied operation fail-closed): verified ACP permission request intercepted and denied; zero side effects, no files created on disk (`stage21_denied.txt` does not exist).
+    3. Test 3 (In-flight cancellation): prompt cancelled ~415ms into generation; cancelled in ~76ms with `stopReason: 'cancelled'`.
+    4. Test 4 (App restart recovery): process tree killed to simulate host crash/restart; dead session discarded, fresh session allocated, continuation succeeded creating `stage21_restart.txt`.
+    5. Test 5 (Executable discovery): verified `where.exe cline.cmd` resolved `C:\Users\segal\AppData\Roaming\npm\cline.cmd` with version 3.0.61 from Windows desktop environment.
+    6. Test 6 (Direct-Ollama router gating and isolation): verified Ollama health checks, model list, VRAM check, download triggers, and error banner gating apply strictly to `direct-ollama`.
+    7. Test 7 (Direct-Ollama denied diff parity): verified `coding-agent-store.ts` handles diff status updates and preserves rejected diffs, matching fail-closed behavior.
+    8. Test 8 (Cross-provider concurrency exclusion): verified concurrency mutexes in `backend-router.ts` and `loop-lifecycle.ts` reject starting a run when another run is active.
+    9. Test 9 (Clean teardown & handle verification): child process tree cleanly killed via `taskkill /F /T`; fixture directory removed on attempt 1 with zero locked handles.
+- Acceptance criteria verified:
+  1. Production build & packaging blocker documentation: verified.
+  2. Executable discovery from Windows desktop environment: verified.
+  3. Bounded Loop execution with multi-turn artifacts: verified.
+  4. Denied operation fail-closed: verified.
+  5. In-flight cancellation: verified.
+  6. App restart recovery: verified.
+  7. Direct-Ollama router gating and isolation parity: verified.
+  8. Direct-Ollama denied diff parity: verified.
+  9. Cross-provider concurrency exclusion: verified.
+  10. Clean teardown & handle verification: verified.
+  11. Test coverage & type safety: verified (18 files, 190 tests pass, `tsc` clean).
+- Test commands / outcomes / relevant output:
+  - `corepack yarn workspace @janhq/web-app exec tsc -b tsconfig.app.json --pretty false`: PASSED (0 errors).
+  - `corepack yarn workspace @janhq/web-app test run src/stores/ src/containers/CodingAgentPanel/`: PASSED (18 test files, 190/190 tests passed).
+  - `node scratch/stage21_desktop_acceptance.mjs`: ALL 9 ACCEPTANCE TESTS PASSED.
+- Skipped checks and reason: Native Tauri host build skipped due to missing MSVC linker on host machine; recorded as accepted packaging blocker per plan rules.
+- Reviewer name/tool and availability result:
+  - Grok CLI (`C:\Users\segal\.grok\bin\grok.exe`, model Grok 3 / `grok-beta`), executed locally.
+- Review round 1 verdict and findings:
+  - Verdict: **PASS** across all criteria (Criteria 1-11 PASS, packaging blocker handling PASS, no unauthorized release actions, fail-closed properties affirmed).
+- Findings reproduced / rejected with evidence: None (PASS on Round 1).
+- Fixes and rerun results: None required.
+- Closure review verdict (High always; Medium after fixes):
+  - Round 1 Closure Review Verdict: **PASS**.
+- Remaining issues / blocker / accepted limitation:
+  - Native installer packaging blocked by missing MSVC linker on host machine; follow-on outside Stage 21 requires installing C++ build tools before shipping.
+- Final diff self-check: Clean updates in `progress.md` and `walkthrough.md`.
+- Final stage status: DONE
+- Completed count: 21 / 22
+- Next eligible stage: 22 — Finalize documentation and handoff (Easy, optional review).
 
 Append one entry per execution/review attempt; retain earlier entries when resuming a stage.
 
