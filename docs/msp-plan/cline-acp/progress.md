@@ -977,6 +977,67 @@ Only the first non-DONE stage may be selected. A blocked or approval-waiting sta
 - Completed count: 19 / 22
 - Next eligible stage: 20 — Verify adversarial lifecycle and regressions (High, independent review required).
 
+### Stage 20 — Verify adversarial lifecycle and regressions (2026-09-11)
+
+- Stage / attempt / date: Stage 20 / attempt 1 / 2026-09-11
+- Checkout: absolute root, branch, HEAD: `c:\Develop\Atomic-Chat-coder-tym`, `feat/windows-cline-cli`, `d5b2c95`
+- Starting dirty files and preservation: clean working tree prior to Stage 20 execution.
+- Approved scope and exact files explained to user: Stage 20 adversarial lifecycle and regression verification across Cline and Ollama backends (missing CLI/auth, malformed stream, disconnect, pending permissions, project switch, persisted history, manual runs and Loop).
+- Changes or read-only findings:
+  - Hardened `loop-lifecycle.ts` `evaluateLoopTurn` and `formatLoopTerminalMessage` with `Number.isFinite` and `Number.isInteger` checks, failing closed immediately on `NaN`, `±Infinity`, negative, 0, or float bounds.
+  - Hardened `backend-router.ts` `routeRespondPermission` to validate `activeRun` (fails closed if `activeRun` is null or `runId` mismatches).
+  - Passed `activeRun` from `handleRespondPermission` in `CodingAgentPanel/index.tsx`.
+  - Implemented comprehensive adversarial test suite in `web-app/src/containers/CodingAgentPanel/adversarial-lifecycle.test.ts` with 18 automated tests across 10 adversarial/regression scenarios:
+    1. Scenario 1: Missing CLI / executable not found (`spawn` failure handling).
+    2. Scenario 2: Missing auth / ACP handshake rejection (`-32000`).
+    3. Scenario 3: Malformed stream JSON and truncated chunks in `normalizeAcpSessionUpdate`.
+    4. Scenario 4: Abrupt process disconnect / crash during streaming (unfreezes UI, marks session `'failed'`, suppresses phantom chunks).
+    5. Scenario 5: Orphaned / pending permissions on disconnect (discarded, late replies rejected without IPC, loop phases strictly gated via `validateLoopPermissionProcessing`, `stopLoopExecution` tested).
+    6. Scenario 6: Rapid project directory switch mid-execution (enforces directory confinement and detects projectDir drift).
+    7. Scenario 7: Corrupt / invalid persisted history (safe defaults on corrupt store load).
+    8. Scenario 8: Adversarial concurrency flooding (mutex blocking simultaneous runs).
+    9. Scenario 9: Adversarial Loop bounds & infinite loop defense (`maxRuns: 0`, `-5`, `NaN`, `±Infinity`, float bounds).
+    10. Scenario 10: Ollama regression integrity (verifying Ollama routes, health checks, model selection, diffs remain 100% operational).
+  - Executed live adversarial protocol probe (`scratch/stage20_adversarial_resilience_probe.mjs`):
+    - Test 1: Abrupt child tree kill (`taskkill /F /T`), observed clean process exit code 1, expected rejection.
+    - Test 2: Malformed JSON-RPC frames injected into stdin; ACP survived and responded to valid initialize.
+    - Test 3: In-flight cancellation during pending tool permission; sent cancel only (no approval), verified target file was NOT created on disk, and late approval failed closed.
+    - Test 4: 5 rapid sequential `session/set_config_option` rebindings succeeded.
+    - Test 5: Clean teardown verified with zero locked handles and directory removed on attempt 1 without EBUSY.
+- Acceptance criteria verified:
+  1. Missing CLI & Auth handling: verified in router and tests.
+  2. Malformed stream sanitization: verified in adapter and live probe.
+  3. Abrupt disconnect & zombie prevention: verified in filter and live probe.
+  4. Pending permissions on disconnect: verified fail-closed at router, loop lifecycle, and live protocol on disk.
+  5. Project confinement & drift detection: verified in safety validator.
+  6. Corrupt persisted history recovery: verified in migration function.
+  7. Concurrency mutex enforcement: verified in router and loop validator.
+  8. Adversarial Loop bounds defense: verified in evaluateLoopTurn.
+  9. Ollama regression integrity: verified isolation across health, restart, send, and stop.
+  10. Quality & verification gates: tsc 0 errors, Vitest 190/190 passing across 18 files, live probe ALL TESTS PASSED.
+- Test commands / outcomes / relevant output:
+  - `corepack yarn workspace @janhq/web-app exec tsc -b tsconfig.app.json --pretty false`: PASSED (0 errors).
+  - `corepack yarn workspace @janhq/web-app test run src/stores/ src/containers/CodingAgentPanel/`: PASSED, 18 test files, 190/190 tests passed (100%).
+  - `node scratch/stage20_adversarial_resilience_probe.mjs`: ALL 5 PROBE TESTS PASSED.
+- Skipped checks and reason: None.
+- Reviewer name/tool and availability result:
+  - Grok CLI (`C:\Users\segal\.grok\bin\grok.exe`, model Grok 3 / `grok-beta`), executed locally.
+- Review round 1 verdict and findings:
+  - Verdict: **CHANGES_REQUIRED** (Round 1 identified 4 items: permission fail-closed verification, cancel-only in probe test 3, non-EBUSY teardown in probe test 5, and finite integer loop bounds).
+- Findings reproduced / rejected with evidence:
+  - Addressed all 4 items with code hardening, test expansion (14 -> 18 tests), and revised probe.
+- Fixes and rerun results:
+  - Vitest 190/190 passed (100%).
+  - TypeScript 0 errors.
+  - Live probe 5/5 passed.
+- Closure review verdict (High always; Medium after fixes):
+  - Round 2 Closure Review Verdict: **PASS** across all criteria.
+- Remaining issues / blocker / accepted limitation: None.
+- Final diff self-check: Clean additions in `adversarial-lifecycle.test.ts`, `backend-router.ts`, `loop-lifecycle.ts`, and `index.tsx`.
+- Final stage status: DONE
+- Completed count: 20 / 22
+- Next eligible stage: 21 — Package Windows release configuration (Medium, independent review required).
+
 Append one entry per execution/review attempt; retain earlier entries when resuming a stage.
 
 ### Entry template

@@ -30,6 +30,24 @@ export function evaluateLoopTurn(
   success: boolean,
   errorMessage?: string | null
 ): LoopIterationResult {
+  if (
+    typeof maxRuns !== 'number' ||
+    !Number.isFinite(maxRuns) ||
+    !Number.isInteger(maxRuns) ||
+    maxRuns <= 0 ||
+    typeof currentRun !== 'number' ||
+    !Number.isFinite(currentRun) ||
+    !Number.isInteger(currentRun) ||
+    currentRun < 0
+  ) {
+    return {
+      nextRun: null,
+      shouldContinue: false,
+      status: 'halted',
+      reason: `Invalid loop bounds: currentRun=${currentRun}, maxRuns=${maxRuns}. Loop sequence halted.`,
+    }
+  }
+
   if (!success) {
     return {
       nextRun: null,
@@ -106,6 +124,18 @@ export function formatLoopTerminalMessage(
   success: boolean,
   error?: string | null
 ): string {
+  if (
+    typeof maxRuns !== 'number' ||
+    !Number.isFinite(maxRuns) ||
+    !Number.isInteger(maxRuns) ||
+    maxRuns <= 0 ||
+    typeof currentRun !== 'number' ||
+    !Number.isFinite(currentRun) ||
+    !Number.isInteger(currentRun) ||
+    currentRun < 0
+  ) {
+    return `[Loop] Invalid iteration bounds (currentRun=${currentRun}, maxRuns=${maxRuns}). Loop sequence halted.`
+  }
   if (!success) {
     return `[Loop] Iteration ${currentRun}/${maxRuns} failed: ${error ?? 'Unknown error'}. Loop sequence halted.`
   }

@@ -859,6 +859,7 @@ export function CodingAgentPanel() {
           runId: pendingPermission.runId,
           requestId,
           optionId,
+          activeRun,
         },
         invoke
       )
@@ -899,7 +900,7 @@ export function CodingAgentPanel() {
         timestamp: Date.now(),
       })
     }
-  }, [appendLog, pendingPermission])
+  }, [activeRun, appendLog, pendingPermission])
 
   const handleSelectFolder = useCallback(async () => {
     try {

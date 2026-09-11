@@ -157,6 +157,7 @@ export interface RouteRespondPermissionParams {
   runId: string
   requestId: string
   optionId: string
+  activeRun?: ActiveRun | null
 }
 
 export interface RouteRespondPermissionResult {
@@ -169,12 +170,24 @@ export interface RouteRespondPermissionResult {
  * - cline-acp: invokes respond_cline_permission({ runId, requestId, optionId })
  * - direct-ollama: rejected (Ollama uses diff approval channels instead of ACP permissions)
  * Strictly guarantees that Cline permissions are NEVER sent to Ollama diff channels and vice versa.
+ * Fails closed if activeRun is passed and is null or has a mismatched runId.
  */
 export async function routeRespondPermission(
   params: RouteRespondPermissionParams,
   invokeFn: InvokeFunction
 ): Promise<RouteRespondPermissionResult> {
   if (params.backend === 'cline-acp') {
+    if (params.activeRun !== undefined) {
+      if (!params.activeRun) {
+        throw new Error('Cannot respond to permission: active run is no longer active (session terminated or stopped).')
+      }
+      if (params.activeRun.runId !== params.runId) {
+        throw new Error(
+          `Cannot respond to permission: runId mismatch (active: '${params.activeRun.runId}', request: '${params.runId}').`
+        )
+      }
+    }
+
     await invokeFn('respond_cline_permission', {
       runId: params.runId,
       requestId: params.requestId,
