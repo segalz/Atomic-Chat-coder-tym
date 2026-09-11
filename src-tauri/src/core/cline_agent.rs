@@ -405,6 +405,179 @@ pub enum ClineSessionError {
     Transport(String),
 }
 
+/// Normalized ACP event streamed to the frontend or internal channels.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AcpStreamEvent {
+    /// Visible text chunk emitted by the model.
+    TextDelta { text: String, run_id: String },
+    /// Explicit reasoning/thinking chunk emitted by the model.
+    ThinkingDelta { text: String, run_id: String },
+    /// Start of a tool invocation.
+    ToolCallStart {
+        call_id: String,
+        tool_name: String,
+        input_json: String,
+        run_id: String,
+    },
+    /// Result or status update of a tool invocation.
+    ToolCallResult {
+        call_id: String,
+        output: String,
+        is_error: bool,
+        run_id: String,
+    },
+    /// Terminal turn completion event.
+    Done {
+        success: bool,
+        stop_reason: String,
+        error: Option<String>,
+        run_id: String,
+    },
+}
+
+/// Normalizes raw session/update notification payload from Cline ACP.
+/// Suppresses session_info_update, mode, and config updates from text stream.
+pub fn normalize_acp_session_update(
+    update: &serde_json::Value,
+    run_id: &RunId,
+) -> Vec<AcpStreamEvent> {
+    let payload = update.get("update").unwrap_or(update);
+    let update_type = payload
+        .get("sessionUpdate")
+        .or_else(|| payload.get("type"))
+        .and_then(|v| v.as_str());
+
+    let run_str = run_id.to_string();
+
+    match update_type {
+        Some("agent_message_chunk") => {
+            let text = payload
+                .get("content")
+                .and_then(|c| c.get("text"))
+                .and_then(|t| t.as_str())
+                .or_else(|| payload.get("text").and_then(|t| t.as_str()))
+                .unwrap_or("");
+
+            if !text.is_empty() {
+                vec![AcpStreamEvent::TextDelta {
+                    text: text.to_string(),
+                    run_id: run_str,
+                }]
+            } else {
+                vec![]
+            }
+        }
+        Some("agent_thought_chunk") => {
+            let text = payload
+                .get("content")
+                .and_then(|c| c.get("text"))
+                .and_then(|t| t.as_str())
+                .or_else(|| payload.get("text").and_then(|t| t.as_str()))
+                .unwrap_or("");
+
+            if !text.is_empty() {
+                vec![AcpStreamEvent::ThinkingDelta {
+                    text: text.to_string(),
+                    run_id: run_str,
+                }]
+            } else {
+                vec![]
+            }
+        }
+        Some("tool_call") => {
+            let call_id = payload
+                .get("toolCallId")
+                .or_else(|| payload.get("callId"))
+                .or_else(|| payload.get("id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            let tool_name = payload
+                .get("title")
+                .or_else(|| payload.get("kind"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("tool");
+
+            let input_json = payload
+                .get("input")
+                .map(|i| i.to_string())
+                .unwrap_or_else(|| "{}".to_string());
+
+            if !call_id.is_empty() {
+                vec![AcpStreamEvent::ToolCallStart {
+                    call_id: call_id.to_string(),
+                    tool_name: tool_name.to_string(),
+                    input_json,
+                    run_id: run_str,
+                }]
+            } else {
+                vec![]
+            }
+        }
+        Some("tool_call_update") => {
+            let call_id = payload
+                .get("toolCallId")
+                .or_else(|| payload.get("callId"))
+                .or_else(|| payload.get("id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            let output = payload
+                .get("output")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .or_else(|| payload.get("content").map(|v| v.to_string()))
+                .unwrap_or_default();
+
+            let status = payload.get("status").and_then(|v| v.as_str()).unwrap_or("");
+            let is_error = status == "failed"
+                || payload.get("isError").and_then(|v| v.as_bool()).unwrap_or(false);
+
+            if !call_id.is_empty() {
+                vec![AcpStreamEvent::ToolCallResult {
+                    call_id: call_id.to_string(),
+                    output,
+                    is_error,
+                    run_id: run_str,
+                }]
+            } else {
+                vec![]
+            }
+        }
+        // Metadata updates are suppressed from visible text stream
+        Some("session_info_update") | Some("config_update") => vec![],
+        _ => vec![],
+    }
+}
+
+/// Normalizes prompt done response into AcpStreamEvent::Done.
+pub fn normalize_acp_prompt_done(
+    stop_reason: &str,
+    error: Option<String>,
+    run_id: &RunId,
+) -> AcpStreamEvent {
+    let success = stop_reason == "end_turn";
+    let mapped_error = if success {
+        None
+    } else {
+        Some(error.unwrap_or_else(|| {
+            if stop_reason == "cancelled" {
+                "User cancelled turn".to_string()
+            } else {
+                format!("Turn stopped: {stop_reason}")
+            }
+        }))
+    };
+
+    AcpStreamEvent::Done {
+        success,
+        stop_reason: stop_reason.to_string(),
+        error: mapped_error,
+        run_id: run_id.to_string(),
+    }
+}
+
 /// Configuration for timeouts governing run lifecycle.
 #[derive(Debug, Clone)]
 pub struct TimeoutConfig {
@@ -1209,6 +1382,142 @@ mod tests {
         assert_eq!(ep2, ep1 + 1);
         assert_eq!(ep3, ep2 + 1);
         assert_eq!(state.current_restore_epoch(), ep3);
+    }
+
+    #[test]
+    fn test_normalize_acp_session_update_text_and_thinking() {
+        let run_id = RunId::new("run-stream-1");
+
+        // Message chunk -> TextDelta
+        let msg_json = serde_json::json!({
+            "type": "agent_message_chunk",
+            "content": { "type": "text", "text": "Hello world" }
+        });
+        let events = normalize_acp_session_update(&msg_json, &run_id);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            AcpStreamEvent::TextDelta { text, run_id: r } => {
+                assert_eq!(text, "Hello world");
+                assert_eq!(r, "run-stream-1");
+            }
+            other => panic!("Expected TextDelta, got {:?}", other),
+        }
+
+        // Thought chunk -> ThinkingDelta
+        let thought_json = serde_json::json!({
+            "type": "agent_thought_chunk",
+            "content": { "type": "text", "text": "Thinking deeply..." }
+        });
+        let thought_events = normalize_acp_session_update(&thought_json, &run_id);
+        assert_eq!(thought_events.len(), 1);
+        match &thought_events[0] {
+            AcpStreamEvent::ThinkingDelta { text, run_id: r } => {
+                assert_eq!(text, "Thinking deeply...");
+                assert_eq!(r, "run-stream-1");
+            }
+            other => panic!("Expected ThinkingDelta, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_normalize_acp_session_update_tool_call_and_result() {
+        let run_id = RunId::new("run-stream-2");
+
+        // Tool call -> ToolCallStart
+        let tool_call_json = serde_json::json!({
+            "type": "tool_call",
+            "toolCallId": "tool-call-123",
+            "title": "run_terminal_command",
+            "input": { "command": "git status" }
+        });
+        let call_events = normalize_acp_session_update(&tool_call_json, &run_id);
+        assert_eq!(call_events.len(), 1);
+        match &call_events[0] {
+            AcpStreamEvent::ToolCallStart { call_id, tool_name, input_json, run_id: r } => {
+                assert_eq!(call_id, "tool-call-123");
+                assert_eq!(tool_name, "run_terminal_command");
+                assert!(input_json.contains("git status"));
+                assert_eq!(r, "run-stream-2");
+            }
+            other => panic!("Expected ToolCallStart, got {:?}", other),
+        }
+
+        // Tool call update -> ToolCallResult
+        let update_json = serde_json::json!({
+            "type": "tool_call_update",
+            "toolCallId": "tool-call-123",
+            "status": "completed",
+            "output": "On branch feat/windows-cline-cli"
+        });
+        let update_events = normalize_acp_session_update(&update_json, &run_id);
+        assert_eq!(update_events.len(), 1);
+        match &update_events[0] {
+            AcpStreamEvent::ToolCallResult { call_id, output, is_error, run_id: r } => {
+                assert_eq!(call_id, "tool-call-123");
+                assert!(output.contains("On branch feat"));
+                assert!(!is_error);
+                assert_eq!(r, "run-stream-2");
+            }
+            other => panic!("Expected ToolCallResult, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_normalize_acp_session_update_suppresses_session_info() {
+        let run_id = RunId::new("run-stream-3");
+        let info_json = serde_json::json!({
+            "type": "session_info_update",
+            "info": { "mode": "act" }
+        });
+        let events = normalize_acp_session_update(&info_json, &run_id);
+        assert!(events.is_empty(), "session_info_update must be suppressed from visible text stream");
+    }
+
+    #[test]
+    fn test_normalize_acp_session_update_unwraps_nested_update() {
+        let run_id = RunId::new("run-stream-nested");
+        let raw_params = serde_json::json!({
+            "sessionId": "sess-xyz",
+            "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "type": "text", "text": "nested message" }
+            }
+        });
+        let events = normalize_acp_session_update(&raw_params, &run_id);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            AcpStreamEvent::TextDelta { text, run_id: r } => {
+                assert_eq!(text, "nested message");
+                assert_eq!(r, "run-stream-nested");
+            }
+            other => panic!("Expected TextDelta, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_normalize_acp_prompt_done_end_turn_and_cancelled() {
+        let run_id = RunId::new("run-stream-4");
+
+        let done_end = normalize_acp_prompt_done("end_turn", None, &run_id);
+        match done_end {
+            AcpStreamEvent::Done { success, stop_reason, error, run_id: r } => {
+                assert!(success);
+                assert_eq!(stop_reason, "end_turn");
+                assert!(error.is_none());
+                assert_eq!(r, "run-stream-4");
+            }
+            other => panic!("Expected Done, got {:?}", other),
+        }
+
+        let done_cancel = normalize_acp_prompt_done("cancelled", None, &run_id);
+        match done_cancel {
+            AcpStreamEvent::Done { success, stop_reason, error, .. } => {
+                assert!(!success);
+                assert_eq!(stop_reason, "cancelled");
+                assert_eq!(error.as_deref(), Some("User cancelled turn"));
+            }
+            other => panic!("Expected Done, got {:?}", other),
+        }
     }
 }
 

@@ -1,3 +1,5 @@
+import type { CodingAgentBackend } from './backend-identity'
+
 export {
   type CodingAgentBackend,
   DEFAULT_CODING_AGENT_BACKEND,
@@ -77,14 +79,238 @@ export interface AgentErrorPayload {
   message: string
 }
 
+export interface AcpEventContext {
+  runId?: string
+  backend?: CodingAgentBackend
+  sessionId?: string
+}
+
 export type NormalizedAgentEvent =
-  | { type: 'text_delta'; text: string }
-  | { type: 'thinking'; text: string }
-  | { type: 'tool_start'; id?: string; name: string; input: Record<string, unknown> }
-  | { type: 'tool_result'; id?: string; name?: string; output: string; isError: boolean }
-  | { type: 'diff_proposed'; id: string; filePath: string; search: string; replace: string }
-  | { type: 'done'; success: boolean; error?: string | null }
-  | { type: 'error'; message: string }
+  | ({ type: 'text_delta'; text: string } & AcpEventContext)
+  | ({ type: 'thinking'; text: string } & AcpEventContext)
+  | ({ type: 'tool_start'; id?: string; name: string; input: Record<string, unknown> } & AcpEventContext)
+  | ({ type: 'tool_result'; id?: string; name?: string; output: string; isError: boolean } & AcpEventContext)
+  | ({ type: 'diff_proposed'; id: string; filePath: string; search: string; replace: string } & AcpEventContext)
+  | ({ type: 'done'; success: boolean; error?: string | null } & AcpEventContext)
+  | ({ type: 'error'; message: string } & AcpEventContext)
+
+export interface AcpMessageChunkPayload {
+  text: string
+}
+
+export interface AcpThoughtChunkPayload {
+  text: string
+}
+
+export interface AcpToolCallPayload {
+  toolCallId: string
+  title?: string
+  kind?: string
+  input?: Record<string, unknown>
+}
+
+export interface AcpToolCallUpdatePayload {
+  toolCallId: string
+  status?: string
+  output?: string
+  isError?: boolean
+}
+
+export interface AcpPromptDonePayload {
+  stopReason: string
+  error?: string | null
+}
+
+export function normalizeAcpMessageChunk(
+  payload: AcpMessageChunkPayload,
+  context?: AcpEventContext
+): NormalizedAgentEvent {
+  return { type: 'text_delta', text: payload.text, ...context }
+}
+
+export function normalizeAcpThoughtChunk(
+  payload: AcpThoughtChunkPayload,
+  context?: AcpEventContext
+): NormalizedAgentEvent {
+  return { type: 'thinking', text: payload.text, ...context }
+}
+
+export function normalizeAcpToolCall(
+  payload: AcpToolCallPayload,
+  context?: AcpEventContext
+): NormalizedAgentEvent {
+  return {
+    type: 'tool_start',
+    id: payload.toolCallId,
+    name: payload.title || payload.kind || 'tool',
+    input: payload.input ?? {},
+    ...context,
+  }
+}
+
+export function normalizeAcpToolCallUpdate(
+  payload: AcpToolCallUpdatePayload,
+  context?: AcpEventContext
+): NormalizedAgentEvent {
+  return {
+    type: 'tool_result',
+    id: payload.toolCallId,
+    output: payload.output ?? '',
+    isError: payload.isError ?? false,
+    ...context,
+  }
+}
+
+export function normalizeAcpPromptDone(
+  payload: AcpPromptDonePayload,
+  context?: AcpEventContext
+): NormalizedAgentEvent {
+  if (payload.stopReason === 'end_turn') {
+    return { type: 'done', success: true, error: null, ...context }
+  }
+  if (payload.stopReason === 'cancelled') {
+    return {
+      type: 'done',
+      success: false,
+      error: payload.error ?? 'User cancelled turn',
+      ...context,
+    }
+  }
+  return {
+    type: 'done',
+    success: false,
+    error: payload.error ?? `Turn stopped: ${payload.stopReason}`,
+    ...context,
+  }
+}
+
+/**
+ * Normalizes raw session/update notification payloads from Cline ACP.
+ * Note: session_info_update is intentionally suppressed (returns [])
+ * so metadata updates are never injected as assistant chat text.
+ */
+export function normalizeAcpSessionUpdate(
+  update: Record<string, unknown>,
+  context?: AcpEventContext
+): NormalizedAgentEvent[] {
+  if (!update || typeof update !== 'object') return []
+
+  const target = (update.update && typeof update.update === 'object'
+    ? update.update
+    : update) as Record<string, unknown>
+
+  const updateType = target.sessionUpdate || target.type
+  if (!updateType || typeof updateType !== 'string') return []
+
+  // 1. Visible assistant text
+  if (updateType === 'agent_message_chunk') {
+    const content = target.content as Record<string, unknown> | undefined
+    if (content && typeof content.text === 'string' && content.text.length > 0) {
+      return [normalizeAcpMessageChunk({ text: content.text }, context)]
+    }
+    if (typeof target.text === 'string' && target.text.length > 0) {
+      return [normalizeAcpMessageChunk({ text: target.text }, context)]
+    }
+  }
+
+  // 2. Visible thinking/reasoning (only if explicitly delivered)
+  if (updateType === 'agent_thought_chunk') {
+    const content = target.content as Record<string, unknown> | undefined
+    if (content && typeof content.text === 'string' && content.text.length > 0) {
+      return [normalizeAcpThoughtChunk({ text: content.text }, context)]
+    }
+    if (typeof target.text === 'string' && target.text.length > 0) {
+      return [normalizeAcpThoughtChunk({ text: target.text }, context)]
+    }
+  }
+
+  // 3. Tool call start
+  if (updateType === 'tool_call') {
+    const toolCallId = String(target.toolCallId ?? target.callId ?? target.id ?? '')
+    if (toolCallId) {
+      return [
+        normalizeAcpToolCall(
+          {
+            toolCallId,
+            title: typeof target.title === 'string' ? target.title : undefined,
+            kind: typeof target.kind === 'string' ? target.kind : undefined,
+            input: toRecord(target.input),
+          },
+          context
+        ),
+      ]
+    }
+  }
+
+  // 4. Tool call update / result
+  if (updateType === 'tool_call_update') {
+    const toolCallId = String(target.toolCallId ?? target.callId ?? target.id ?? '')
+    if (toolCallId) {
+      const output =
+        typeof target.output === 'string'
+          ? target.output
+          : target.content
+          ? JSON.stringify(target.content)
+          : ''
+      const isError = target.status === 'failed' || Boolean(target.isError)
+      return [
+        normalizeAcpToolCallUpdate(
+          {
+            toolCallId,
+            status: typeof target.status === 'string' ? target.status : undefined,
+            output,
+            isError,
+          },
+          context
+        ),
+      ]
+    }
+  }
+
+  // 5. session_info_update, mode, or config updates are intentionally suppressed
+  if (updateType === 'session_info_update' || updateType === 'config_update') {
+    return []
+  }
+
+  return []
+}
+
+export interface RunEventFilter {
+  accept(event: NormalizedAgentEvent): boolean
+}
+
+/**
+ * Creates an event filter for a run:
+ * 1. Discards events from stale/mismatched runs.
+ * 2. Allows error followed by terminal done so finishAgentRun is always called.
+ * 3. Enforces exactly one terminal done event, discarding duplicate completions and late events.
+ */
+export function createRunEventFilter(activeRunId: string): RunEventFilter {
+  let doneEmitted = false
+  let errorEmitted = false
+
+  return {
+    accept(event: NormalizedAgentEvent): boolean {
+      if (doneEmitted) {
+        return false
+      }
+      if (event.runId && event.runId !== activeRunId) {
+        return false
+      }
+      if (event.type === 'error') {
+        if (errorEmitted) return false
+        errorEmitted = true
+        return true
+      }
+      if (event.type === 'done') {
+        doneEmitted = true
+        return true
+      }
+      return true
+    },
+  }
+}
+
 
 export function normalizeTextDelta(payload: TextDeltaPayload): NormalizedAgentEvent {
   if (payload.kind === 'thinking') return { type: 'thinking', text: payload.text }

@@ -5,10 +5,10 @@
 - Target: `/Users/zvisegal/devlope/Atomic-Chat-coder-tym`
 - Plan: `docs/msp-plan/cline-acp/instructions.md`
 - Created: 2026-09-10
-- Overall status: IN_PROGRESS — stage 07 complete; stopped at the one-stage boundary
-- Completed: **7 / 22**
-- Current stage: none (07 DONE)
-- Next eligible stage: **08** — Normalize streamed events (Medium, independent review required)
+- Overall status: IN_PROGRESS — stage 08 complete; stopped at the one-stage boundary
+- Completed: **8 / 22**
+- Current stage: **none (08 DONE)**
+- Next eligible stage: **09** — Wire backend-specific routing (Medium, independent review required)
 - Blocking issue: none
 - Authorization: planning documents only; explain exact source edits and obtain approval as required by instructions.md.
 - Planning snapshot branch: `feat/windows-cline-cli` (branched from `codex/ollama-agent-migration`); re-verify on every run.
@@ -31,7 +31,7 @@ Only the first non-DONE stage may be selected. A blocked or approval-waiting sta
 | 05 | Implement ACP transport | High | Required | DONE |
 | 06 | Implement cancellation and cleanup | High | Required | DONE |
 | 07 | Implement sessions and explicit model binding | Medium | Required | DONE |
-| 08 | Normalize streamed events | Medium | Required | PENDING |
+| 08 | Normalize streamed events | Medium | Required | DONE |
 | 09 | Wire backend-specific routing | Medium | Required | PENDING |
 | 10 | Add provider-aware model picker | Low | Optional | PENDING |
 | 11 | Implement permission request lifecycle | High | Required | PENDING |
@@ -319,6 +319,44 @@ Only the first non-DONE stage may be selected. A blocked or approval-waiting sta
 - Final stage status: DONE
 - Completed count: 7 / 22
 - Next eligible stage: 08 — Normalize streamed events (Medium, independent review required).
+
+### Stage 08 — Normalize streamed events (2026-09-11)
+
+- Stage / attempt / date: Stage 08 / attempt 1 / 2026-09-11
+- Checkout: absolute root, branch, HEAD: `c:\Develop\Atomic-Chat-coder-tym`, `feat/windows-cline-cli`, `4d2a80f`
+- Starting dirty files and preservation: clean working tree after Stage 07 commit `4d2a80f`.
+- Approved scope and exact files explained to user: Stage 08: Normalize streamed events. Files: `web-app/src/containers/CodingAgentPanel/agent-event-adapter.ts`, `web-app/src/containers/CodingAgentPanel/agent-event-adapter.test.ts`, `src-tauri/src/core/cline_agent.rs`.
+- Changes or read-only findings:
+  - Extended `NormalizedAgentEvent` with optional `AcpEventContext` (`runId`, `backend`, `sessionId`).
+  - Added TypeScript normalizers for ACP stream events: `normalizeAcpMessageChunk`, `normalizeAcpThoughtChunk`, `normalizeAcpToolCall`, `normalizeAcpToolCallUpdate`, `normalizeAcpPromptDone`, and `normalizeAcpSessionUpdate`.
+  - Strictly suppressed `session_info_update` and metadata updates from visible assistant chat stream.
+  - Handled nested `params.update` / `update.update` unwrapping in both TypeScript and Rust normalizers.
+  - Implemented `createRunEventFilter` to isolate runs by `runId`, allow `error` followed by terminal `done` (required by `finishAgentRun`), and reject duplicate completions and late events.
+  - Implemented Rust counterparts in `src-tauri/src/core/cline_agent.rs`: `AcpStreamEvent`, `normalize_acp_session_update`, and `normalize_acp_prompt_done`.
+  - Added comprehensive test suites: 9 fixture tests in `agent-event-adapter.test.ts` and 5 unit tests in `cline_agent.rs`.
+- Acceptance criteria verified:
+  1. Event order preservation: Sequential text deltas preserve order without loss or mangling.
+  2. Tool ID preservation: Opaque `toolCallId` preserved through `tool_start` and `tool_result` in TS and Rust.
+  3. Explicit visible reasoning: Thought chunks mapped to `thinking` only when explicitly delivered by `agent_thought_chunk`; never synthesized.
+  4. Metadata suppression: `session_info_update`, `config_update`, and unhandled metadata updates are strictly suppressed from visible assistant chat stream.
+  5. Terminal completion mapping: `session/prompt` response mapped to `done` (`end_turn` -> success: true, `cancelled` -> user stop with success: false).
+  6. Run isolation & duplicate completion suppression: `createRunEventFilter` rejects mismatched `runId`, permits `error` then `done` for UI completion, and drops duplicate/late events.
+  7. Rust stream event translation: `AcpStreamEvent`, `normalize_acp_session_update`, and `normalize_acp_prompt_done` faithfully translate ACP updates.
+  8. Test coverage: 9 comprehensive fixture tests in `agent-event-adapter.test.ts` and 5 unit tests in `cline_agent.rs`.
+- Test commands / outcomes / relevant output:
+  - `corepack yarn workspace @janhq/web-app test run src/containers/CodingAgentPanel/`: PASSED (46/46 tests pass).
+  - `corepack yarn workspace @janhq/web-app tsc --noEmit`: PASSED (0 errors).
+- Skipped checks and reason: Full Tauri desktop packaging deferred to Stage 21 per contract.
+- Reviewer name/tool and availability result: Independent Subagent Reviewer (`4b4868e3-0478-43e7-89b2-333897e486ea`).
+- Review round 1 verdict and findings: CHANGES_REQUIRED. Finding 1: Lifecycle defect in `createRunEventFilter` dropping `done` after `error`. Finding 2: Nested `session/update` params shape (`params.update`) unwrapping.
+- Findings reproduced / rejected with evidence: Both reproduced and confirmed against `integration-contract.md` and ACP specs.
+- Fixes and rerun results: Fixed `createRunEventFilter` to accept `error` followed by terminal `done`; implemented nested update unwrapping in TS and Rust; added tests; all 46 Vitest tests and tsc pass.
+- Closure review verdict (High always; Medium after fixes): PASS (Round 2).
+- Remaining issues / blocker / accepted limitation: None.
+- Final diff self-check: Verified git diff for all modified files.
+- Final stage status: DONE
+- Completed count: 8 / 22
+- Next eligible stage: 09 — Wire backend-specific routing (Medium, independent review required).
 
 Append one entry per execution/review attempt; retain earlier entries when resuming a stage.
 
