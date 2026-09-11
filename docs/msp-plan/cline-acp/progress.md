@@ -5,10 +5,10 @@
 - Target: `/Users/zvisegal/devlope/Atomic-Chat-coder-tym`
 - Plan: `docs/msp-plan/cline-acp/instructions.md`
 - Created: 2026-09-10
-- Overall status: IN_PROGRESS — stage 09 complete; stopped at the one-stage boundary
-- Completed: **9 / 22**
-- Current stage: **none (09 DONE)**
-- Next eligible stage: **10** — Add provider-aware model picker (Low, optional independent review)
+- Overall status: IN_PROGRESS — stage 10 completed, stage 11 ready
+- Completed: **10 / 22**
+- Current stage: **11** — Implement permission request lifecycle (PENDING)
+- Next eligible stage: **11** — Implement permission request lifecycle (High, independent review required)
 - Blocking issue: none
 - Authorization: planning documents only; explain exact source edits and obtain approval as required by instructions.md.
 - Planning snapshot branch: `feat/windows-cline-cli` (branched from `codex/ollama-agent-migration`); re-verify on every run.
@@ -33,7 +33,7 @@ Only the first non-DONE stage may be selected. A blocked or approval-waiting sta
 | 07 | Implement sessions and explicit model binding | Medium | Required | DONE |
 | 08 | Normalize streamed events | Medium | Required | DONE |
 | 09 | Wire backend-specific routing | Medium | Required | DONE |
-| 10 | Add provider-aware model picker | Low | Optional | PENDING |
+| 10 | Add provider-aware model picker | Low | Optional | DONE |
 | 11 | Implement permission request lifecycle | High | Required | PENDING |
 | 12 | Integrate edit and command presentation | High | Required | PENDING |
 | 13 | Persist Cline conversation identity | Medium | Required | PENDING |
@@ -394,6 +394,59 @@ Only the first non-DONE stage may be selected. A blocked or approval-waiting sta
 - Final stage status: DONE
 - Completed count: 9 / 22
 - Next eligible stage: 10 — Add provider-aware model picker (Low, optional independent review).
+
+### Stage 10 — Add provider-aware model picker (2026-09-11)
+
+- Stage / attempt / date: Stage 10 / attempt 1 / 2026-09-11
+- Checkout: absolute root, branch, HEAD: `C:\Develop\Atomic-Chat-coder-tym`, `feat/windows-cline-cli`, `c6f3903`
+- Starting dirty files and preservation: clean tree upon stage start; Stage 09 committed cleanly.
+- Approved scope and exact files explained to user: User explicitly approved micro-step execution under continuous supervision.
+- Changes or read-only findings:
+  - `src-tauri/src/core/cline_agent.rs`:
+    - Added `ClineInstallStatus` struct with `installed: bool`, `path: Option<String>`, `version: Option<String>`.
+    - Added `check_cline_installed` Tauri command.
+    - Added `probe_cline_install_sync` helper running real host check (`where cline.cmd` / `which cline` and `--version` probe on Windows). Strictly avoids fake model installation data and fake token pricing.
+    - Added unit test `test_probe_cline_install_sync`.
+  - `src-tauri/src/lib.rs`:
+    - Registered `core::cline_agent::check_cline_installed` in `tauri::generate_handler![...]`.
+  - `web-app/src/containers/CodingAgentPanel/backend-identity.ts`:
+    - Added safe browser persistence helper `persistCodingAgentBackend(backend: CodingAgentBackend): void`.
+  - `web-app/src/containers/CodingAgentPanel/agent-event-adapter.ts`:
+    - Re-exported `persistCodingAgentBackend` alongside previous backend identity symbols.
+  - `web-app/src/containers/CodingAgentPanel/ProviderModelPicker.css`:
+    - Created dedicated, scoped stylesheet for provider tabs, connection status indicators (oklch green dot for installed, red/amber for missing), version badge, model card, and capability badges.
+  - `web-app/src/containers/CodingAgentPanel/ProviderModelPicker.tsx`:
+    - Implemented provider-aware model picker component.
+    - Renders provider switch tabs for "Ollama" (`direct-ollama`) and "Cline ACP" (`cline-acp`).
+    - Gated host check using `check_cline_installed` Tauri command with live status, version badge, and manual refresh button.
+    - Displays `GLM 5.3 Flash` (`zai/glm-5.3-flash`) and active capability badges (`Tools`, `Streaming`, `Thinking`, `Permissions`) when Cline ACP is selected.
+    - Strictly avoids fake model installation or token pricing.
+    - Renders slot/children (Ollama `HardwareSetup`) when `direct-ollama` is selected for 100% backward compatibility.
+  - `web-app/src/containers/CodingAgentPanel/provider-model-picker.test.tsx`:
+    - Created 8 focused unit tests covering tabs rendering, active state, tab switching, localStorage persistence, live host detection (installed vs missing), capabilities display, refresh button, and disabled states.
+  - `web-app/src/containers/CodingAgentPanel/index.tsx`:
+    - Wired `agentBackend` state setter and `handleBackendChange` callback.
+    - Integrated `<ProviderModelPicker>` in the sidebar wrapping `<HardwareSetup>`.
+- Acceptance criteria verified:
+  - Focused selection and persistence tests pass (8/8 in `provider-model-picker.test.tsx`).
+  - Real host check implemented and tested; no fake model installation or token pricing.
+  - Zero regressions across existing CodingAgentPanel test suite (8 test files, 66/66 tests pass).
+  - TypeScript type check (`tsc --noEmit`) passes cleanly with 0 errors.
+- Test commands / outcomes / relevant output:
+  - `corepack yarn workspace @janhq/web-app test run src/containers/CodingAgentPanel/provider-model-picker.test.tsx`: PASSED (8/8 tests pass).
+  - `corepack yarn workspace @janhq/web-app test run src/containers/CodingAgentPanel/`: PASSED (8 test files, 66/66 tests pass).
+  - `corepack yarn workspace @janhq/web-app tsc --noEmit`: PASSED (0 errors).
+- Skipped checks and reason: Full Tauri desktop build deferred to Stage 21 per contract; Independent external review (Low difficulty, optional per instructions.md; self-check passed).
+- Reviewer name/tool and availability result: N/A (Low difficulty, optional per instructions.md).
+- Review round 1 verdict and findings: N/A
+- Findings reproduced / rejected with evidence: N/A
+- Fixes and rerun results: N/A
+- Closure review verdict (High always; Medium after fixes): N/A (Self-check PASSED).
+- Remaining issues / blocker / accepted limitation: None.
+- Final diff self-check: Checked git status and diff; only targeted Stage 10 files and tracker updated.
+- Final stage status: DONE
+- Completed count: 10 / 22
+- Next eligible stage: 11 — Implement permission request lifecycle (High, independent review required).
 
 Append one entry per execution/review attempt; retain earlier entries when resuming a stage.
 

@@ -102,6 +102,21 @@ export function getInitialCodingAgentBackend(): CodingAgentBackend {
   return DEFAULT_CODING_AGENT_BACKEND
 }
 
+/**
+ * Persists the given backend to localStorage so it survives page reloads.
+ * Safe to call in non-browser environments; storage errors are ignored.
+ */
+export function persistCodingAgentBackend(backend: CodingAgentBackend): void {
+  if (typeof window === 'undefined') return
+
+  try {
+    window.localStorage.setItem(CODING_AGENT_BACKEND_STORAGE_KEY, backend)
+  } catch {
+    // Ignore storage failures (quota, private mode, etc.).
+  }
+}
+
+
 export function getBackendCapabilities(backend: CodingAgentBackend): BackendCapabilities {
   return BACKEND_CAPABILITIES[backend] ?? BACKEND_CAPABILITIES[DEFAULT_CODING_AGENT_BACKEND]
 }

@@ -1,0 +1,190 @@
+.provider-model-picker {
+  display: grid;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--background);
+  color: var(--foreground);
+}
+
+.provider-model-picker__title {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted-foreground);
+}
+
+.provider-model-picker__tabs {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: color-mix(in oklab, var(--muted) 40%, transparent);
+}
+
+.provider-model-picker__tab {
+  appearance: none;
+  border: none;
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--muted-foreground);
+  background: transparent;
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.provider-model-picker__tab:hover:not(:disabled):not(.provider-model-picker__tab--active) {
+  color: var(--foreground);
+  background: color-mix(in oklab, var(--accent) 40%, transparent);
+}
+
+.provider-model-picker__tab:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+
+.provider-model-picker__tab:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.provider-model-picker__tab--active {
+  background: var(--accent);
+  color: var(--accent-foreground);
+}
+
+.provider-model-picker__content {
+  display: grid;
+  gap: 6px;
+}
+
+.provider-model-picker__status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted-foreground);
+}
+
+.provider-model-picker__status-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--muted-foreground);
+}
+
+.provider-model-picker__status-dot--installed {
+  background: oklch(0.55 0.14 145);
+}
+
+.provider-model-picker__status-dot--missing {
+  background: oklch(0.63 0.2 25);
+}
+
+.provider-model-picker__status-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.provider-model-picker__status-badge {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 9999px;
+  font-size: 9px;
+  font-weight: 500;
+  line-height: 1.4;
+  background: color-mix(in oklab, var(--muted) 40%, transparent);
+  color: var(--muted-foreground);
+}
+
+.provider-model-picker__model-box {
+  display: grid;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--background) 50%, transparent);
+}
+
+.provider-model-picker__model-name {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--foreground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.provider-model-picker__model-desc {
+  font-size: 10px;
+  color: var(--muted-foreground);
+}
+
+.provider-model-picker__capabilities {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.provider-model-picker__capability {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 9px;
+  line-height: 1.4;
+  color: var(--muted-foreground);
+  background: transparent;
+}
+
+.provider-model-picker__refresh {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.provider-model-picker__refresh:hover:not(:disabled) {
+  color: var(--foreground);
+  background: color-mix(in oklab, var(--accent) 40%, transparent);
+}
+
+.provider-model-picker__refresh:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+
+.provider-model-picker__refresh:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.provider-model-picker__refresh svg {
+  width: 12px;
+  height: 12px;
+}

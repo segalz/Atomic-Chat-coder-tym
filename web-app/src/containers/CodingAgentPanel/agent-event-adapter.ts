@@ -7,6 +7,7 @@ export {
   isCodingAgentBackend,
   resolveCodingAgentBackend,
   getInitialCodingAgentBackend,
+  persistCodingAgentBackend,
   getBackendCapabilities,
   type BackendCapabilities,
   type ModelIdentity,

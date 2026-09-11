@@ -133,6 +133,7 @@ pub fn run() {
         // Cline ACP Agent
         core::cline_agent::start_cline_agent,
         core::cline_agent::stop_cline_agent,
+        core::cline_agent::check_cline_installed,
         // Loop supervision read-only commands
         core::loop_supervision::loop_status,
         core::loop_supervision::read_loop_progress,

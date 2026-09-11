@@ -34,6 +34,7 @@ import { Shimmer } from '@/components/ai-elements/shimmer'
 import { Tool, ToolContent, ToolHeader, ToolInput, ToolOutput } from '@/components/ai-elements/tool'
 import { Reasoning, ReasoningContent, ReasoningTrigger } from '@/components/ai-elements/reasoning'
 import {
+  CLINE_DEFAULT_MODEL_ID,
   getInitialCodingAgentBackend,
   normalizeCompatDiffProposed,
   normalizeCompatToolResult,
@@ -45,6 +46,7 @@ import {
   normalizeError,
   normalizeLegacyCodeAgentOutput,
   normalizeTextDelta,
+  persistCodingAgentBackend,
   type AgentDonePayload,
   type AgentErrorPayload,
   type CodingAgentBackend,
@@ -67,6 +69,7 @@ import {
   type ActiveRun,
 } from './backend-router'
 import { CodeModelSelector } from './CodeModelSelector'
+import { ProviderModelPicker } from './ProviderModelPicker'
 import './ConversationSummary.css'
 import { ContextBudgetIndicator } from './ContextBudgetIndicator'
 import { buildConversationSummary } from './conversation-summary'
@@ -478,7 +481,7 @@ export function CodingAgentPanel() {
   const [agentConfig, setAgentConfig] = useState<CodingAgentConfig | null>(null)
   const [selectedCodeModel, setSelectedCodeModel] = useState(() => getStoredCodeModel() ?? '')
   const [modelCapabilities, setModelCapabilities] = useState<ModelCapabilitiesByName>({})
-  const [agentBackend] = useState<CodingAgentBackend>(() => getInitialCodingAgentBackend())
+  const [agentBackend, setAgentBackend] = useState<CodingAgentBackend>(() => getInitialCodingAgentBackend())
 
   useEffect(() => {
     invoke<CodingAgentConfig>('get_coding_agent_config')
@@ -506,6 +509,15 @@ export function CodingAgentPanel() {
     setSelectedCodeModel(model)
     persistSelectedCodeModel(model)
   }, [modelCapabilities])
+
+  const handleBackendChange = useCallback((backend: CodingAgentBackend) => {
+    setAgentBackend(backend)
+    persistCodingAgentBackend(backend)
+    if (backend === 'cline-acp') {
+      setSelectedCodeModel(CLINE_DEFAULT_MODEL_ID)
+      persistSelectedCodeModel(CLINE_DEFAULT_MODEL_ID)
+    }
+  }, [])
 
   // ── Pre-flight Ollama check ───────────────────────────────
   const checkOllama = useCallback(async () => {
@@ -1148,14 +1160,22 @@ export function CodingAgentPanel() {
             </p>
           )}
         </div>
-        {isOllamaHealthCheckRequired(agentBackend) && (
-          <HardwareSetup
-            ollamaUrl={agentConfig?.ollama_url ?? 'http://localhost:11434'}
-            selectedCodeModel={selectedCodeModel}
-            disabled={isRunning}
-            onCodeModelChange={handleCodeModelChange}
-          />
-        )}
+        <ProviderModelPicker
+          backend={agentBackend}
+          onBackendChange={handleBackendChange}
+          selectedModel={selectedCodeModel}
+          onModelChange={handleCodeModelChange}
+          disabled={isRunning}
+        >
+          {isOllamaHealthCheckRequired(agentBackend) && (
+            <HardwareSetup
+              ollamaUrl={agentConfig?.ollama_url ?? 'http://localhost:11434'}
+              selectedCodeModel={selectedCodeModel}
+              disabled={isRunning}
+              onCodeModelChange={handleCodeModelChange}
+            />
+          )}
+        </ProviderModelPicker>
         <div className="flex-1 overflow-auto flex flex-col min-h-0">
           {/* Session history */}
           {sessions.length > 0 && (

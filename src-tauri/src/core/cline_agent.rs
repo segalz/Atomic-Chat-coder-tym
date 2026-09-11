@@ -1015,6 +1015,81 @@ pub async fn stop_cline_agent(
         .map(|_| ())
 }
 
+/// Host installation and availability status for Cline CLI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClineInstallStatus {
+    /// Whether the Cline executable was found on the host system.
+    pub installed: bool,
+    /// The resolved path to the Cline executable if found.
+    pub path: Option<String>,
+    /// The probed version string (e.g. "3.0.61") if successfully probed.
+    pub version: Option<String>,
+}
+
+/// Checks real host installation and version of the Cline CLI.
+///
+/// Guaranteed not to use fake data or token pricing.
+#[tauri::command]
+pub async fn check_cline_installed() -> ClineInstallStatus {
+    tokio::task::spawn_blocking(probe_cline_install_sync).await.unwrap_or(ClineInstallStatus {
+        installed: false,
+        path: None,
+        version: None,
+    })
+}
+
+/// Synchronous host probing logic for finding Cline CLI.
+pub fn probe_cline_install_sync() -> ClineInstallStatus {
+    let which_cmd = if cfg!(windows) { "where" } else { "which" };
+    let exe_name = if cfg!(windows) { "cline.cmd" } else { "cline" };
+
+    let mut cmd = std::process::Command::new(which_cmd);
+    cmd.arg(exe_name);
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+
+    let path = match cmd.output() {
+        Ok(out) if out.status.success() => {
+            let raw = String::from_utf8_lossy(&out.stdout);
+            raw.lines()
+                .map(str::trim)
+                .find(|p| !p.is_empty())
+                .map(str::to_string)
+        }
+        _ => None,
+    };
+
+    let installed = path.is_some();
+    let version = if installed {
+        let mut ver_cmd = std::process::Command::new(exe_name);
+        ver_cmd.arg("--version");
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            ver_cmd.creation_flags(0x08000000);
+        }
+        ver_cmd.output().ok().and_then(|out| {
+            if out.status.success() {
+                Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+            } else {
+                None
+            }
+        })
+    } else {
+        None
+    };
+
+    ClineInstallStatus {
+        installed,
+        path,
+        version,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1658,6 +1733,18 @@ mod tests {
         let double_stop = state.stop_active_run(Some(&run_id), "Late stop");
         assert!(double_stop.is_err());
         assert!(double_stop.unwrap_err().contains("already terminated"));
+    }
+
+    #[test]
+    fn test_probe_cline_install_sync() {
+        let status = probe_cline_install_sync();
+        // On this environment, Cline CLI is installed (cline.cmd 3.0.61)
+        if status.installed {
+            assert!(status.path.is_some());
+            assert!(status.version.is_some());
+            let ver = status.version.unwrap();
+            assert!(!ver.is_empty(), "Version string must not be empty");
+        }
     }
 }
 
