@@ -231,7 +231,7 @@ function normalizeSessions(value: unknown): CodingSession[] {
     })
 }
 
-function migrateCodingAgentState(persistedState: unknown, _version?: number): Partial<CodingAgentState> {
+export function migrateCodingAgentState(persistedState: unknown, _version?: number): Partial<CodingAgentState> {
   if (!persistedState || typeof persistedState !== 'object') return {}
 
   const state = persistedState as Partial<CodingAgentState>
