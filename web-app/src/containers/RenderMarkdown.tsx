@@ -13,6 +13,7 @@ import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import 'katex/dist/katex.min.css'
 import { MermaidError } from '@/components/MermaidError'
+import { getTextDirection } from '@/utils/textDirection'
 
 interface MarkdownProps {
   content: string
@@ -95,14 +96,16 @@ function RenderMarkdownComponent({
 
   // Memoize the normalized content to avoid reprocessing on every render
   const normalizedContent = useMemo(() => normalizeLatex(content), [content])
+  const direction = getTextDirection(content)
 
   // Render the markdown content
   return (
     <div
-      dir="auto"
+      dir={direction}
       className={cn(
         'markdown wrap-break-word select-text',
         isUser && 'is-user',
+        direction === 'rtl' && 'text-right',
         className
       )}
     >

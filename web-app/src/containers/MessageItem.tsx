@@ -3,6 +3,7 @@ import { memo, useState, useCallback } from 'react'
 import type { UIMessage, ChatStatus } from 'ai'
 import { RenderMarkdown } from './RenderMarkdown'
 import { cn } from '@/lib/utils'
+import { isRtlText, getTextDirection } from '@/utils/textDirection'
 import { twMerge } from 'tailwind-merge'
 import {
   Reasoning,
@@ -177,7 +178,10 @@ export const MessageItem = memo(
                   </div>
                 )}
                 {displayText && (
-                  <div dir="auto" className="select-text whitespace-pre-wrap">
+                  <div
+                    dir={getTextDirection(displayText)}
+                    className={cn('select-text whitespace-pre-wrap', isRtlText(displayText) && 'text-right')}
+                  >
                     {displayText}
                   </div>
                 )}

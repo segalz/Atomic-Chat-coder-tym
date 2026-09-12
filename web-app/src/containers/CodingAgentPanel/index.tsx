@@ -34,6 +34,7 @@ import { ConversationScrollButton } from '@/components/ai-elements/conversation'
 import { Shimmer } from '@/components/ai-elements/shimmer'
 import { Tool, ToolContent, ToolHeader, ToolInput, ToolOutput } from '@/components/ai-elements/tool'
 import { Reasoning, ReasoningContent, ReasoningTrigger } from '@/components/ai-elements/reasoning'
+import { isRtlText, getTextDirection } from '@/utils/textDirection'
 import {
   CLINE_DEFAULT_MODEL_ID,
   extractPermissionCommand,
@@ -1645,9 +1646,10 @@ export function CodingAgentPanel() {
                 'Select a project folder first'
               }
               disabled={!projectDir || isRunning || isSendBlockedByOllamaError(agentBackend, ollamaError)}
-              className="flex-1 resize-none bg-transparent px-4 py-3 text-sm outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50"
+              dir={getTextDirection(draftPrompt)}
+              className="flex-1 resize-none bg-transparent px-4 py-3 text-sm outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50 min-h-[72px]"
               rows={3}
-              style={{ maxHeight: '200px', fieldSizing: 'content' } as React.CSSProperties}
+              style={{ minHeight: '72px', maxHeight: '200px', fieldSizing: 'content' } as React.CSSProperties}
             />
             <div className="flex items-center gap-1 px-3 py-3">
               {/* Loop scheduler button */}
@@ -1925,11 +1927,20 @@ function LogLine({ line }: { line: ExecLogLine }) {
       return (
         <Reasoning className="my-2" defaultOpen={true}>
           <ReasoningTrigger className="text-xs" />
-          <ReasoningContent className="mt-2 text-xs">{line.content}</ReasoningContent>
+          <ReasoningContent
+            className={`mt-2 text-xs${isRtlText(line.content) ? ' text-right' : ''}`}
+            dir={isRtlText(line.content) ? 'rtl' : undefined}
+          >
+            {line.content}
+          </ReasoningContent>
         </Reasoning>
       )
     default:
-      return <div className="text-muted-foreground text-xs py-0.5 break-words whitespace-pre-wrap">{line.content}</div>
+      return isRtlText(line.content) ? (
+        <div dir="rtl" className="text-muted-foreground text-xs py-0.5 break-words whitespace-pre-wrap text-right">{line.content}</div>
+      ) : (
+        <div dir="ltr" className="text-muted-foreground text-xs py-0.5 break-words whitespace-pre-wrap">{line.content}</div>
+      )
   }
 }
 

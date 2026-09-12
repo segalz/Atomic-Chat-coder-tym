@@ -267,4 +267,11 @@
     margin-right: unset;
     margin-left: auto;
   }
+
+  [dir="rtl"] pre,
+  [dir="rtl"] code,
+  [dir="rtl"] [data-streamdown="code-block"] {
+    direction: ltr !important;
+    text-align: left !important;
+  }
 }
