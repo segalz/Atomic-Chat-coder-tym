@@ -55,7 +55,7 @@ const AppLayout = () => {
         <KeyboardShortcutsProvider />
         {/* Fake absolute panel top to enable window drag */}
         {IS_WINDOWS && <WindowControls />}
-        {!IS_LINUX && <div className="fixed w-full h-12 z-20 top-0" data-tauri-drag-region />}
+        {!IS_LINUX && <div className="fixed left-0 right-36 h-12 z-20 top-0" data-tauri-drag-region />}
         <DialogAppUpdater />
         <BackendUpdater />
         <LeftSidebar />
