@@ -38,7 +38,7 @@ const setLastUsedAssistantId = (assistantId: string) => {
 
 export const defaultAssistant: Assistant = {
   id: 'jan',
-  name: 'Atomic Chat',
+  name: 'JoinAIForce Chat',
   created_at: 1747029866.542,
   parameters: {
     temperature: 0.7,
@@ -48,8 +48,8 @@ export const defaultAssistant: Assistant = {
   },
   avatar: '/images/transparent-logo.png',
   description:
-    "Atomic Chat is a helpful desktop assistant that can reason through complex tasks and use tools to complete them on the user's behalf.",
-  instructions: `You are Atomic Chat, a helpful AI assistant who assists users with their requests. Atomic Chat is trained by Menlo Research (https://www.menlo.ai).
+    "JoinAIForce Chat is a helpful desktop assistant that can reason through complex tasks and use tools to complete them on the user's behalf.",
+  instructions: `You are JoinAIForce Chat, a helpful AI assistant who assists users with their requests. JoinAIForce Chat is trained by Menlo Research (https://www.menlo.ai).
 
 You must output your response in the exact language used in the latest user message. Do not provide translations or switch languages unless explicitly instructed to do so. If the input is mostly English, respond in English.
 

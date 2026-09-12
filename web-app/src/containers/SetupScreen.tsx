@@ -196,15 +196,15 @@ function SetupScreen({ onSkipped }: SetupScreenProps) {
           <div className="pointer-events-auto mx-auto my-auto flex w-full max-w-[840px] flex-col px-6 py-8 sm:px-10 sm:py-10">
             <div className="mb-4 shrink-0 text-center sm:mb-5">
               <div className="mb-5 flex items-center justify-center gap-3 font-studio text-5xl font-semibold leading-none tracking-tight sm:text-6xl">
-                <div className="flex h-[1em] w-[1em] shrink-0 items-center justify-center rounded-lg bg-neutral-950 p-[3px] shadow-sm dark:bg-white dark:shadow-none">
+                <div className="flex h-[1em] w-[1em] shrink-0 items-center justify-center rounded-lg p-[3px]">
                   <img
                     src="/images/transparent-logo.png"
                     alt=""
-                    className="size-full min-h-0 min-w-0 object-contain invert dark:invert-0"
+                    className="size-full min-h-0 min-w-0 object-contain"
                     draggable={false}
                   />
                 </div>
-                <span>Atomic Chat</span>
+                <span>JoinAIForce Chat</span>
               </div>
               <div className="mb-3 min-w-0">
                 <span className="inline-block text-lg font-bold leading-snug sm:text-xl md:text-2xl">

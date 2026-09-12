@@ -9,8 +9,6 @@ const isCustomImageAvatar = (avatar: React.ReactNode): avatar is string => {
   return typeof avatar === 'string' && avatar.startsWith('/images/')
 }
 
-const isAtomicChatLogoPath = (src: string) => src.includes('atomic-chat-logo')
-
 /**
  * Component for rendering assistant avatars with consistent styling
  */
@@ -31,10 +29,7 @@ export const AvatarEmoji: React.FC<AvatarEmojiProps> = memo(({
       <img
         src={avatar}
         alt="Custom avatar"
-        className={cn(
-          imageClassName,
-          isAtomicChatLogoPath(avatar) && 'dark:brightness-0 dark:invert'
-        )}
+        className={cn(imageClassName)}
       />
     )
   }

@@ -197,8 +197,8 @@ export function PromptVisionModel({
       <div className="flex items-center gap-2">
         <img
           src="/images/transparent-logo.png"
-          alt="Atomic Bot"
-          className="size-5 dark:brightness-0 dark:invert"
+          alt="JoinAIForce Chat"
+          className="size-5"
         />
         <h2 className="font-medium">
           Atomic Bot V2 VL Model

@@ -24,13 +24,13 @@ export function LeftSidebar() {
           </div>
           <div className="mt-1 flex w-full items-center gap-2 pl-2">
             <div
-              className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-neutral-950 p-[3px] shadow-sm dark:bg-white dark:shadow-none"
-              title="Atomic Bot"
+              className="flex size-9 shrink-0 items-center justify-center rounded-lg p-[2px]"
+              title="JoinAIForce Chat"
             >
               <img
                 src="/images/transparent-logo.png"
-                alt="Atomic Bot"
-                className="size-full min-h-0 min-w-0 object-contain invert dark:invert-0"
+                alt="JoinAIForce Chat"
+                className="size-full min-h-0 min-w-0 object-contain"
               />
             </div>
             <span className="text-muted-foreground text-xs">v{VERSION}</span>
