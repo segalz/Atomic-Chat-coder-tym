@@ -78,7 +78,7 @@ import {
   routeStopAgent,
   type ActiveRun,
 } from './backend-router'
-import { persistSelectedClineModel, resolveSelectedClineModel } from './backend-identity'
+import { persistSelectedClineModel, resolveSelectedClineModel, CLINE_FREE_MODELS } from './backend-identity'
 import { CodeModelSelector } from './CodeModelSelector'
 import { ProviderModelPicker } from './ProviderModelPicker'
 import { PermissionRequest } from './PermissionRequest'
@@ -525,13 +525,6 @@ export function CodingAgentPanel() {
     }
   }, [agentBackend])
 
-  const handleCodeModelChange = useCallback((model: string) => {
-    if (!isCodeAgentToolCompatible(model, modelCapabilities)) return
-
-    setSelectedCodeModel(model)
-    persistSelectedCodeModel(model)
-  }, [modelCapabilities])
-
   const handleBackendChange = useCallback((backend: CodingAgentBackend) => {
     setAgentBackend(backend)
     persistCodingAgentBackend(backend)
@@ -539,11 +532,6 @@ export function CodingAgentPanel() {
       setSelectedCodeModel(CLINE_DEFAULT_MODEL_ID)
       persistSelectedCodeModel(CLINE_DEFAULT_MODEL_ID)
     }
-  }, [])
-
-  const handleClineModelChange = useCallback((model: string) => {
-    setSelectedClineModel(model)
-    persistSelectedClineModel(model)
   }, [])
 
   // ── Pre-flight Ollama check ───────────────────────────────
@@ -958,6 +946,7 @@ export function CodingAgentPanel() {
       currentRun?: number
       maxRuns?: number
       loopId?: string | null
+      overrideModel?: string
     } = {}
   ): Promise<boolean> => {
     if (!projectDir || !prompt.trim()) return false
@@ -1000,7 +989,7 @@ export function CodingAgentPanel() {
       activeSessionBackend === 'cline-acp' &&
       activeSession?.externalSessionId
     )
-    const candidateModel = selectedCodeModel || agentConfig?.code_model || CODE_AGENT_DEFAULT_MODEL
+    const candidateModel = options.overrideModel || selectedCodeModel || agentConfig?.code_model || CODE_AGENT_DEFAULT_MODEL
     let model = candidateModel
     if (isOllamaHealthCheckRequired(agentBackend)) {
       const candidateCompatModel = isCodeAgentToolCompatible(candidateModel, modelCapabilities) ? candidateModel : CODE_AGENT_DEFAULT_MODEL
@@ -1037,7 +1026,7 @@ export function CodingAgentPanel() {
         console.warn('Failed to refresh Ollama models before Code Agent run:', err)
       }
     } else if (agentBackend === 'cline-acp') {
-      model = selectedClineModel || CLINE_DEFAULT_MODEL_ID
+      model = options.overrideModel || selectedClineModel || CLINE_DEFAULT_MODEL_ID
     }
     const promptForAgent = buildCodingAgentPrompt({
       prompt,
@@ -1183,6 +1172,85 @@ export function CodingAgentPanel() {
       return false
     }
   }, [projectDir, selectedCodeModel, selectedClineModel, agentConfig, agentBackend, activeRun, autoApproveTools, setRunning, appendLog, startNewSession, continueSession, clearPendingDiffs, loopEnabled, clearLoopSchedule])
+
+  const handleClineModelChange = useCallback((model: string) => {
+    if (model === selectedClineModel) return
+
+    setSelectedClineModel(model)
+    persistSelectedClineModel(model)
+
+    const storeState = useCodingAgentStore.getState()
+    const activeSession = storeState.sessions.find((s) => s.id === storeState.activeSessionId)
+    const hasPriorConversation = Boolean(
+      activeSession &&
+      activeSession.projectDir === projectDir &&
+      (activeSession.execLog.length > 0 || Boolean(activeSession.prompt && activeSession.prompt.trim().length > 0))
+    )
+
+    const isIdleAtFinishedState = !isRunning && agentStatus === 'free' && !loopEnabled && draftPrompt.trim().length === 0
+
+    if (hasPriorConversation && isIdleAtFinishedState) {
+      const conversationText = [
+        activeSession?.prompt,
+        ...(activeSession?.execLog.slice(-10).map((l) => l.content) ?? []),
+      ].filter(Boolean).join(' ')
+      const isRtl = isRtlText(conversationText)
+      const modelDisplayName = CLINE_FREE_MODELS.find((m) => m.id === model)?.name ?? model
+      const continuationPrompt = isRtl
+        ? 'המשך את השיחה והמשימה מאותה נקודה עם המודל החדש.'
+        : 'Continue the conversation and task from this point with the newly selected model.'
+      const systemNotice = isRtl
+        ? `\n[מערכת] המודל הוחלף ל-${modelDisplayName}. ממשיך בשיחה מאותה נקודה...`
+        : `\n[System] Switched model to ${modelDisplayName}. Continuing conversation from this point...`
+      appendLog({ type: 'text_delta', content: systemNotice, timestamp: Date.now() })
+      sendPrompt(continuationPrompt, {
+        source: 'manual',
+        includeConversationContext: true,
+        includeSummaryContext: true,
+        overrideModel: model,
+      })
+    }
+  }, [projectDir, selectedClineModel, isRunning, agentStatus, loopEnabled, draftPrompt, appendLog, sendPrompt])
+
+  const handleCodeModelChange = useCallback((model: string) => {
+    if (!isCodeAgentToolCompatible(model, modelCapabilities)) return
+    if (model === selectedCodeModel) return
+
+    setSelectedCodeModel(model)
+    persistSelectedCodeModel(model)
+
+    const storeState = useCodingAgentStore.getState()
+    const activeSession = storeState.sessions.find((s) => s.id === storeState.activeSessionId)
+    const hasPriorConversation = Boolean(
+      activeSession &&
+      activeSession.projectDir === projectDir &&
+      (activeSession.execLog.length > 0 || Boolean(activeSession.prompt && activeSession.prompt.trim().length > 0))
+    )
+
+    const isIdleAtFinishedState = !isRunning && agentStatus === 'free' && !loopEnabled && draftPrompt.trim().length === 0
+
+    if (hasPriorConversation && isIdleAtFinishedState) {
+      const conversationText = [
+        activeSession?.prompt,
+        ...(activeSession?.execLog.slice(-10).map((l) => l.content) ?? []),
+      ].filter(Boolean).join(' ')
+      const isRtl = isRtlText(conversationText)
+      const modelDisplayName = model
+      const continuationPrompt = isRtl
+        ? 'המשך את השיחה והמשימה מאותה נקודה עם המודל החדש.'
+        : 'Continue the conversation and task from this point with the newly selected model.'
+      const systemNotice = isRtl
+        ? `\n[מערכת] המודל הוחלף ל-${modelDisplayName}. ממשיך בשיחה מאותה נקודה...`
+        : `\n[System] Switched model to ${modelDisplayName}. Continuing conversation from this point...`
+      appendLog({ type: 'text_delta', content: systemNotice, timestamp: Date.now() })
+      sendPrompt(continuationPrompt, {
+        source: 'manual',
+        includeConversationContext: true,
+        includeSummaryContext: true,
+        overrideModel: model,
+      })
+    }
+  }, [projectDir, selectedCodeModel, modelCapabilities, isRunning, agentStatus, loopEnabled, draftPrompt, appendLog, sendPrompt])
 
   const sendPromptRef = useRef(sendPrompt)
 
