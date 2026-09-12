@@ -71,6 +71,88 @@ describe('backend-router (Stage 09: Wire backend-specific routing)', () => {
         model: 'zai/glm-5.3-flash',
         runId: result.activeRun.runId,
         sessionId: 'session-acp-1',
+        source: undefined,
+        currentRun: undefined,
+        maxRuns: undefined,
+        loopId: undefined,
+      })
+    })
+
+    it('passes autoApprove true to start_cline_agent when provided', async () => {
+      const calls: Array<{ cmd: string; args?: Record<string, unknown> }> = []
+      const mockInvoke: InvokeFunction = async (cmd, args) => {
+        calls.push({ cmd, args })
+        return {}
+      }
+
+      const result = await routeSendAgentPrompt(
+        {
+          backend: 'cline-acp',
+          projectDir: '/test/workspace',
+          prompt: 'Refactor this module',
+          model: 'zai/glm-5.3-flash',
+          sessionId: 'session-acp-1',
+          activeRun: null,
+          autoApprove: true,
+        },
+        mockInvoke
+      )
+
+      expect(result.success).toBe(true)
+      expect(result.command).toBe('start_cline_agent')
+      expect(calls.length).toBe(1)
+      expect(calls[0].cmd).toBe('start_cline_agent')
+      expect(calls[0].args).toEqual({
+        projectDir: '/test/workspace',
+        prompt: 'Refactor this module',
+        model: 'zai/glm-5.3-flash',
+        runId: result.activeRun.runId,
+        sessionId: 'session-acp-1',
+        source: undefined,
+        currentRun: undefined,
+        maxRuns: undefined,
+        loopId: undefined,
+        autoApprove: true,
+      })
+    })
+
+    it('passes loop parameters to start_cline_agent when source is loop', async () => {
+      const calls: Array<{ cmd: string; args?: Record<string, unknown> }> = []
+      const mockInvoke: InvokeFunction = async (cmd, args) => {
+        calls.push({ cmd, args })
+        return {}
+      }
+
+      const result = await routeSendAgentPrompt(
+        {
+          backend: 'cline-acp',
+          projectDir: '/test/workspace',
+          prompt: 'Refactor this module',
+          model: 'zai/glm-5.3-flash',
+          sessionId: 'session-acp-1',
+          activeRun: null,
+          source: 'loop',
+          currentRun: 2,
+          maxRuns: 3,
+          loopId: 'test-loop-123',
+        },
+        mockInvoke
+      )
+
+      expect(result.success).toBe(true)
+      expect(result.command).toBe('start_cline_agent')
+      expect(calls.length).toBe(1)
+      expect(calls[0].cmd).toBe('start_cline_agent')
+      expect(calls[0].args).toEqual({
+        projectDir: '/test/workspace',
+        prompt: 'Refactor this module',
+        model: 'zai/glm-5.3-flash',
+        runId: result.activeRun.runId,
+        sessionId: 'session-acp-1',
+        source: 'loop',
+        currentRun: 2,
+        maxRuns: 3,
+        loopId: 'test-loop-123',
       })
     })
 
@@ -323,6 +405,42 @@ describe('backend-router (Stage 09: Wire backend-specific routing)', () => {
           mockInvoke
         )
       ).rejects.toThrow(/only valid for 'cline-acp'/)
+    })
+  })
+
+  describe('stop and prompt sequencing', () => {
+    it('allows starting a prompt after previous run was stopped and cleared', async () => {
+      const calls: Array<{ cmd: string; args?: Record<string, unknown> }> = []
+      const mockInvoke: InvokeFunction = async (cmd, args) => {
+        calls.push({ cmd, args })
+        return {}
+      }
+
+      // 1. Initial run active
+      let activeRun: ActiveRun | null = { runId: 'run-1', backend: 'cline-acp' }
+
+      // 2. Stop the run
+      const stopRes = await routeStopAgent(activeRun, 'cline-acp', mockInvoke)
+      expect(stopRes.command).toBe('stop_cline_agent')
+
+      // 3. User stops run -> activeRun is cleared to null
+      activeRun = null
+
+      // 4. User sends next prompt immediately -> succeeds without activeRun collision
+      const sendRes = await routeSendAgentPrompt(
+        {
+          backend: 'cline-acp',
+          projectDir: '/test/workspace',
+          prompt: 'What happened?',
+          model: 'zai/glm-5.3-flash',
+          activeRun,
+        },
+        mockInvoke
+      )
+
+      expect(sendRes.success).toBe(true)
+      expect(sendRes.command).toBe('start_cline_agent')
+      expect(calls.map((c) => c.cmd)).toEqual(['stop_cline_agent', 'start_cline_agent'])
     })
   })
 })

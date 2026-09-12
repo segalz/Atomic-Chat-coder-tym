@@ -1028,7 +1028,8 @@ mod tests {
             .await
             .expect("notification should be handled");
         match handled {
-            Some(IncomingNotification { method, params }) => {
+            Some(IncomingNotification { id, method, params }) => {
+                assert_eq!(id, None);
                 assert_eq!(method, "session/update");
                 assert_eq!(params, Some(serde_json::json!({"update": {"kind": "agent_message"}})));
             }
@@ -1044,6 +1045,7 @@ mod tests {
         assert_eq!(
             no_params,
             Some(IncomingNotification {
+                id: None,
                 method: "ping".to_string(),
                 params: None,
             })

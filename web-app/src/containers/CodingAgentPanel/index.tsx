@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { useCodingAgentStore, type CodingSessionSource, type ExecLogLine } from '@/stores/coding-agent-store'
 import { Button } from '@/components/ui/button'
+import { Switch } from '@/components/ui/switch'
 import {
   Dialog,
   DialogContent,
@@ -414,6 +415,8 @@ export function CodingAgentPanel() {
     sessions,
     activeSessionId,
   } = useCodingAgentStore()
+  const autoApproveTools = useCodingAgentStore((s) => s.autoApproveTools)
+  const setAutoApproveTools = useCodingAgentStore((s) => s.setAutoApproveTools)
 
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const completionHandledRef = useRef(false)
@@ -424,6 +427,8 @@ export function CodingAgentPanel() {
   const [lastFailureMessage, setLastFailureMessage] = useState<string | null>(null)
   const [pendingEditIntent, setPendingEditIntent] = useState<PendingEditIntent | null>(null)
   const [activeRun, setActiveRun] = useState<ActiveRun | null>(null)
+  const activeRunRef = useRef<ActiveRun | null>(null)
+  activeRunRef.current = activeRun
   const autoApproveRef = useRef(true)
   const [lspEnabled, setLspEnabled] = useState(() => {
     if (typeof window !== 'undefined') return window.localStorage.getItem('coding-agent-lsp') === 'true'
@@ -494,6 +499,8 @@ export function CodingAgentPanel() {
   const [modelCapabilities, setModelCapabilities] = useState<ModelCapabilitiesByName>({})
   const [agentBackend, setAgentBackend] = useState<CodingAgentBackend>(() => getInitialCodingAgentBackend())
   const [pendingPermission, setPendingPermission] = useState<AcpPermissionRequestPayload | null>(null)
+  const pendingPermissionRef = useRef<AcpPermissionRequestPayload | null>(null)
+  pendingPermissionRef.current = pendingPermission
 
   useEffect(() => {
     invoke<CodingAgentConfig>('get_coding_agent_config')
@@ -621,6 +628,60 @@ export function CodingAgentPanel() {
     }
   }, [activeRun, agentBackend, appendLog, clearLoopSchedule, loopEnabled, setRunning])
 
+  const handleRespondPermission = useCallback(async (requestId: string, optionId: string) => {
+    const permission = pendingPermissionRef.current
+    if (!permission || permission.requestId !== requestId) return
+
+    try {
+      await routeRespondPermission(
+        {
+          backend: 'cline-acp',
+          runId: permission.runId,
+          requestId,
+          optionId,
+          activeRun,
+        },
+        invoke
+      )
+
+      const selectedOption = permission.options?.find((o) => o.optionId === optionId)
+      const isApproved =
+        selectedOption?.kind === 'allow' ||
+        /^(allow|approve|yes)/i.test(optionId)
+
+      const fileEdit = extractPermissionFileEdit(permission)
+      const cmd = extractPermissionCommand(permission)
+
+      if (isApproved && fileEdit && permission.toolCallId) {
+        approvedEditToolCallIdsRef.current.add(permission.toolCallId)
+      }
+
+      let outcomeLog = `Permission '${optionId}': ${permission.title || permission.toolCallId}`
+      if (fileEdit) {
+        outcomeLog = isApproved
+          ? `Permission approved for edit on ${fileEdit.path}. Awaiting agent execution...`
+          : `Permission denied for edit on ${fileEdit.path} — changes were NOT applied.`
+      } else if (cmd) {
+        outcomeLog = isApproved
+          ? `Permission approved for command '${cmd}'. Awaiting execution...`
+          : `Permission denied for command '${cmd}' — command was NOT executed.`
+      }
+
+      appendLog({
+        type: 'text_delta',
+        content: outcomeLog,
+        timestamp: Date.now(),
+      })
+      setPendingPermission(null)
+    } catch (err) {
+      appendLog({
+        type: 'error',
+        content: `Failed to respond to permission request: ${err}`,
+        timestamp: Date.now(),
+      })
+    }
+  }, [activeRun, appendLog])
+
   const handleNormalizedAgentEvent = useCallback((event: NormalizedAgentEvent) => {
     switch (event.type) {
       case 'text_delta':
@@ -709,6 +770,12 @@ export function CodingAgentPanel() {
         }
         break
       case 'permission_request': {
+        if (autoApproveTools) {
+          const firstAllow = event.options?.find((o) => o.optionId === 'allow_always' || o.optionId === 'allow_once' || o.kind?.includes('allow'))?.optionId || event.options?.[0]?.optionId || 'allow_always'
+          pendingPermissionRef.current = event
+          handleRespondPermission(event.requestId, firstAllow)
+          break
+        }
         setPendingPermission(event)
         const cmd = event.command ?? extractPermissionCommand(event)
         const fileEdit = event.filePath ? { path: event.filePath } : extractPermissionFileEdit(event)
@@ -737,7 +804,7 @@ export function CodingAgentPanel() {
         appendLog({ type: 'error', content: event.message, timestamp: Date.now() })
         break
     }
-  }, [addDiff, appendLog, appendPlanText, finishAgentRun])
+  }, [addDiff, appendLog, appendPlanText, autoApproveTools, finishAgentRun, handleRespondPermission])
 
   // ── Subscribe to normalized backend events ───────────────
   useEffect(() => {
@@ -824,15 +891,29 @@ export function CodingAgentPanel() {
       })
 
       const uPerm = await listen<AcpPermissionRequestPayload>('cline-permission-request', (e) => {
-        if (!cancelled && activeRun && e.payload.runId === activeRun.runId) {
+        const currentActive = activeRunRef.current
+        if (!cancelled && (!currentActive || e.payload.runId === currentActive.runId)) {
           handleNormalizedAgentEvent(normalizeAcpPermissionRequest(e.payload))
         }
       })
 
+      const uSessionBound = await listen<{ atomicSessionId: string; externalSessionId: string }>(
+        'cline-session-bound',
+        (e) => {
+          if (cancelled) return
+          const { atomicSessionId, externalSessionId } = e.payload
+          if (atomicSessionId && externalSessionId) {
+            useCodingAgentStore.getState().setSessionIdentity(atomicSessionId, {
+              externalSessionId,
+            })
+          }
+        }
+      )
+
       if (cancelled) {
-        for (const unlisten of [uRaw, u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11, u12, u13, uPerm]) unlisten()
+        for (const unlisten of [uRaw, u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11, u12, u13, uPerm, uSessionBound]) unlisten()
       } else {
-        unlisteners.push(uRaw, u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11, u12, u13, uPerm)
+        unlisteners.push(uRaw, u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11, u12, u13, uPerm, uSessionBound)
       }
     }
 
@@ -841,66 +922,13 @@ export function CodingAgentPanel() {
       cancelled = true
       unlisteners.forEach((u) => u())
     }
-  }, [activeRun, handleNormalizedAgentEvent])
+  }, [handleNormalizedAgentEvent])
 
   // ── Handlers ─────────────────────────────────────────────
   const stopSelectedBackend = useCallback(async () => {
     setPendingPermission(null)
     await routeStopAgent(activeRun, agentBackend, invoke)
   }, [activeRun, agentBackend])
-
-  const handleRespondPermission = useCallback(async (requestId: string, optionId: string) => {
-    if (!pendingPermission || pendingPermission.requestId !== requestId) return
-
-    try {
-      await routeRespondPermission(
-        {
-          backend: 'cline-acp',
-          runId: pendingPermission.runId,
-          requestId,
-          optionId,
-          activeRun,
-        },
-        invoke
-      )
-
-      const selectedOption = pendingPermission.options?.find((o) => o.optionId === optionId)
-      const isApproved =
-        selectedOption?.kind === 'allow' ||
-        /^(allow|approve|yes)/i.test(optionId)
-
-      const fileEdit = extractPermissionFileEdit(pendingPermission)
-      const cmd = extractPermissionCommand(pendingPermission)
-
-      if (isApproved && fileEdit && pendingPermission.toolCallId) {
-        approvedEditToolCallIdsRef.current.add(pendingPermission.toolCallId)
-      }
-
-      let outcomeLog = `Permission '${optionId}': ${pendingPermission.title || pendingPermission.toolCallId}`
-      if (fileEdit) {
-        outcomeLog = isApproved
-          ? `Permission approved for edit on ${fileEdit.path}. Awaiting agent execution...`
-          : `Permission denied for edit on ${fileEdit.path} — changes were NOT applied.`
-      } else if (cmd) {
-        outcomeLog = isApproved
-          ? `Permission approved for command '${cmd}'. Awaiting execution...`
-          : `Permission denied for command '${cmd}' — command was NOT executed.`
-      }
-
-      appendLog({
-        type: 'text_delta',
-        content: outcomeLog,
-        timestamp: Date.now(),
-      })
-      setPendingPermission(null)
-    } catch (err) {
-      appendLog({
-        type: 'error',
-        content: `Failed to respond to permission request: ${err}`,
-        timestamp: Date.now(),
-      })
-    }
-  }, [activeRun, appendLog, pendingPermission])
 
   const handleSelectFolder = useCallback(async () => {
     try {
@@ -927,12 +955,17 @@ export function CodingAgentPanel() {
     if (!projectDir || !prompt.trim()) return false
 
     if (activeRun) {
-      appendLog({
-        type: 'error',
-        content: `An agent run is already active on backend '${activeRun.backend}'. Stop it first.`,
-        timestamp: Date.now(),
-      })
-      return false
+      if (!isRunning) {
+        setActiveRun(null)
+        setAgentStatus('free')
+      } else {
+        appendLog({
+          type: 'error',
+          content: `An agent run is already active on backend '${activeRun.backend}'. Stop it first.`,
+          timestamp: Date.now(),
+        })
+        return false
+      }
     }
 
     const source = options.source ?? 'manual'
@@ -1095,7 +1128,9 @@ export function CodingAgentPanel() {
               ? finalPrompt
               : withLegacyEditInstruction(finalPrompt, editPermission),
           model,
-          sessionId: targetSessionId ?? activeSession?.id,
+          sessionId: isClineContinuation
+            ? (activeSession?.externalSessionId ?? targetSessionId ?? activeSession?.id)
+            : (targetSessionId ?? activeSession?.id),
           activeRun,
           ollamaBaseUrl: agentConfig?.ollama_url ?? 'http://localhost:11434',
           editPermission,
@@ -1104,6 +1139,7 @@ export function CodingAgentPanel() {
           currentRun,
           maxRuns,
           loopId: activeLoopId,
+          autoApprove: autoApproveTools,
         },
         invoke
       )
@@ -1111,7 +1147,7 @@ export function CodingAgentPanel() {
         ...sendResult.activeRun,
         sessionId: targetSessionId ?? sendResult.activeRun.sessionId,
       })
-      if (sendResult.activeRun.sessionId && targetSessionId) {
+      if (agentBackend !== 'cline-acp' && sendResult.activeRun.sessionId && targetSessionId) {
         useCodingAgentStore.getState().setSessionIdentity(targetSessionId, {
           externalSessionId: sendResult.activeRun.sessionId,
         })
@@ -1138,7 +1174,7 @@ export function CodingAgentPanel() {
       setAgentStatus('idle')
       return false
     }
-  }, [projectDir, selectedCodeModel, agentConfig, agentBackend, activeRun, setRunning, appendLog, startNewSession, continueSession, clearPendingDiffs, loopEnabled, clearLoopSchedule])
+  }, [projectDir, selectedCodeModel, agentConfig, agentBackend, activeRun, autoApproveTools, setRunning, appendLog, startNewSession, continueSession, clearPendingDiffs, loopEnabled, clearLoopSchedule])
 
   const sendPromptRef = useRef(sendPrompt)
 
@@ -1248,9 +1284,13 @@ export function CodingAgentPanel() {
     completionHandledRef.current = true
     try { await stopSelectedBackend() } catch { /* ignore */ }
     setRunning(false)
+    setActiveRun(null)
+    setAgentStatus('free')
+    setPendingPermission(null)
     const runSessionId = activeRun?.sessionId ?? useCodingAgentStore.getState().activeSessionId
     if (runSessionId) {
       useCodingAgentStore.getState().markSessionInterrupted(runSessionId, 'User stopped run')
+      useCodingAgentStore.getState().saveCurrentSession()
     }
     setLoopEnabled(false)
     setLoopId(null)
@@ -1384,6 +1424,16 @@ export function CodingAgentPanel() {
             />
           )}
         </ProviderModelPicker>
+        {agentBackend === 'cline-acp' && (
+          <div className="flex items-center justify-between px-1 py-1 text-xs text-muted-foreground border-t border-border/40 mt-2 pt-2">
+            <span title="Automatically approve all tool permissions without asking">Auto-Approve Tools</span>
+            <Switch
+              checked={autoApproveTools}
+              onCheckedChange={setAutoApproveTools}
+              disabled={isRunning}
+            />
+          </div>
+        )}
         <div className="flex-1 overflow-auto flex flex-col min-h-0">
           {/* Session history */}
           {sessions.length > 0 && (
@@ -1482,6 +1532,9 @@ export function CodingAgentPanel() {
                   setLoopInterval(5)
                   stopSelectedBackend().catch(() => {})
                   setRunning(false)
+                  setActiveRun(null)
+                  setAgentStatus('free')
+                  setPendingPermission(null)
                   setLastFailureMessage(null)
                 }}
               >
@@ -1503,7 +1556,13 @@ export function CodingAgentPanel() {
               </Button>
             )}
             {execLog.length > 0 && (
-              <Button size="sm" variant="ghost" className="h-6 text-xs gap-1 text-muted-foreground" onClick={() => useCodingAgentStore.getState().clearSession()}>
+              <Button size="sm" variant="ghost" className="h-6 text-xs gap-1 text-muted-foreground" onClick={() => {
+                useCodingAgentStore.getState().clearSession()
+                setActiveRun(null)
+                setRunning(false)
+                setAgentStatus('free')
+                setPendingPermission(null)
+              }}>
                 <IconTrash size={12} /> Clear
               </Button>
             )}
@@ -1794,6 +1853,7 @@ const TEXT_DELTA_STATUS_PREFIXES = [
   'Ollama agent started',
   'Agent iteration',
   'Diff proposed for',
+  'Permission',
 ]
 
 function isMergeableTextDelta(line: ExecLogLine): boolean {

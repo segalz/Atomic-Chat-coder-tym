@@ -602,8 +602,9 @@ impl Default for TimeoutConfig {
 /// An offered permission option from the ACP agent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PermissionOption {
-    #[serde(rename = "optionId")]
+    #[serde(alias = "id", rename = "optionId")]
     pub option_id: String,
+    #[serde(alias = "title", default)]
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
@@ -670,7 +671,7 @@ pub fn format_permission_rpc_response(
 
 /// Shared state managing the Cline ACP agent lifecycle, process ownership,
 /// cancellation, event fencing, and explicit session/model binding.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ClineAgentState {
     fence: Arc<RunFence>,
     child_process: Arc<std::sync::Mutex<Option<OwnedChildProcess>>>,
@@ -769,6 +770,25 @@ impl ClineAgentState {
         if let Ok(mut guard) = self.active_session.lock() {
             *guard = Some(session);
         }
+    }
+
+    /// Looks up the external ACP session ID by either the external session ID itself
+    /// or by the corresponding Atomic Chat conversation session ID.
+    pub fn find_external_session_id(&self, session_id: &str) -> Option<String> {
+        if let Ok(guard) = self.sessions_by_external_id.lock() {
+            if guard.contains_key(session_id) {
+                return Some(session_id.to_string());
+            }
+            for (ext_id, session) in guard.iter() {
+                if session.atomic_session_id == session_id {
+                    return Some(ext_id.clone());
+                }
+            }
+        }
+        if session_id.contains('_') {
+            return Some(session_id.to_string());
+        }
+        None
     }
 
     /// Retrieves a registered session by its external ACP session ID.
@@ -992,6 +1012,8 @@ impl ClineAgentState {
 
     /// Dispatches an incoming ACP permission request: registers in pending permissions,
     /// emits `cline-permission-request` to the frontend, and awaits the user's decision.
+    /// When `auto_approve` is true, selects the best allow option immediately without
+    /// registering or asking the user.
     /// Returns the JSON-RPC response Value ready to be written back to the child process.
     pub async fn handle_incoming_permission_request<R: tauri::Runtime>(
         &self,
@@ -1000,6 +1022,7 @@ impl ClineAgentState {
         run_id: &RunId,
         session_id: &str,
         params: &serde_json::Value,
+        auto_approve: bool,
     ) -> Result<serde_json::Value, String> {
         use tauri::Emitter;
 
@@ -1071,6 +1094,35 @@ impl ClineAgentState {
             serde_json::Value::Number(n) => n.to_string(),
             other => other.to_string(),
         };
+
+        if auto_approve {
+            let chosen = options
+                .iter()
+                .find(|o| o.kind.as_deref() == Some("allow_always") || o.option_id == "allow_always")
+                .or_else(|| {
+                    options
+                        .iter()
+                        .find(|o| o.kind.as_deref() == Some("allow_once") || o.option_id == "allow_once")
+                })
+                .or_else(|| {
+                    options.iter().find(|o| {
+                        o.kind
+                            .as_deref()
+                            .is_some_and(|k| k == "allow" || k.starts_with("allow"))
+                    })
+                })
+                .unwrap_or(&options[0])
+                .option_id
+                .clone();
+            log::info!(
+                "[ClineAgent] Auto-approving permission request {}",
+                request_id
+            );
+            return Ok(format_permission_rpc_response(
+                &rpc_id,
+                &PermissionOutcome::Selected { option_id: chosen },
+            ));
+        }
 
         let (tx, rx) = tokio::sync::oneshot::channel();
 
@@ -1145,6 +1197,7 @@ impl ClineAgentState {
         msg: crate::core::cline_acp_transport::IncomingNotification,
         run_id: &RunId,
         session_id: &str,
+        auto_approve: bool,
     ) -> Option<serde_json::Value> {
         if msg.method == "session/request_permission" {
             let rpc_id = match msg.id {
@@ -1156,7 +1209,7 @@ impl ClineAgentState {
                 }
             };
             let params = msg.params.unwrap_or_else(|| serde_json::json!({}));
-            match self.handle_incoming_permission_request(app, rpc_id, run_id, session_id, &params).await {
+            match self.handle_incoming_permission_request(app, rpc_id, run_id, session_id, &params, auto_approve).await {
                 Ok(response_value) => Some(response_value),
                 Err(err) => {
                     log::error!("[ClineAgent] Error handling permission request: {}", err);
@@ -1344,14 +1397,20 @@ impl ClineAgentState {
 /// Guards against cross-backend (Ollama) and same-backend concurrent execution.
 #[tauri::command]
 pub async fn start_cline_agent<R: tauri::Runtime>(
-    _app: tauri::AppHandle<R>,
+    app: tauri::AppHandle<R>,
     state: tauri::State<'_, ClineAgentState>,
     ollama_state: tauri::State<'_, crate::core::ollama_agent::OllamaAgentState>,
+    loop_supervision: tauri::State<'_, crate::core::loop_supervision::LoopSupervisionState>,
     project_dir: String,
     prompt: String,
     model: Option<String>,
     run_id: Option<String>,
     session_id: Option<String>,
+    auto_approve: Option<bool>,
+    source: Option<String>,
+    current_run: Option<u32>,
+    max_runs: Option<u32>,
+    loop_id: Option<String>,
 ) -> Result<String, String> {
     let ollama_is_running = {
         let running = ollama_state.running.lock().await;
@@ -1364,6 +1423,23 @@ pub async fn start_cline_agent<R: tauri::Runtime>(
         .try_start_run(ollama_is_running, &project_path, run, session_id.as_deref())
         .await?;
 
+    let is_loop_run = source.as_deref() == Some("loop");
+    let loop_supervision_instance = if is_loop_run {
+        let goal = prompt.chars().take(200).collect::<String>();
+        loop_supervision
+            .begin_run(
+                project_dir.clone(),
+                goal,
+                current_run.unwrap_or(1).max(1),
+                max_runs.unwrap_or(1).max(1),
+                loop_id,
+            )
+            .await;
+        Some(loop_supervision.inner().clone())
+    } else {
+        None
+    };
+
     let bound_model = model.unwrap_or_else(|| SessionModelConfig::default().model_id);
     log::info!(
         "[ClineAgent] Started run {} for project {} with model {} (session: {})",
@@ -1373,7 +1449,488 @@ pub async fn start_cline_agent<R: tauri::Runtime>(
         session_id.as_deref().unwrap_or("none")
     );
 
+    let cancel_token = CancellationToken::new();
+    state.set_cancel_token(cancel_token.clone());
+
+    let app_clone = app.clone();
+    let state_clone = state.inner().clone();
+    let run_id_clone = active_run_id.clone();
+    let project_dir_clone = project_dir.clone();
+    let bound_model_clone = bound_model.clone();
+    let prompt_clone = prompt;
+    let session_id_clone = session_id;
+    let auto_approve = auto_approve.unwrap_or(false);
+
+    tokio::spawn(async move {
+        run_cline_agent_loop(
+            app_clone,
+            state_clone,
+            cancel_token,
+            run_id_clone,
+            project_dir_clone,
+            prompt_clone,
+            bound_model_clone,
+            session_id_clone,
+            auto_approve,
+            loop_supervision_instance,
+        )
+        .await;
+    });
+
     Ok(active_run_id.to_string())
+}
+
+/// Asynchronous runner loop that drives the Cline ACP process over stdio.
+async fn run_cline_agent_loop<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: ClineAgentState,
+    cancel_token: CancellationToken,
+    run_id: RunId,
+    project_dir: String,
+    prompt: String,
+    bound_model: String,
+    session_id: Option<String>,
+    auto_approve: bool,
+    loop_supervision: Option<crate::core::loop_supervision::LoopSupervisionState>,
+) {
+    use tauri::Emitter;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let probe = probe_cline_install_sync();
+    if !probe.installed {
+        let err = "Cline CLI is not installed or not found on PATH. Please install cline globally: npm install -g cline".to_string();
+        log::error!("[ClineAgent] {}", err);
+        let _ = app.emit("coding-agent-error", serde_json::json!({ "message": &err }));
+        let _ = app.emit("agent-done", serde_json::json!({ "success": false, "error": &err }));
+        let _ = app.emit("code-agent-done", serde_json::json!({ "success": false, "error": &err }));
+        let _ = state.fence().record_terminal(&run_id, RunTerminalOutcome::Failed { error: err.clone() });
+        if let Some(supervision) = &loop_supervision {
+            supervision.finish_run(false, false, Some(err)).await;
+        }
+        state.clear_cancel_token();
+        return;
+    }
+
+    let exe_path = probe.path.unwrap_or_else(|| {
+        if cfg!(windows) { "cline.cmd".to_string() } else { "cline".to_string() }
+    });
+
+    let mut std_cmd = if cfg!(windows) {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", &exe_path, "--acp"]);
+        c
+    } else {
+        let mut c = std::process::Command::new(&exe_path);
+        c.arg("--acp");
+        c
+    };
+
+    std_cmd.current_dir(&project_dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        std_cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+
+    let mut tokio_cmd = tokio::process::Command::from(std_cmd);
+
+    let mut child = match tokio_cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            let err = format!("Failed to spawn Cline CLI: {e}");
+            log::error!("[ClineAgent] {}", err);
+            let _ = app.emit("coding-agent-error", serde_json::json!({ "message": &err }));
+            let _ = app.emit("agent-done", serde_json::json!({ "success": false, "error": &err }));
+            let _ = app.emit("code-agent-done", serde_json::json!({ "success": false, "error": &err }));
+            let _ = state.fence().record_terminal(&run_id, RunTerminalOutcome::Failed { error: err.clone() });
+            if let Some(supervision) = &loop_supervision {
+                supervision.finish_run(false, false, Some(err)).await;
+            }
+            state.clear_cancel_token();
+            return;
+        }
+    };
+
+    let pid = child.id().unwrap_or(0);
+    state.register_child(pid);
+
+    let mut stdin = child.stdin.take().expect("stdin must be piped");
+    let stdout = child.stdout.take().expect("stdout must be piped");
+    let stderr = child.stderr.take().expect("stderr must be piped");
+
+    // Log stderr in background
+    tokio::spawn(async move {
+        let mut err_lines = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = err_lines.next_line().await {
+            log::debug!("[Cline STDERR] {}", line);
+        }
+    });
+
+    // Dedicated stdin writer task
+    let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let stdin_writer = tokio::spawn(async move {
+        while let Some(msg) = stdin_rx.recv().await {
+            if stdin.write_all(msg.as_bytes()).await.is_err() {
+                break;
+            }
+            if stdin.write_all(b"\n").await.is_err() {
+                break;
+            }
+            if stdin.flush().await.is_err() {
+                break;
+            }
+        }
+    });
+
+    // Step 1: Send initialize request
+    let init_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": 1,
+            "clientCapabilities": { "fs": {}, "terminal": true },
+            "clientInfo": { "name": "Atomic Chat", "version": "1.1.15" }
+        }
+    });
+    let _ = stdin_tx.send(init_req.to_string());
+
+    let mut stdout_lines = BufReader::new(stdout).lines();
+    let mut active_session_id: Option<String> = None;
+    let mut terminal_recorded = false;
+    let mut loop_finished = false;
+    let mut is_resuming = false;
+    let mut resuming_external_id: Option<String> = None;
+
+    loop {
+        tokio::select! {
+            _ = cancel_token.cancelled() => {
+                log::info!("[ClineAgent] Run {} cancelled by user", run_id);
+                let _ = app.emit("agent-done", serde_json::json!({ "success": false, "error": "Cancelled" }));
+                let _ = app.emit("code-agent-done", serde_json::json!({ "success": false, "error": "Cancelled" }));
+                terminal_recorded = true;
+                if !loop_finished {
+                    if let Some(supervision) = &loop_supervision {
+                        supervision.finish_run(false, false, Some("Cancelled".to_string())).await;
+                    }
+                    loop_finished = true;
+                }
+                break;
+            }
+            line_res = stdout_lines.next_line() => {
+                let line = match line_res {
+                    Ok(Some(l)) => l,
+                    Ok(None) => {
+                        log::info!("[ClineAgent] Child process closed stdout (EOF)");
+                        break;
+                    }
+                    Err(e) => {
+                        log::error!("[ClineAgent] Error reading child stdout: {}", e);
+                        break;
+                    }
+                };
+
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+
+                let val: serde_json::Value = match serde_json::from_str(trimmed) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        log::debug!("[ClineAgent] Raw line (non-JSON): {}", trimmed);
+                        continue;
+                    }
+                };
+
+                // 1. First check if message has a method (notification or agent-to-client request)
+                if let Some(method) = val.get("method").and_then(|m| m.as_str()) {
+                    match method {
+                        "session/update" => {
+                            if let Some(params) = val.get("params") {
+                                let stream_events = normalize_acp_session_update(params, &run_id);
+                                for ev in stream_events {
+                                    match ev {
+                                        AcpStreamEvent::TextDelta { text, .. } => {
+                                            let _ = app.emit("agent-text-delta", serde_json::json!({ "text": text, "kind": "text" }));
+                                        }
+                                        AcpStreamEvent::ThinkingDelta { text, .. } => {
+                                            let _ = app.emit("agent-text-delta", serde_json::json!({ "text": text, "kind": "thinking" }));
+                                        }
+                                        AcpStreamEvent::ToolCallStart { call_id, tool_name, .. } => {
+                                            if let Some(supervision) = &loop_supervision {
+                                                supervision.record_tool_start(&call_id, &tool_name, "", &format!("{tool_name}:{call_id}")).await;
+                                            }
+                                            let _ = app.emit("agent-tool-call-start", serde_json::json!({ "id": call_id, "name": tool_name }));
+                                        }
+                                        AcpStreamEvent::ToolCallResult { call_id, output, is_error, .. } => {
+                                            if let Some(supervision) = &loop_supervision {
+                                                supervision.record_tool_result(&call_id, "done", output.len(), 0, false, is_error).await;
+                                            }
+                                            let _ = app.emit("agent-tool-call-result", serde_json::json!({
+                                                "id": call_id,
+                                                "name": "tool",
+                                                "result": output,
+                                                "is_error": is_error
+                                            }));
+                                        }
+                                        AcpStreamEvent::Done { success, stop_reason, error, .. } => {
+                                            let _ = app.emit("agent-done", serde_json::json!({ "success": success, "error": error }));
+                                            let _ = app.emit("code-agent-done", serde_json::json!({ "success": success, "error": error }));
+                                            let outcome = if success {
+                                                RunTerminalOutcome::Completed { stop_reason: stop_reason.clone() }
+                                            } else {
+                                                RunTerminalOutcome::Failed { error: error.clone().unwrap_or_else(|| stop_reason.clone()) }
+                                            };
+                                            let _ = state.fence().record_terminal(&run_id, outcome);
+                                            terminal_recorded = true;
+                                            if !loop_finished {
+                                                if let Some(supervision) = &loop_supervision {
+                                                    supervision.finish_run(success, false, error.clone()).await;
+                                                }
+                                                loop_finished = true;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        "session/request_permission" => {
+                            let app_h = app.clone();
+                            let state_h = state.clone();
+                            let run_h = run_id.clone();
+                            let sess_h = active_session_id.clone().unwrap_or_default();
+                            let stdin_tx_h = stdin_tx.clone();
+
+                            let rpc_id = val.get("id").and_then(crate::core::cline_acp_transport::RequestId::from_value);
+                            let params = val.get("params").cloned();
+                            let notif = crate::core::cline_acp_transport::IncomingNotification {
+                                method: "session/request_permission".to_string(),
+                                params,
+                                id: rpc_id,
+                            };
+
+                            tokio::spawn(async move {
+                                if let Some(resp) = state_h.dispatch_incoming_message(&app_h, notif, &run_h, &sess_h, auto_approve).await {
+                                    let _ = stdin_tx_h.send(resp.to_string());
+                                }
+                            });
+                        }
+                        other => {
+                            log::debug!("[ClineAgent] Ignored notification/request with method: {}", other);
+                        }
+                    }
+                }
+                // 2. Next check for JSON-RPC error response to our client requests
+                else if let Some(err_obj) = val.get("error") {
+                    let req_id = val.get("id").and_then(|i| i.as_i64());
+                    if req_id == Some(2) && is_resuming {
+                        log::warn!("[ClineAgent] session/load failed ({:?}), falling back to session/new...", err_obj);
+                        is_resuming = false;
+                        resuming_external_id = None;
+                        let sess_req = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": 2,
+                            "method": "session/new",
+                            "params": {
+                                "cwd": &project_dir,
+                                "mcpServers": []
+                            }
+                        });
+                        let _ = stdin_tx.send(sess_req.to_string());
+                        continue;
+                    }
+                    if req_id == Some(1) || req_id == Some(2) || req_id == Some(3) || req_id == Some(4) {
+                        let msg = err_obj.get("message").and_then(|m| m.as_str()).unwrap_or("RPC error");
+                        log::error!("[ClineAgent] RPC error on id {:?}: {}", req_id, msg);
+                        let _ = app.emit("coding-agent-error", serde_json::json!({ "message": msg }));
+                        let _ = app.emit("agent-done", serde_json::json!({ "success": false, "error": msg }));
+                        let _ = app.emit("code-agent-done", serde_json::json!({ "success": false, "error": msg }));
+                        let _ = state.fence().record_terminal(&run_id, RunTerminalOutcome::Failed { error: msg.to_string() });
+                        terminal_recorded = true;
+                        break;
+                    }
+                }
+                // 3. Responses to our client requests (id 1, 2, 3, 4)
+                else if let Some(req_id) = val.get("id").and_then(|i| i.as_i64()) {
+                    match req_id {
+                        1 => {
+                            let candidate_ext_id = session_id.as_deref().and_then(|sid| state.find_external_session_id(sid));
+                            if let Some(ext_id) = candidate_ext_id {
+                                log::info!("[ClineAgent] Initialize successful, attempting session/load for external session: {}", ext_id);
+                                is_resuming = true;
+                                resuming_external_id = Some(ext_id.clone());
+                                let load_req = serde_json::json!({
+                                    "jsonrpc": "2.0",
+                                    "id": 2,
+                                    "method": "session/load",
+                                    "params": {
+                                        "sessionId": ext_id,
+                                        "cwd": &project_dir,
+                                        "mcpServers": []
+                                    }
+                                });
+                                let _ = stdin_tx.send(load_req.to_string());
+                            } else {
+                                log::debug!("[ClineAgent] Initialize successful, creating fresh session via session/new...");
+                                is_resuming = false;
+                                let sess_req = serde_json::json!({
+                                    "jsonrpc": "2.0",
+                                    "id": 2,
+                                    "method": "session/new",
+                                    "params": {
+                                        "cwd": &project_dir,
+                                        "mcpServers": []
+                                    }
+                                });
+                                let _ = stdin_tx.send(sess_req.to_string());
+                            }
+                        }
+                        2 => {
+                            let external_id = if is_resuming {
+                                resuming_external_id.take().unwrap_or_default()
+                            } else {
+                                val.get("result")
+                                    .and_then(|r| r.get("sessionId"))
+                                    .and_then(|s| s.as_str())
+                                    .unwrap_or("")
+                                    .to_string()
+                            };
+
+                            if external_id.is_empty() {
+                                log::error!("[ClineAgent] Failed to obtain valid sessionId from session response: {:?}", val);
+                                let msg = "Failed to obtain valid session ID from Cline".to_string();
+                                let _ = app.emit("coding-agent-error", serde_json::json!({ "message": &msg }));
+                                let _ = app.emit("agent-done", serde_json::json!({ "success": false, "error": &msg }));
+                                let _ = app.emit("code-agent-done", serde_json::json!({ "success": false, "error": &msg }));
+                                let _ = state.fence().record_terminal(&run_id, RunTerminalOutcome::Failed { error: msg });
+                                terminal_recorded = true;
+                                break;
+                            }
+
+                            log::info!("[ClineAgent] Session ready with external ID: {}", external_id);
+                            active_session_id = Some(external_id.clone());
+
+                            let atomic_id = session_id.clone().unwrap_or_else(|| run_id.to_string());
+                            state.register_session(SessionIdentity {
+                                atomic_session_id: atomic_id.clone(),
+                                external_session_id: external_id.clone(),
+                                project_dir: PathBuf::from(&project_dir),
+                                backend: "cline-acp".to_string(),
+                                model_id: bound_model.clone(),
+                                provider_id: Some("zai".to_string()),
+                            });
+
+                            let _ = app.emit("cline-session-bound", serde_json::json!({
+                                "atomicSessionId": atomic_id,
+                                "externalSessionId": &external_id,
+                            }));
+
+                            // Set model
+                            let model_req = serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": 3,
+                                "method": "session/set_config_option",
+                                "params": {
+                                    "sessionId": &external_id,
+                                    "configId": "model",
+                                    "value": &bound_model
+                                }
+                            });
+                            let _ = stdin_tx.send(model_req.to_string());
+
+                            if auto_approve {
+                                let auto_req = serde_json::json!({
+                                    "jsonrpc": "2.0",
+                                    "id": 35,
+                                    "method": "session/set_config_option",
+                                    "params": {
+                                        "sessionId": &external_id,
+                                        "configId": "auto_approve",
+                                        "value": "true"
+                                    }
+                                });
+                                let _ = stdin_tx.send(auto_req.to_string());
+                            }
+
+                            // Send the prompt turn
+                            log::info!("[ClineAgent] Dispatching prompt to session {}...", external_id);
+                            let prompt_req = serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": 4,
+                                "method": "session/prompt",
+                                "params": {
+                                    "sessionId": &external_id,
+                                    "prompt": [{ "type": "text", "text": &prompt }]
+                                }
+                            });
+                            let _ = stdin_tx.send(prompt_req.to_string());
+                        }
+                        3 => {
+                            log::debug!("[ClineAgent] Model configuration updated successfully");
+                        }
+                        4 => {
+                            let stop_reason = val.get("result")
+                                .and_then(|r| r.get("stopReason"))
+                                .and_then(|s| s.as_str())
+                                .unwrap_or("end_turn");
+
+                            let success = stop_reason == "end_turn";
+                            let err = if success { None } else { Some(format!("Turn ended with status: {stop_reason}")) };
+
+                            log::info!("[ClineAgent] Prompt completed: stopReason={}, success={}", stop_reason, success);
+
+                            let _ = app.emit("agent-done", serde_json::json!({ "success": success, "error": err }));
+                            let _ = app.emit("code-agent-done", serde_json::json!({ "success": success, "error": err }));
+
+                            let outcome = if success {
+                                RunTerminalOutcome::Completed { stop_reason: stop_reason.to_string() }
+                            } else {
+                                RunTerminalOutcome::Failed { error: format!("Turn ended: {stop_reason}") }
+                            };
+                            let _ = state.fence().record_terminal(&run_id, outcome);
+                            terminal_recorded = true;
+                            if !loop_finished {
+                                if let Some(supervision) = &loop_supervision {
+                                    supervision.finish_run(success, false, err.clone()).await;
+                                }
+                                loop_finished = true;
+                            }
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    if !terminal_recorded {
+        let _ = app.emit("agent-done", serde_json::json!({ "success": false, "error": "Agent process exited unexpectedly" }));
+        let _ = app.emit("code-agent-done", serde_json::json!({ "success": false, "error": "Agent process exited unexpectedly" }));
+        let _ = state.fence().record_terminal(&run_id, RunTerminalOutcome::Failed { error: "Agent exited unexpectedly".to_string() });
+        if !loop_finished {
+            if let Some(supervision) = &loop_supervision {
+                supervision.finish_run(false, false, Some("Agent process exited unexpectedly".to_string())).await;
+            }
+        }
+    }
+
+    // Teardown
+    drop(stdin_tx);
+    let _ = stdin_writer.await;
+
+    let _ = child.kill().await;
+    state.mark_child_exited();
+    state.clear_child();
+    state.clear_cancel_token();
+    let _ = state.fence().reset_to_idle();
+
+    log::info!("[ClineAgent] Run {} loop finished and cleaned up", run_id);
 }
 
 /// Stops an active Cline ACP agent run.
@@ -1382,8 +1939,10 @@ pub async fn start_cline_agent<R: tauri::Runtime>(
 #[tauri::command]
 pub async fn stop_cline_agent(
     state: tauri::State<'_, ClineAgentState>,
+    loop_supervision: tauri::State<'_, crate::core::loop_supervision::LoopSupervisionState>,
     run_id: Option<String>,
 ) -> Result<(), String> {
+    loop_supervision.mark_stop_requested().await;
     let target = run_id.map(RunId::new);
     state
         .stop_active_run(target.as_ref(), "User requested stop")
@@ -2830,6 +3389,41 @@ mod tests {
 
         assert_eq!(cmd_execution_count, 1, "approved command must execute exactly once");
         assert!(marker_path.exists(), "approved command creates marker file");
+    }
+
+    #[tokio::test]
+    async fn test_find_external_session_id() {
+        let state = ClineAgentState::default();
+        let session = SessionIdentity {
+            atomic_session_id: "conv-12345".to_string(),
+            external_session_id: "1789210000000_abcde_cli".to_string(),
+            project_dir: PathBuf::from("/tmp/test"),
+            backend: "cline-acp".to_string(),
+            model_id: "zai/glm-5.3-flash".to_string(),
+            provider_id: Some("zai".to_string()),
+        };
+        state.register_session(session);
+
+        // Found by external ID
+        assert_eq!(
+            state.find_external_session_id("1789210000000_abcde_cli"),
+            Some("1789210000000_abcde_cli".to_string())
+        );
+
+        // Found by atomic conversation ID
+        assert_eq!(
+            state.find_external_session_id("conv-12345"),
+            Some("1789210000000_abcde_cli".to_string())
+        );
+
+        // Raw Cline ID format fallback
+        assert_eq!(
+            state.find_external_session_id("1789220000000_xyz_cli"),
+            Some("1789220000000_xyz_cli".to_string())
+        );
+
+        // Unknown non-cline ID returns None
+        assert_eq!(state.find_external_session_id("unknown-id"), None);
     }
 }
 

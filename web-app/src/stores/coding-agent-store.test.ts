@@ -15,6 +15,7 @@ function resetCodingAgentStore() {
     conversationSummary: undefined,
     conversationSummaryUpdatedAt: undefined,
     showFree: false,
+    autoApproveTools: false,
   })
 }
 
@@ -439,6 +440,23 @@ describe('useCodingAgentStore Stage 13 session identity persistence & migration'
     const session = state.sessions.find((s) => s.id === sessId)
     expect(session?.externalSessionId).toBeUndefined()
     expect(session?.status).toBe('completed')
+  })
+})
+
+describe('useCodingAgentStore autoApproveTools', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    resetCodingAgentStore()
+  })
+
+  it('defaults to false and can be toggled on and off', () => {
+    expect(useCodingAgentStore.getState().autoApproveTools).toBe(false)
+
+    useCodingAgentStore.getState().setAutoApproveTools(true)
+    expect(useCodingAgentStore.getState().autoApproveTools).toBe(true)
+
+    useCodingAgentStore.getState().setAutoApproveTools(false)
+    expect(useCodingAgentStore.getState().autoApproveTools).toBe(false)
   })
 })
 

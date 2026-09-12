@@ -43,15 +43,26 @@ function isStatusLine(content: string): boolean {
   return STATUS_PREFIXES.some((prefix) => trimmed.startsWith(prefix))
 }
 
-const FILE_EDIT_TOOLS = new Set(['edit_file', 'write_file', 'create_file'])
+const FILE_EDIT_TOOLS = new Set([
+  'edit_file',
+  'write_file',
+  'create_file',
+  'editor',
+  'run_commands',
+  'execute_command',
+])
 
 function summarizeToolStart(toolName: string, content: string): string | null {
   if (!FILE_EDIT_TOOLS.has(toolName)) return null
   try {
     const input = JSON.parse(content) as Record<string, unknown>
-    const path = input['path'] ?? input['file_path'] ?? input['filename']
+    const path = input['path'] ?? input['file_path'] ?? input['filename'] ?? input['target']
     if (typeof path === 'string' && path) {
       return `Edited: ${path}`
+    }
+    const command = input['command'] ?? input['cmd']
+    if (typeof command === 'string' && command) {
+      return `Command: ${command}`
     }
   } catch {
     // ignore malformed JSON
@@ -74,7 +85,12 @@ function summarizeLogLine(type: string, content: string, toolName?: string): str
   if (isStatusLine(normalized)) return null
   if (type === 'done') return null
   if (type === 'error') return `Error: ${normalized}`
-  if (type === 'tool_result') return null
+  if (type === 'tool_result') {
+    if (content.toLowerCase().includes('error') || content.toLowerCase().includes('failed')) {
+      return `Tool error: ${truncate(normalizeText(content), 120)}`
+    }
+    return null
+  }
 
   return `Assistant: ${normalized}`
 }
@@ -130,7 +146,7 @@ export function buildCodingAgentPrompt({
   const currentPrompt = normalizeText(prompt)
 
   if (backend === 'cline-acp' && isContinuation) {
-    // Cline ACP maintains its own conversation history internally; injecting
+    // Cline ACP maintains its own conversation history internally via session/load; injecting
     // additional context here would duplicate what the backend already sends.
     return currentPrompt
   }

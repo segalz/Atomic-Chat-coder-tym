@@ -63,6 +63,7 @@ interface CodingAgentState {
   draftPrompt: string
   sessions: CodingSession[]
   activeSessionId: string | null
+  autoApproveTools: boolean
 
   // Runtime
   isRunning: boolean
@@ -79,6 +80,7 @@ interface CodingAgentState {
   setDraftPrompt: (text: string) => void
   setRunning: (v: boolean) => void
   setShowFree: (v: boolean) => void
+  setAutoApproveTools: (enabled: boolean) => void
   appendPlanText: (text: string) => void
   appendLog: (line: ExecLogLine) => void
   addDiff: (diff: PendingDiff) => void
@@ -294,6 +296,7 @@ export const useCodingAgentStore = create<CodingAgentState>()(
       draftPrompt: '',
       sessions: [],
       activeSessionId: null,
+      autoApproveTools: false,
       isRunning: false,
       planText: '',
       execLog: [],
@@ -307,6 +310,7 @@ export const useCodingAgentStore = create<CodingAgentState>()(
       setDraftPrompt: (text) => set({ draftPrompt: text }),
       setRunning: (v) => set(v ? { isRunning: true, showFree: false } : { isRunning: false }),
       setShowFree: (v) => set({ showFree: v }),
+      setAutoApproveTools: (enabled) => set({ autoApproveTools: enabled }),
       appendPlanText: (text) =>
         set((s) => {
           const planText = s.planText + text
@@ -571,6 +575,7 @@ export const useCodingAgentStore = create<CodingAgentState>()(
         execLog: s.execLog,
         pendingDiffs: s.pendingDiffs,
         diagnostics: s.diagnostics,
+        autoApproveTools: s.autoApproveTools,
       }),
       onRehydrateStorage: () => (state) => {
         if (state) {

@@ -20,6 +20,7 @@ export const route = {
     hardware: '/settings/hardware',
     assistant: '/settings/assistant',
     claude_code: '/settings/claude-code',
+    cline_cli: '/settings/cline-cli',
   },
   hub: {
     index: '/hub/',

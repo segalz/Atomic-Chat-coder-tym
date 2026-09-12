@@ -23,6 +23,7 @@ export interface RouteSendParams {
   currentRun?: number
   maxRuns?: number
   loopId?: string | null
+  autoApprove?: boolean
 }
 
 export interface RouteSendResult {
@@ -104,13 +105,21 @@ export async function routeSendAgentPrompt(
   const runId = `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 
   if (params.backend === 'cline-acp') {
-    await invokeFn('start_cline_agent', {
+    const clineArgs: Record<string, unknown> = {
       projectDir: params.projectDir,
       prompt: params.prompt,
       model: params.model ?? 'zai/glm-5.3-flash',
       runId,
       sessionId: params.sessionId,
-    })
+      source: params.source,
+      currentRun: params.currentRun,
+      maxRuns: params.maxRuns,
+      loopId: params.loopId,
+    }
+    if (params.autoApprove !== undefined) {
+      clineArgs.autoApprove = params.autoApprove
+    }
+    await invokeFn('start_cline_agent', clineArgs)
     return {
       success: true,
       activeRun: { runId, backend: 'cline-acp', sessionId: params.sessionId },
