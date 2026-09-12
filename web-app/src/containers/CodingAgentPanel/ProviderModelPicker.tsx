@@ -9,6 +9,8 @@ import {
   type ClineFreeModel,
   getBackendCapabilities,
   persistCodingAgentBackend,
+  fetchClineCliModels,
+  getCachedClineModels,
 } from './backend-identity'
 import './ProviderModelPicker.css'
 
@@ -37,6 +39,8 @@ export function ProviderModelPicker({
 }: ProviderModelPickerProps) {
   const [status, setStatus] = useState<ClineInstallStatus | null>(null)
   const [isChecking, setIsChecking] = useState(false)
+  const [models, setModels] = useState<ClineFreeModel[]>(() => getCachedClineModels())
+  const [isLoadingModels, setIsLoadingModels] = useState(false)
 
   const checkInstall = useCallback(async () => {
     setIsChecking(true)
@@ -50,9 +54,26 @@ export function ProviderModelPicker({
     }
   }, [])
 
+  const loadModels = useCallback(async () => {
+    setIsLoadingModels(true)
+    try {
+      const liveModels = await fetchClineCliModels()
+      if (liveModels && liveModels.length > 0) {
+        setModels(liveModels)
+      }
+    } catch (err) {
+      console.warn('Failed to load live models from Cline CLI:', err)
+    } finally {
+      setIsLoadingModels(false)
+    }
+  }, [])
+
   useEffect(() => {
     void checkInstall()
-  }, [checkInstall])
+    if (backend === CLINE_ACP_BACKEND) {
+      void loadModels()
+    }
+  }, [checkInstall, loadModels, backend])
 
   const handleTabClick = (next: CodingAgentBackend) => {
     if (disabled || next === backend) return
@@ -65,10 +86,9 @@ export function ProviderModelPicker({
 
   const capabilities = getBackendCapabilities(CLINE_ACP_BACKEND)
 
-  // Resolve the active free model; fall back to the first catalog entry when
-  // the currently selected model id is not part of the free catalog.
+  // Resolve active model from the dynamically loaded models (or fallback).
   const activeModel: ClineFreeModel =
-    CLINE_FREE_MODELS.find((m) => m.id === selectedModel) ?? CLINE_FREE_MODELS[0]
+    models.find((m) => m.id === selectedModel) ?? models[0] ?? CLINE_FREE_MODELS[0]
 
   return (
     <div className="provider-model-picker">
@@ -116,9 +136,12 @@ export function ProviderModelPicker({
               <button
                 type="button"
                 className="provider-model-picker__refresh"
-                disabled={disabled || isChecking}
+                disabled={disabled || isChecking || isLoadingModels}
                 aria-label="Refresh Cline CLI status"
-                onClick={() => void checkInstall()}
+                onClick={() => {
+                  void checkInstall()
+                  void loadModels()
+                }}
               >
                 <IconRefresh size={12} stroke={1.5} />
               </button>
@@ -132,7 +155,7 @@ export function ProviderModelPicker({
                 disabled={disabled}
                 onChange={(e) => onModelChange(e.target.value)}
               >
-                {CLINE_FREE_MODELS.map((m: ClineFreeModel) => (
+                {models.map((m: ClineFreeModel) => (
                   <option key={m.id} value={m.id}>
                     {`${m.name} (${m.provider})${m.tag ? ' • ' + m.tag : ''}`}
                   </option>

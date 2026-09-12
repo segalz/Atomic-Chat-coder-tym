@@ -132,10 +132,11 @@ export interface ClineFreeModel {
 
 export const CLINE_FREE_MODELS: ClineFreeModel[] = [
   {
-    id: 'z-ai/glm-5.3-flash',
+    id: 'zai/glm-5.3-flash',
     name: 'GLM 5.3 Flash',
     provider: 'Zhipu AI',
     description: 'Latest natively multimodal model in the GLM-5 series (Default)',
+    contextWindow: '1M',
     tag: 'Default',
   },
   {
@@ -147,35 +148,110 @@ export const CLINE_FREE_MODELS: ClineFreeModel[] = [
     tag: '1M Context',
   },
   {
-    id: 'cline-free/longcat-2.0',
-    name: 'LongCat 2.0',
-    provider: 'Cline Free',
-    description: 'Trillion-parameter model built for agentic coding with 1M context window',
-    contextWindow: '1M',
-    tag: '1M Context',
-  },
-  {
-    id: 'cline-free/solar-pro4',
-    name: 'Solar Pro 4',
-    provider: 'Cline Free',
-    description: 'Strong model for office productivity, documents, and coding',
-    tag: 'Coding',
-  },
-  {
-    id: 'cline-free/muse-spark-1.3-contributor',
-    name: 'Muse Spark 1.3',
-    provider: 'Meta / Contributor',
-    description: 'Multimodal reasoning model for agentic workflows & experimentation',
-    tag: 'Multimodal',
-  },
-  {
     id: 'poolside/laguna-s-2.1:free',
     name: 'Laguna S 2.1',
     provider: 'Poolside',
-    description: 'Latest coding agent model from Poolside',
+    description: 'Free coding agent model from Poolside',
     tag: 'Agent',
   },
+  {
+    id: 'upstage/solar-pro4',
+    name: 'Solar Pro 4',
+    provider: 'Upstage',
+    description: 'Upstage high-performance reasoning model',
+  },
+  {
+    id: 'meituan/longcat-2.0',
+    name: 'LongCat 2.0',
+    provider: 'Meituan',
+    description: 'Meituan long-context model with 1M context window',
+    contextWindow: '1M',
+  },
+  {
+    id: 'meta/muse-spark-1.2-contributor',
+    name: 'Muse Spark 1.3 Contributor',
+    provider: 'Meta',
+    description: 'Meta multimodal contributor model',
+  },
 ]
+
+export interface ClineCliModelsResponse {
+  models: ClineFreeModel[]
+  source: string
+}
+
+let cachedClineModels: ClineFreeModel[] | null = null
+
+/**
+ * Returns cached models from Cline CLI, or stored in sessionStorage, or fallbacks.
+ */
+export function getCachedClineModels(): ClineFreeModel[] {
+  if (cachedClineModels && cachedClineModels.length > 0) {
+    return cachedClineModels
+  }
+  if (typeof window !== 'undefined') {
+    try {
+      const stored = window.sessionStorage.getItem('cached-cline-cli-models')
+      if (stored) {
+        const parsed = JSON.parse(stored) as ClineFreeModel[]
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          cachedClineModels = parsed
+          return parsed
+        }
+      }
+    } catch {
+      // Ignore sessionStorage error
+    }
+  }
+  return CLINE_FREE_MODELS
+}
+
+/**
+ * Updates the cached models from Cline CLI in memory and sessionStorage.
+ */
+export function setCachedClineModels(models: ClineFreeModel[]): void {
+  if (models && models.length > 0) {
+    cachedClineModels = models
+    if (typeof window !== 'undefined') {
+      try {
+        window.sessionStorage.setItem('cached-cline-cli-models', JSON.stringify(models))
+      } catch {
+        // Ignore
+      }
+    }
+  }
+}
+
+/**
+ * Dynamically queries available models directly from the installed Cline CLI via Tauri backend.
+ * Guaranteed not to use static hardcoded code lists as authoritative source.
+ */
+export async function fetchClineCliModels(): Promise<ClineFreeModel[]> {
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    const response = await invoke<ClineCliModelsResponse>('fetch_cline_cli_models')
+    if (response?.models && response.models.length > 0) {
+      setCachedClineModels(response.models)
+      return response.models
+    }
+  } catch (err) {
+    console.warn('Could not fetch models dynamically from Cline CLI:', err)
+  }
+  return getCachedClineModels()
+}
+
+/**
+ * Maps model ids persisted by older builds (or the previous Cline Free catalog)
+ * to their current equivalents in CLINE_FREE_MODELS, so stored selections
+ * survive catalog id changes.
+ */
+const LEGACY_CLINE_MODEL_MIGRATIONS: Record<string, string> = {
+  'z-ai/glm-5.3-flash': 'zai/glm-5.3-flash',
+  'cline-free/longcat-2.0': 'meituan/longcat-2.0',
+  'cline-free/solar-pro4': 'upstage/solar-pro4',
+  'cline-free/muse-spark-1.3-contributor': 'meta/muse-spark-1.2-contributor',
+  'meta/muse-spark-1.3-contributor': 'meta/muse-spark-1.2-contributor',
+}
 
 export const CODING_AGENT_CLINE_MODEL_STORAGE_KEY = 'coding-agent-cline-model'
 
@@ -202,7 +278,14 @@ export function resolveSelectedClineModel(fallback?: string): string {
   if (typeof window !== 'undefined') {
     try {
       const stored = window.localStorage.getItem(CODING_AGENT_CLINE_MODEL_STORAGE_KEY)
-      if (stored && stored.trim().length > 0) return stored
+      if (stored && stored.trim().length > 0) {
+        // Migrate legacy model ids to their current catalog equivalents.
+        const migrated = LEGACY_CLINE_MODEL_MIGRATIONS[stored] ?? stored
+        const activeModels = getCachedClineModels()
+        if (activeModels.some((model) => model.id === migrated)) {
+          return migrated
+        }
+      }
     } catch {
       // Ignore storage failures and keep the fallback.
     }

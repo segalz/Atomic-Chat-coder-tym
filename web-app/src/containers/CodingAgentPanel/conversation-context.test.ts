@@ -253,7 +253,7 @@ describe('provider switching and continuation context', () => {
     expect(result).toContain('Current request:\nNew Ollama request')
   })
 
-  it('bypasses context prepend for cline-acp continuation', () => {
+  it('includes conversational context for cline-acp continuation', () => {
     const result = buildCodingAgentPrompt({
       prompt: 'Second turn in Cline',
       projectDir: '/repo',
@@ -263,7 +263,8 @@ describe('provider switching and continuation context', () => {
       sessions: [baseSession],
     })
 
-    expect(result).toBe('Second turn in Cline')
+    expect(result).toContain('Coding-agent context from the active conversation follows.')
+    expect(result).toContain('Current request:\nSecond turn in Cline')
   })
 
   it('preserves context prepend for direct-ollama continuation', () => {

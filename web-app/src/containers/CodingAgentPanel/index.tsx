@@ -17,7 +17,6 @@ import {
   IconPlayerStop,
   IconArrowUp,
   IconTrash,
-  IconX,
   IconLoader2,
   IconAlertCircle,
   IconRefresh,
@@ -27,6 +26,7 @@ import {
   IconCloudDownload,
   IconCircleCheck,
   IconClock,
+  IconPencil,
 } from '@tabler/icons-react'
 
 import { StickToBottom } from 'use-stick-to-bottom'
@@ -34,7 +34,12 @@ import { ConversationScrollButton } from '@/components/ai-elements/conversation'
 import { Shimmer } from '@/components/ai-elements/shimmer'
 import { Tool, ToolContent, ToolHeader, ToolInput, ToolOutput } from '@/components/ai-elements/tool'
 import { Reasoning, ReasoningContent, ReasoningTrigger } from '@/components/ai-elements/reasoning'
+import { cn } from '@/lib/utils'
 import { isRtlText, getTextDirection } from '@/utils/textDirection'
+import { CopyButton } from '@/containers/CopyButton'
+import { EditMessageDialog } from '@/containers/dialogs/EditMessageDialog'
+import { DeleteMessageDialog } from '@/containers/dialogs/DeleteMessageDialog'
+import { RenderMarkdown } from '@/containers/RenderMarkdown'
 import {
   CLINE_DEFAULT_MODEL_ID,
   extractPermissionCommand,
@@ -50,7 +55,6 @@ import {
   normalizeDone,
   normalizeError,
   CLINE_DEFAULT_PROVIDER_ID,
-  DEFAULT_CODING_AGENT_BACKEND,
   normalizeLegacyCodeAgentOutput,
   normalizeTextDelta,
   persistCodingAgentBackend,
@@ -78,7 +82,7 @@ import {
   routeStopAgent,
   type ActiveRun,
 } from './backend-router'
-import { persistSelectedClineModel, resolveSelectedClineModel, CLINE_FREE_MODELS } from './backend-identity'
+import { persistSelectedClineModel, resolveSelectedClineModel } from './backend-identity'
 import { CodeModelSelector } from './CodeModelSelector'
 import { ProviderModelPicker } from './ProviderModelPicker'
 import { PermissionRequest } from './PermissionRequest'
@@ -412,7 +416,7 @@ export function CodingAgentPanel() {
     execLog, appendLog,
     addDiff, clearPendingDiffs,
     pendingDiffs,
-    startNewSession, continueSession, loadSession, deleteSession, setConversationSummary,
+    startNewSession, continueSession, setConversationSummary,
     conversationSummary,
     sessions,
     activeSessionId,
@@ -1173,6 +1177,86 @@ export function CodingAgentPanel() {
     }
   }, [projectDir, selectedCodeModel, selectedClineModel, agentConfig, agentBackend, activeRun, autoApproveTools, setRunning, appendLog, startNewSession, continueSession, clearPendingDiffs, loopEnabled, clearLoopSchedule])
 
+  const handleDeleteTurn = useCallback(
+    (timestamp: number) => {
+      if (isRunning) return
+
+      const currentExecLog = useCodingAgentStore.getState().execLog
+      const turn = getTurnIndices(currentExecLog, timestamp)
+      if (!turn) return
+
+      const updatedLog = [
+        ...currentExecLog.slice(0, turn.startIndex),
+        ...currentExecLog.slice(turn.endIndex),
+      ]
+
+      useCodingAgentStore.setState({ execLog: updatedLog })
+
+      const { activeSessionId, sessions } = useCodingAgentStore.getState()
+      if (activeSessionId) {
+        if (updatedLog.length === 0) {
+          const updatedSessions = sessions.map((s) => {
+            if (s.id === activeSessionId) {
+              return { ...s, execLog: [], planText: '' }
+            }
+            return s
+          })
+          useCodingAgentStore.setState({ sessions: updatedSessions, planText: '' })
+        } else {
+          const remainingPrompt =
+            updatedLog.find((l) => l.content.trimStart().startsWith('>'))?.content.replace(/^>\s*/, '') ?? ''
+          const updatedSessions = sessions.map((s) => {
+            if (s.id === activeSessionId) {
+              return {
+                ...s,
+                prompt: remainingPrompt || s.prompt,
+                execLog: updatedLog,
+              }
+            }
+            return s
+          })
+          useCodingAgentStore.setState({ sessions: updatedSessions })
+        }
+      }
+    },
+    [isRunning]
+  )
+
+  const handleEditPrompt = useCallback(
+    async (timestamp: number, newText: string) => {
+      const trimmed = newText.trim()
+      if (!trimmed || isRunning) return
+
+      const currentExecLog = useCodingAgentStore.getState().execLog
+      const turn = getTurnIndices(currentExecLog, timestamp)
+      if (!turn) return
+
+      // Slice off this turn and any subsequent turns (standard chat edit-branch behavior)
+      const trimmedLog = currentExecLog.slice(0, turn.startIndex)
+      useCodingAgentStore.setState({ execLog: trimmedLog })
+
+      const { activeSessionId, sessions } = useCodingAgentStore.getState()
+      if (activeSessionId) {
+        const remainingFirstPrompt =
+          trimmedLog.find((l) => l.content.trimStart().startsWith('>'))?.content.replace(/^>\s*/, '') || trimmed
+        const updatedSessions = sessions.map((s) => {
+          if (s.id === activeSessionId) {
+            return {
+              ...s,
+              prompt: remainingFirstPrompt,
+              execLog: trimmedLog,
+            }
+          }
+          return s
+        })
+        useCodingAgentStore.setState({ sessions: updatedSessions })
+      }
+
+      await sendPrompt(trimmed)
+    },
+    [isRunning, sendPrompt]
+  )
+
   const handleClineModelChange = useCallback((model: string) => {
     if (model === selectedClineModel) return
 
@@ -1180,37 +1264,14 @@ export function CodingAgentPanel() {
     persistSelectedClineModel(model)
 
     const storeState = useCodingAgentStore.getState()
-    const activeSession = storeState.sessions.find((s) => s.id === storeState.activeSessionId)
-    const hasPriorConversation = Boolean(
-      activeSession &&
-      activeSession.projectDir === projectDir &&
-      (activeSession.execLog.length > 0 || Boolean(activeSession.prompt && activeSession.prompt.trim().length > 0))
-    )
-
-    const isIdleAtFinishedState = !isRunning && agentStatus === 'free' && !loopEnabled && draftPrompt.trim().length === 0
-
-    if (hasPriorConversation && isIdleAtFinishedState) {
-      const conversationText = [
-        activeSession?.prompt,
-        ...(activeSession?.execLog.slice(-10).map((l) => l.content) ?? []),
-      ].filter(Boolean).join(' ')
-      const isRtl = isRtlText(conversationText)
-      const modelDisplayName = CLINE_FREE_MODELS.find((m) => m.id === model)?.name ?? model
-      const continuationPrompt = isRtl
-        ? 'המשך את השיחה והמשימה מאותה נקודה עם המודל החדש.'
-        : 'Continue the conversation and task from this point with the newly selected model.'
-      const systemNotice = isRtl
-        ? `\n[מערכת] המודל הוחלף ל-${modelDisplayName}. ממשיך בשיחה מאותה נקודה...`
-        : `\n[System] Switched model to ${modelDisplayName}. Continuing conversation from this point...`
-      appendLog({ type: 'text_delta', content: systemNotice, timestamp: Date.now() })
-      sendPrompt(continuationPrompt, {
-        source: 'manual',
-        includeConversationContext: true,
-        includeSummaryContext: true,
-        overrideModel: model,
+    if (storeState.activeSessionId) {
+      storeState.setSessionIdentity(storeState.activeSessionId, {
+        backend: agentBackend,
+        providerId: CLINE_DEFAULT_PROVIDER_ID,
+        modelId: model,
       })
     }
-  }, [projectDir, selectedClineModel, isRunning, agentStatus, loopEnabled, draftPrompt, appendLog, sendPrompt])
+  }, [selectedClineModel, agentBackend])
 
   const handleCodeModelChange = useCallback((model: string) => {
     if (!isCodeAgentToolCompatible(model, modelCapabilities)) return
@@ -1220,37 +1281,13 @@ export function CodingAgentPanel() {
     persistSelectedCodeModel(model)
 
     const storeState = useCodingAgentStore.getState()
-    const activeSession = storeState.sessions.find((s) => s.id === storeState.activeSessionId)
-    const hasPriorConversation = Boolean(
-      activeSession &&
-      activeSession.projectDir === projectDir &&
-      (activeSession.execLog.length > 0 || Boolean(activeSession.prompt && activeSession.prompt.trim().length > 0))
-    )
-
-    const isIdleAtFinishedState = !isRunning && agentStatus === 'free' && !loopEnabled && draftPrompt.trim().length === 0
-
-    if (hasPriorConversation && isIdleAtFinishedState) {
-      const conversationText = [
-        activeSession?.prompt,
-        ...(activeSession?.execLog.slice(-10).map((l) => l.content) ?? []),
-      ].filter(Boolean).join(' ')
-      const isRtl = isRtlText(conversationText)
-      const modelDisplayName = model
-      const continuationPrompt = isRtl
-        ? 'המשך את השיחה והמשימה מאותה נקודה עם המודל החדש.'
-        : 'Continue the conversation and task from this point with the newly selected model.'
-      const systemNotice = isRtl
-        ? `\n[מערכת] המודל הוחלף ל-${modelDisplayName}. ממשיך בשיחה מאותה נקודה...`
-        : `\n[System] Switched model to ${modelDisplayName}. Continuing conversation from this point...`
-      appendLog({ type: 'text_delta', content: systemNotice, timestamp: Date.now() })
-      sendPrompt(continuationPrompt, {
-        source: 'manual',
-        includeConversationContext: true,
-        includeSummaryContext: true,
-        overrideModel: model,
+    if (storeState.activeSessionId) {
+      storeState.setSessionIdentity(storeState.activeSessionId, {
+        backend: agentBackend,
+        modelId: model,
       })
     }
-  }, [projectDir, selectedCodeModel, modelCapabilities, isRunning, agentStatus, loopEnabled, draftPrompt, appendLog, sendPrompt])
+  }, [selectedCodeModel, modelCapabilities, agentBackend])
 
   const sendPromptRef = useRef(sendPrompt)
 
@@ -1376,18 +1413,26 @@ export function CodingAgentPanel() {
     setLastFailureMessage(null)
   }, [activeRun, setRunning, stopSelectedBackend])
 
-  const handleLoadSession = useCallback((id: string) => {
-    loadSession(id)
-    const session = useCodingAgentStore.getState().sessions.find((s) => s.id === id)
-    const targetBackend = session?.backend || DEFAULT_CODING_AGENT_BACKEND
-    setAgentBackend(targetBackend)
-    persistCodingAgentBackend(targetBackend)
+  useEffect(() => {
+    if (!activeSessionId) return
+    const session = sessions.find((s) => s.id === activeSessionId)
+    if (!session) return
 
-    if (session?.modelId) {
-      setSelectedCodeModel(session.modelId)
-      persistSelectedCodeModel(session.modelId)
+    if (session.backend) {
+      setAgentBackend(session.backend)
+      persistCodingAgentBackend(session.backend)
     }
-  }, [loadSession])
+
+    if (session.modelId) {
+      if (session.backend === 'cline-acp') {
+        setSelectedClineModel(session.modelId)
+        persistSelectedClineModel(session.modelId)
+      } else {
+        setSelectedCodeModel(session.modelId)
+        persistSelectedCodeModel(session.modelId)
+      }
+    }
+  }, [activeSessionId, sessions])
 
   const handleApproveDiff = useCallback(async (id: string) => {
     try {
@@ -1465,7 +1510,7 @@ export function CodingAgentPanel() {
   }, [activeLoopSession, activeManualSession, draftPrompt, loopEnabled, loopPrompt])
 
   return (
-    <div className="flex h-full overflow-hidden">
+    <div className="flex flex-1 min-h-0 h-full overflow-hidden">
       {/* ── Left: Project picker ──────────────────────────── */}
       <aside className="w-56 shrink-0 border-r flex flex-col bg-muted/20">
         <div className="px-3 py-3 border-b">
@@ -1517,35 +1562,6 @@ export function CodingAgentPanel() {
           </div>
         )}
         <div className="flex-1 overflow-auto flex flex-col min-h-0">
-          {/* Session history */}
-          {sessions.length > 0 && (
-            <div className="shrink-0 border-b">
-              <div className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                History
-              </div>
-              <ul className="max-h-40 overflow-y-auto">
-                {sessions.map((s) => (
-                  <li key={s.id} className="group flex items-center gap-1 px-2 py-1 hover:bg-muted/40">
-                    <button
-                      type="button"
-                      className="flex-1 text-left text-xs text-muted-foreground truncate"
-                      onClick={() => handleLoadSession(s.id)}
-                      title={s.prompt}
-                    >
-                      {s.prompt.length > 40 ? s.prompt.slice(0, 40) + '…' : s.prompt}
-                    </button>
-                    <button
-                      type="button"
-                      className="opacity-0 group-hover:opacity-100 text-muted-foreground/50 hover:text-destructive shrink-0"
-                      onClick={() => deleteSession(s.id)}
-                    >
-                      <IconX size={11} />
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
           <div className="flex-1 overflow-auto px-3 py-2">
             {projectDir ? (
               <ProjectFileTree projectDir={projectDir} />
@@ -1660,14 +1676,21 @@ export function CodingAgentPanel() {
         )}
         <div className="relative flex-1 min-h-0">
           <StickToBottom className="absolute inset-0 overflow-y-hidden" initial="smooth" resize="smooth">
-            <StickToBottom.Content className="px-4 py-3 space-y-0.5">
+            <StickToBottom.Content className="px-5 py-4 space-y-1.5">
               {execLog.length === 0 && !isRunning && (
                 <p className="text-sm text-muted-foreground/50 text-center mt-16">
                   {projectDir ? 'Describe what to build or fix below.' : 'Select a project folder to begin.'}
                 </p>
               )}
               {displayLog.map((line, i) => (
-                <LogLine key={i} line={line} />
+                <LogLine
+                  key={line.timestamp ? `${line.timestamp}-${i}` : i}
+                  line={line}
+                  isStreaming={isRunning && i === displayLog.length - 1}
+                  isRunning={isRunning}
+                  onEditPrompt={handleEditPrompt}
+                  onDeleteTurn={handleDeleteTurn}
+                />
               ))}
               {isRunning && (
                 <div className="text-xs text-muted-foreground py-1">
@@ -1972,13 +1995,47 @@ function mergeStreamingLog(lines: ExecLogLine[]): ExecLogLine[] {
   }, [])
 }
 
+export function getTurnIndices(
+  execLog: ExecLogLine[],
+  promptTimestamp: number,
+  promptContent?: string
+): { startIndex: number; endIndex: number } | null {
+  let startIndex = execLog.findIndex(
+    (l) =>
+      l.timestamp === promptTimestamp &&
+      (promptContent ? l.content === promptContent : l.content.trimStart().startsWith('>'))
+  )
+  if (startIndex === -1 && promptContent) {
+    startIndex = execLog.findIndex((l) => l.content === promptContent)
+  }
+  if (startIndex === -1) return null
+
+  let endIndex = startIndex + 1
+  while (endIndex < execLog.length && !execLog[endIndex].content.trimStart().startsWith('>')) {
+    endIndex++
+  }
+  return { startIndex, endIndex }
+}
+
 // ── Execution log line ────────────────────────────────────────
-function LogLine({ line }: { line: ExecLogLine }) {
+export function LogLine({
+  line,
+  isStreaming,
+  onEditPrompt,
+  onDeleteTurn,
+  isRunning,
+}: {
+  line: ExecLogLine
+  isStreaming?: boolean
+  onEditPrompt?: (timestamp: number, newText: string) => void
+  onDeleteTurn?: (timestamp: number) => void
+  isRunning?: boolean
+}) {
   switch (line.type) {
     case 'tool_start': {
       const input = tryParse(line.content)
       return (
-        <Tool state="input-available" className="my-0.5">
+        <Tool state="input-available" className="my-1">
           <ToolHeader title={line.toolName ?? 'Tool'} type={`tool-${line.toolName}` as `tool-${string}`} state="input-available" />
           <ToolContent>{input && <ToolInput input={input} />}</ToolContent>
         </Tool>
@@ -1988,7 +2045,7 @@ function LogLine({ line }: { line: ExecLogLine }) {
       const isError = line.content.toLowerCase().includes('error')
       const state = isError ? ('output-error' as const) : ('output-available' as const)
       return (
-        <Tool state={state} className="my-0.5">
+        <Tool state={state} className="my-1">
           <ToolHeader title={line.toolName ?? 'Tool'} type={`tool-${line.toolName}` as `tool-${string}`} state={state} />
           <ToolContent>
             <ToolOutput
@@ -2001,9 +2058,23 @@ function LogLine({ line }: { line: ExecLogLine }) {
       )
     }
     case 'error':
-      return <div className="text-destructive text-xs py-0.5 break-words">✗ {line.content}</div>
+      return (
+        <div className="my-2 p-3 rounded-xl bg-destructive/10 border border-destructive/20 text-destructive text-xs flex items-start gap-2.5 break-words">
+          <IconAlertCircle size={15} className="shrink-0 mt-0.5" />
+          <div className="flex-1 whitespace-pre-wrap">{line.content}</div>
+        </div>
+      )
     case 'done':
-      return <div className="text-muted-foreground text-[10px] text-center border-t my-2 pt-2 uppercase tracking-widest font-medium">{line.content}</div>
+      return (
+        <div className="flex items-center justify-center gap-2 my-4 text-muted-foreground/60 text-[11px] uppercase tracking-wider font-medium select-none">
+          <div className="h-px bg-border/40 flex-1" />
+          <span className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-muted/20 border border-border/30">
+            <IconCircleCheck size={13} className="text-green-500/80" />
+            {line.content}
+          </span>
+          <div className="h-px bg-border/40 flex-1" />
+        </div>
+      )
     case 'thinking':
       return (
         <Reasoning className="my-2" defaultOpen={true}>
@@ -2016,12 +2087,87 @@ function LogLine({ line }: { line: ExecLogLine }) {
           </ReasoningContent>
         </Reasoning>
       )
-    default:
-      return isRtlText(line.content) ? (
-        <div dir="rtl" className="text-muted-foreground text-xs py-0.5 break-words whitespace-pre-wrap text-right">{line.content}</div>
-      ) : (
-        <div dir="ltr" className="text-muted-foreground text-xs py-0.5 break-words whitespace-pre-wrap">{line.content}</div>
+    default: {
+      const trimmed = line.content.trimStart()
+
+      // User prompt card with copy, edit, delete
+      if (trimmed.startsWith('>')) {
+        const promptText = line.content.replace(/^>\s*/, '')
+        const isRtl = isRtlText(promptText)
+        return (
+          <div className="flex flex-col items-end w-full my-3">
+            <div className="bg-secondary relative text-foreground px-4 py-2.5 rounded-2xl max-w-[85%] shadow-sm text-sm break-words whitespace-pre-wrap select-text inline-block">
+              <div
+                dir={getTextDirection(promptText)}
+                className={cn('select-text whitespace-pre-wrap', isRtl && 'text-right')}
+              >
+                {promptText}
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-1 text-muted-foreground text-xs mt-1.5">
+              <CopyButton text={promptText} />
+              {!isRunning && onEditPrompt && (
+                <EditMessageDialog
+                  message={promptText}
+                  onSave={(newText) => onEditPrompt(line.timestamp, newText)}
+                  triggerElement={
+                    <Button
+                      variant="ghost"
+                      size="icon-xs"
+                      role="button"
+                      tabIndex={0}
+                      title="Edit prompt"
+                    >
+                      <IconPencil size={16} />
+                    </Button>
+                  }
+                />
+              )}
+              {!isRunning && onDeleteTurn && (
+                <DeleteMessageDialog
+                  onDelete={() => onDeleteTurn(line.timestamp)}
+                />
+              )}
+            </div>
+          </div>
+        )
+      }
+
+      // Metadata / status lines
+      if (
+        trimmed.startsWith('Backend:') ||
+        trimmed.startsWith('Model:') ||
+        trimmed.startsWith('LSP Tools:') ||
+        trimmed.startsWith('Ollama agent started') ||
+        trimmed.startsWith('Agent iteration') ||
+        trimmed.startsWith('Diff proposed for') ||
+        trimmed.startsWith('Permission')
+      ) {
+        return (
+          <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground/70 font-mono my-0.5 select-text">
+            <span className="px-2 py-0.5 rounded bg-muted/40 border border-border/30">
+              {line.content}
+            </span>
+          </div>
+        )
+      }
+
+      if (trimmed.startsWith('Starting agent')) {
+        return (
+          <div className="flex items-center gap-2 text-xs text-muted-foreground/80 py-1 font-medium select-none">
+            <IconLoader2 size={13} className="animate-spin text-muted-foreground shrink-0" />
+            <span>{line.content}</span>
+          </div>
+        )
+      }
+
+      // Assistant Markdown response
+      return (
+        <div className="w-full my-2 text-foreground text-sm leading-relaxed select-text">
+          <RenderMarkdown content={line.content} isStreaming={isStreaming} />
+        </div>
       )
+    }
   }
 }
 

@@ -114,8 +114,12 @@ interface CodingAgentState {
   setSessionStatus: (sessionId: string, status: SessionStatus, reason?: string) => void
   /** Load a past session into the view (read-only) */
   loadSession: (id: string) => void
+  /** Rename a session in history */
+  renameSession: (id: string, newTitle: string) => void
   /** Delete a session from history */
   deleteSession: (id: string) => void
+  /** Delete all sessions from history */
+  deleteAllSessions: () => void
   clearSession: () => void
 }
 
@@ -530,9 +534,48 @@ export const useCodingAgentStore = create<CodingAgentState>()(
           ),
         })),
 
-      deleteSession: (id) => {
-        set((s) => ({ sessions: s.sessions.filter((sess) => sess.id !== id) }))
+      renameSession: (id, newTitle) => {
+        const trimmed = newTitle.trim()
+        if (!trimmed) return
+        set((s) => ({
+          sessions: s.sessions.map((sess) =>
+            sess.id === id ? { ...sess, prompt: trimmed } : sess
+          ),
+        }))
       },
+
+      deleteSession: (id) => {
+        set((s) => {
+          const filtered = s.sessions.filter((sess) => sess.id !== id)
+          const wasActive = s.activeSessionId === id
+          return {
+            sessions: filtered,
+            ...(wasActive
+              ? {
+                  activeSessionId: null,
+                  planText: '',
+                  execLog: [],
+                  pendingDiffs: [],
+                  conversationSummary: undefined,
+                  conversationSummaryUpdatedAt: undefined,
+                  isRunning: false,
+                }
+              : {}),
+          }
+        })
+      },
+
+      deleteAllSessions: () =>
+        set({
+          sessions: [],
+          activeSessionId: null,
+          planText: '',
+          execLog: [],
+          pendingDiffs: [],
+          conversationSummary: undefined,
+          conversationSummaryUpdatedAt: undefined,
+          isRunning: false,
+        }),
 
       clearSession: () =>
         set({
@@ -543,6 +586,7 @@ export const useCodingAgentStore = create<CodingAgentState>()(
           conversationSummaryUpdatedAt: undefined,
           isRunning: false,
           activeSessionId: null,
+          draftPrompt: '',
         }),
     }),
     {

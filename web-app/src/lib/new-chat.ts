@@ -39,7 +39,7 @@ export function resetNewChatState() {
   useChatSessions.getState().setActiveConversationId(undefined)
 
   const { setMode, setAgentRunning, clearOutput } = useCodeModeStore.getState()
-  setMode('chat')
+  setMode('coding')
   setAgentRunning(false)
   clearOutput()
   useCodingAgentStore.getState().clearSession()

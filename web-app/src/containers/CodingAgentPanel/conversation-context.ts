@@ -137,19 +137,16 @@ export function buildCodingAgentPrompt({
   sessions,
   activeSessionId,
   seedFromSessionId,
-  backend,
-  isContinuation,
+  backend: _backend,
+  isContinuation: _isContinuation,
   source,
   includeHistory = source === 'loop' ? false : true,
   includeSummaryContext = includeHistory,
 }: BuildCodingAgentPromptOptions): string {
   const currentPrompt = normalizeText(prompt)
 
-  if (backend === 'cline-acp' && isContinuation) {
-    // Cline ACP maintains its own conversation history internally via session/load; injecting
-    // additional context here would duplicate what the backend already sends.
-    return currentPrompt
-  }
+  // Multi-turn context is formatted into the prompt for direct-ollama and cline-acp
+  // so any model can seamlessly continue the conversation across turns and model switches.
 
   if (!includeHistory && !includeSummaryContext) return currentPrompt
 

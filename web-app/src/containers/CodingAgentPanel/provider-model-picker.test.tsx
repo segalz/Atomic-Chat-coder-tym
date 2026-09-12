@@ -21,11 +21,19 @@ describe('ProviderModelPicker (Stage 10)', () => {
   beforeEach(() => {
     localStorage.clear()
     vi.clearAllMocks()
-    mockedInvoke.mockResolvedValue({
-      installed: true,
-      path: 'C:\\Users\\user\\AppData\\Roaming\\npm\\cline.cmd',
-      version: '3.0.61',
-    } satisfies ClineInstallStatus)
+    mockedInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'fetch_cline_cli_models') {
+        return {
+          models: CLINE_FREE_MODELS,
+          source: 'test_mock',
+        }
+      }
+      return {
+        installed: true,
+        path: 'C:\\Users\\user\\AppData\\Roaming\\npm\\cline.cmd',
+        version: '3.0.61',
+      } satisfies ClineInstallStatus
+    })
   })
 
   it('renders provider tabs and indicates active tab', async () => {
@@ -226,7 +234,58 @@ describe('ProviderModelPicker (Stage 10)', () => {
       fireEvent.click(refreshBtn)
     })
 
-    expect(mockedInvoke).toHaveBeenCalledTimes(2)
+    const checkCalls = mockedInvoke.mock.calls.filter((c) => c[0] === 'check_cline_installed')
+    const fetchCalls = mockedInvoke.mock.calls.filter((c) => c[0] === 'fetch_cline_cli_models')
+    expect(checkCalls.length).toBe(2)
+    expect(fetchCalls.length).toBe(2)
+  })
+
+  it('renders dynamically fetched models from Cline CLI in the dropdown', async () => {
+    const customDynamicModels = [
+      {
+        id: 'test/dynamic-model-1',
+        name: 'Dynamic Model 1',
+        provider: 'TestProvider',
+        description: 'Dynamically discovered model from CLI',
+        tag: 'TestTag',
+      },
+      {
+        id: 'test/dynamic-model-2',
+        name: 'Dynamic Model 2',
+        provider: 'AnotherProvider',
+        description: 'Second dynamic model from CLI',
+      },
+    ]
+
+    mockedInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'fetch_cline_cli_models') {
+        return {
+          models: customDynamicModels,
+          source: 'test_live_cli',
+        }
+      }
+      return {
+        installed: true,
+        path: 'C:\\Users\\user\\AppData\\Roaming\\npm\\cline.cmd',
+        version: '3.0.61',
+      } satisfies ClineInstallStatus
+    })
+
+    await act(async () => {
+      render(
+        <ProviderModelPicker
+          backend="cline-acp"
+          onBackendChange={vi.fn()}
+          selectedModel="test/dynamic-model-1"
+          onModelChange={vi.fn()}
+        />
+      )
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText(/Dynamic Model 1/)).toBeInTheDocument()
+      expect(screen.getByText(/Dynamic Model 2/)).toBeInTheDocument()
+    })
   })
 
   it('respects disabled prop on tabs and refresh button', async () => {

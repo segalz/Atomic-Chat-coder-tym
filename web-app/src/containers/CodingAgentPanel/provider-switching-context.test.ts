@@ -55,7 +55,7 @@ describe('provider switching and context lifecycle', () => {
     expect(result).toContain('Current request:\nContinue with Cline')
   })
 
-  it('avoids duplicate history on Cline multi-turn continuation', () => {
+  it('includes conversational context on Cline multi-turn continuation', () => {
     const prompt = 'Second turn in the same Cline conversation'
     const result = buildCodingAgentPrompt({
       prompt,
@@ -67,7 +67,8 @@ describe('provider switching and context lifecycle', () => {
       source: 'manual',
     })
 
-    expect(result).toBe(prompt)
+    expect(result).toContain('Coding-agent context from previous provider session follows.')
+    expect(result).toContain('Current request:\nSecond turn in the same Cline conversation')
   })
 
   it('seeds context when switching from Cline back to Ollama', () => {

@@ -1,6 +1,10 @@
-﻿import { describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { isRtlText } from '@/utils/textDirection'
-import { CLINE_FREE_MODELS } from './backend-identity'
+import {
+  CLINE_FREE_MODELS,
+  resolveSelectedClineModel,
+  CODING_AGENT_CLINE_MODEL_STORAGE_KEY,
+} from './backend-identity'
 import { buildCodingAgentPrompt } from './conversation-context'
 import type { CodingSession } from '@/stores/coding-agent-store'
 
@@ -50,18 +54,33 @@ describe('Transparent Model-Switch Auto-Continuation', () => {
 
   describe('Model display name resolution', () => {
     it('resolves official Cline free model IDs to user-friendly display names', () => {
-      const museSpark = CLINE_FREE_MODELS.find(
-        (m) => m.id === 'cline-free/muse-spark-1.3-contributor'
-      )
-      expect(museSpark?.name).toBe('Muse Spark 1.3')
-
-      const glm = CLINE_FREE_MODELS.find((m) => m.id === 'z-ai/glm-5.3-flash')
+      const glm = CLINE_FREE_MODELS.find((m) => m.id === 'zai/glm-5.3-flash')
       expect(glm?.name).toBe('GLM 5.3 Flash')
 
       const deepseek = CLINE_FREE_MODELS.find(
         (m) => m.id === 'deepseek/deepseek-v4-flash'
       )
       expect(deepseek?.name).toBe('DeepSeek V4 Flash')
+
+      const laguna = CLINE_FREE_MODELS.find(
+        (m) => m.id === 'poolside/laguna-s-2.1:free'
+      )
+      expect(laguna?.name).toBe('Laguna S 2.1')
+
+      const muse = CLINE_FREE_MODELS.find(
+        (m) => m.id === 'meta/muse-spark-1.2-contributor'
+      )
+      expect(muse?.name).toBe('Muse Spark 1.3 Contributor')
+
+      const solar = CLINE_FREE_MODELS.find(
+        (m) => m.id === 'upstage/solar-pro4'
+      )
+      expect(solar?.name).toBe('Solar Pro 4')
+
+      const longcat = CLINE_FREE_MODELS.find(
+        (m) => m.id === 'meituan/longcat-2.0'
+      )
+      expect(longcat?.name).toBe('LongCat 2.0')
 
       // Unknown/fallback model returns the ID itself
       const unknownId = 'custom/unknown-model'
@@ -88,7 +107,7 @@ describe('Transparent Model-Switch Auto-Continuation', () => {
       timestamp: 100,
     }
 
-    it('preserves Cline session continuity without duplicate prompt wrapping', () => {
+    it('injects full conversational history during Cline continuation turns', () => {
       const prompt = 'המשך את השיחה והמשימה מאותה נקודה עם המודל החדש.'
       const promptForAgent = buildCodingAgentPrompt({
         prompt,
@@ -102,7 +121,10 @@ describe('Transparent Model-Switch Auto-Continuation', () => {
         includeSummaryContext: true,
       })
 
-      expect(promptForAgent).toBe(prompt)
+      expect(promptForAgent).toContain('Current conversation so far:')
+      expect(promptForAgent).toContain('בדקתי את קובץ ה-DB')
+      expect(promptForAgent).toContain('Current request:')
+      expect(promptForAgent).toContain(prompt)
     })
 
     it('injects full conversational history when switching models in Ollama backend', () => {
@@ -128,6 +150,47 @@ describe('Transparent Model-Switch Auto-Continuation', () => {
       expect(promptForAgent).toContain('בדקתי את קובץ ה-DB')
       expect(promptForAgent).toContain('Current request:')
       expect(promptForAgent).toContain(prompt)
+    })
+  })
+
+  describe('Legacy Cline model migration', () => {
+    it('migrates older model ids stored in localStorage to valid Cline catalog ids', () => {
+      window.localStorage.setItem(CODING_AGENT_CLINE_MODEL_STORAGE_KEY, 'z-ai/glm-5.3-flash')
+      expect(resolveSelectedClineModel()).toBe('zai/glm-5.3-flash')
+
+      window.localStorage.setItem(CODING_AGENT_CLINE_MODEL_STORAGE_KEY, 'cline-free/longcat-2.0')
+      expect(resolveSelectedClineModel()).toBe('meituan/longcat-2.0')
+
+      window.localStorage.setItem(CODING_AGENT_CLINE_MODEL_STORAGE_KEY, 'meituan/longcat-2.0')
+      expect(resolveSelectedClineModel()).toBe('meituan/longcat-2.0')
+
+      window.localStorage.setItem(CODING_AGENT_CLINE_MODEL_STORAGE_KEY, 'cline-free/solar-pro4')
+      expect(resolveSelectedClineModel()).toBe('upstage/solar-pro4')
+
+      window.localStorage.setItem(CODING_AGENT_CLINE_MODEL_STORAGE_KEY, 'upstage/solar-pro4')
+      expect(resolveSelectedClineModel()).toBe('upstage/solar-pro4')
+
+      window.localStorage.setItem(
+        CODING_AGENT_CLINE_MODEL_STORAGE_KEY,
+        'cline-free/muse-spark-1.3-contributor'
+      )
+      expect(resolveSelectedClineModel()).toBe('meta/muse-spark-1.2-contributor')
+
+      window.localStorage.setItem(
+        CODING_AGENT_CLINE_MODEL_STORAGE_KEY,
+        'meta/muse-spark-1.3-contributor'
+      )
+      expect(resolveSelectedClineModel()).toBe('meta/muse-spark-1.2-contributor')
+
+      window.localStorage.setItem(
+        CODING_AGENT_CLINE_MODEL_STORAGE_KEY,
+        'meta/muse-spark-1.2-contributor'
+      )
+      expect(resolveSelectedClineModel()).toBe('meta/muse-spark-1.2-contributor')
+
+      // An unrecognized model falls back to default
+      window.localStorage.setItem(CODING_AGENT_CLINE_MODEL_STORAGE_KEY, 'totally-bogus-model')
+      expect(resolveSelectedClineModel()).toBe('zai/glm-5.3-flash')
     })
   })
 })

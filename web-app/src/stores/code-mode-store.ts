@@ -74,10 +74,8 @@ function migrateCodeModeState(persistedState: unknown): Partial<CodeModeState> {
   if (!persistedState || typeof persistedState !== 'object') return {}
 
   const state = persistedState as Partial<CodeModeState>
-  const rawMode = (state as { mode?: unknown }).mode
-  const mode = typeof rawMode === 'string' ? rawMode : 'chat'
   return {
-    mode: mode === 'code' ? 'plan' : mode as AppMode,
+    mode: 'coding',
     projectDir: typeof state.projectDir === 'string' ? state.projectDir : '',
     draftPrompt: typeof state.draftPrompt === 'string' ? state.draftPrompt : '',
     attachedImagePath: typeof state.attachedImagePath === 'string' ? state.attachedImagePath : null,
@@ -89,7 +87,7 @@ export const useCodeModeStore = create<CodeModeState>()(
   persist(
     (set, get) => ({
       // Persisted
-      mode: 'chat',
+      mode: 'coding',
       projectDir: '',
       draftPrompt: '',
       attachedImagePath: null,

@@ -460,3 +460,96 @@ describe('useCodingAgentStore autoApproveTools', () => {
   })
 })
 
+describe('useCodingAgentStore session management (rename, delete, clear)', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    resetCodingAgentStore()
+  })
+
+  it('renames a session by id', () => {
+    const store = useCodingAgentStore.getState()
+    store.startNewSession('Original Prompt', undefined, 'manual')
+    const sessionId = useCodingAgentStore.getState().activeSessionId!
+
+    useCodingAgentStore.getState().renameSession(sessionId, 'Updated Prompt Title')
+
+    const session = useCodingAgentStore.getState().sessions.find((s) => s.id === sessionId)
+    expect(session?.prompt).toBe('Updated Prompt Title')
+  })
+
+  it('ignores rename with empty or whitespace string', () => {
+    const store = useCodingAgentStore.getState()
+    store.startNewSession('Original Prompt', undefined, 'manual')
+    const sessionId = useCodingAgentStore.getState().activeSessionId!
+
+    useCodingAgentStore.getState().renameSession(sessionId, '   ')
+
+    const session = useCodingAgentStore.getState().sessions.find((s) => s.id === sessionId)
+    expect(session?.prompt).toBe('Original Prompt')
+  })
+
+  it('deletes a non-active session without affecting active session', () => {
+    const store = useCodingAgentStore.getState()
+    store.startNewSession('Session 1', undefined, 'manual')
+    const id1 = useCodingAgentStore.getState().activeSessionId!
+
+    useCodingAgentStore.getState().startNewSession('Session 2', undefined, 'manual')
+    const id2 = useCodingAgentStore.getState().activeSessionId!
+
+    expect(useCodingAgentStore.getState().sessions).toHaveLength(2)
+
+    useCodingAgentStore.getState().deleteSession(id1)
+
+    const state = useCodingAgentStore.getState()
+    expect(state.sessions).toHaveLength(1)
+    expect(state.sessions[0].id).toBe(id2)
+    expect(state.activeSessionId).toBe(id2)
+  })
+
+  it('deletes active session and resets active session state', () => {
+    const store = useCodingAgentStore.getState()
+    store.startNewSession('Active Session', undefined, 'manual')
+    const id = useCodingAgentStore.getState().activeSessionId!
+    store.appendPlanText('Some plan')
+
+    useCodingAgentStore.getState().deleteSession(id)
+
+    const state = useCodingAgentStore.getState()
+    expect(state.sessions).toHaveLength(0)
+    expect(state.activeSessionId).toBeNull()
+    expect(state.planText).toBe('')
+  })
+
+  it('deletes all sessions and resets runtime state', () => {
+    const store = useCodingAgentStore.getState()
+    store.startNewSession('Session 1', undefined, 'manual')
+    store.startNewSession('Session 2', undefined, 'manual')
+    store.appendPlanText('Plan')
+
+    expect(useCodingAgentStore.getState().sessions).toHaveLength(2)
+
+    useCodingAgentStore.getState().deleteAllSessions()
+
+    const state = useCodingAgentStore.getState()
+    expect(state.sessions).toHaveLength(0)
+    expect(state.activeSessionId).toBeNull()
+    expect(state.planText).toBe('')
+    expect(state.execLog).toEqual([])
+  })
+
+  it('clears session and resets draftPrompt', () => {
+    const store = useCodingAgentStore.getState()
+    store.startNewSession('Session 1', undefined, 'manual')
+    store.setDraftPrompt('Some pending prompt')
+    store.appendPlanText('Plan')
+
+    useCodingAgentStore.getState().clearSession()
+
+    const state = useCodingAgentStore.getState()
+    expect(state.activeSessionId).toBeNull()
+    expect(state.draftPrompt).toBe('')
+    expect(state.planText).toBe('')
+    expect(state.execLog).toEqual([])
+  })
+})
+

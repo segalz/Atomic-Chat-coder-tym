@@ -134,6 +134,7 @@ pub fn run() {
         core::cline_agent::start_cline_agent,
         core::cline_agent::stop_cline_agent,
         core::cline_agent::check_cline_installed,
+        core::cline_agent::fetch_cline_cli_models,
         core::cline_agent::respond_cline_permission,
         // Loop supervision read-only commands
         core::loop_supervision::loop_status,

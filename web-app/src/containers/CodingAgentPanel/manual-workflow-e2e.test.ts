@@ -88,8 +88,9 @@ describe('Manual Workflow E2E — Cline ACP Integration (Stage 15)', () => {
       source: 'manual',
     })
 
-    // Assert raw prompt with NO prepended history
-    expect(turn2Prompt).toBe('Second turn prompt')
+    // Assert prompt includes conversational context
+    expect(turn2Prompt).toContain('Second turn prompt')
+    expect(turn2Prompt).toContain('First turn')
 
     const sendResult = await routeSendAgentPrompt({
       backend: 'cline-acp',
@@ -102,7 +103,7 @@ describe('Manual Workflow E2E — Cline ACP Integration (Stage 15)', () => {
 
     expect(invokeFn).toHaveBeenCalledWith('start_cline_agent', {
       projectDir: '/disposable/project',
-      prompt: 'Second turn prompt',
+      prompt: turn2Prompt,
       model: 'zai/glm-5.3-flash',
       runId: sendResult.activeRun.runId,
       sessionId: 'acp-session-12345',

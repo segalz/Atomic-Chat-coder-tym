@@ -1440,7 +1440,15 @@ pub async fn start_cline_agent<R: tauri::Runtime>(
         None
     };
 
-    let bound_model = model.unwrap_or_else(|| SessionModelConfig::default().model_id);
+    let raw_model = model.unwrap_or_else(|| SessionModelConfig::default().model_id);
+    let bound_model = match raw_model.as_str() {
+        "z-ai/glm-5.3-flash" => "zai/glm-5.3-flash".to_string(),
+        "cline-free/longcat-2.0" => "meituan/longcat-2.0".to_string(),
+        "cline-free/solar-pro4" => "upstage/solar-pro4".to_string(),
+        "cline-free/muse-spark-1.3-contributor"
+        | "meta/muse-spark-1.3-contributor" => "meta/muse-spark-1.2-contributor".to_string(),
+        other => other.to_string(),
+    };
     log::info!(
         "[ClineAgent] Started run {} for project {} with model {} (session: {})",
         active_run_id,
@@ -1603,8 +1611,8 @@ async fn run_cline_agent_loop<R: tauri::Runtime>(
     let mut active_session_id: Option<String> = None;
     let mut terminal_recorded = false;
     let mut loop_finished = false;
-    let mut is_resuming = false;
-    let mut resuming_external_id: Option<String> = None;
+    let mut prompt_sent = false;
+    let mut has_emitted_text = false;
 
     loop {
         tokio::select! {
@@ -1651,11 +1659,16 @@ async fn run_cline_agent_loop<R: tauri::Runtime>(
                 if let Some(method) = val.get("method").and_then(|m| m.as_str()) {
                     match method {
                         "session/update" => {
+                            if !prompt_sent {
+                                // Ignore any pre-turn or setup updates before the prompt turn is sent
+                                continue;
+                            }
                             if let Some(params) = val.get("params") {
                                 let stream_events = normalize_acp_session_update(params, &run_id);
                                 for ev in stream_events {
                                     match ev {
                                         AcpStreamEvent::TextDelta { text, .. } => {
+                                            has_emitted_text = true;
                                             let _ = app.emit("agent-text-delta", serde_json::json!({ "text": text, "kind": "text" }));
                                         }
                                         AcpStreamEvent::ThinkingDelta { text, .. } => {
@@ -1728,22 +1741,6 @@ async fn run_cline_agent_loop<R: tauri::Runtime>(
                 // 2. Next check for JSON-RPC error response to our client requests
                 else if let Some(err_obj) = val.get("error") {
                     let req_id = val.get("id").and_then(|i| i.as_i64());
-                    if req_id == Some(2) && is_resuming {
-                        log::warn!("[ClineAgent] session/load failed ({:?}), falling back to session/new...", err_obj);
-                        is_resuming = false;
-                        resuming_external_id = None;
-                        let sess_req = serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "id": 2,
-                            "method": "session/new",
-                            "params": {
-                                "cwd": &project_dir,
-                                "mcpServers": []
-                            }
-                        });
-                        let _ = stdin_tx.send(sess_req.to_string());
-                        continue;
-                    }
                     if req_id == Some(1) || req_id == Some(2) || req_id == Some(3) || req_id == Some(4) {
                         let msg = err_obj.get("message").and_then(|m| m.as_str()).unwrap_or("RPC error");
                         log::error!("[ClineAgent] RPC error on id {:?}: {}", req_id, msg);
@@ -1759,47 +1756,24 @@ async fn run_cline_agent_loop<R: tauri::Runtime>(
                 else if let Some(req_id) = val.get("id").and_then(|i| i.as_i64()) {
                     match req_id {
                         1 => {
-                            let candidate_ext_id = session_id.as_deref().and_then(|sid| state.find_external_session_id(sid));
-                            if let Some(ext_id) = candidate_ext_id {
-                                log::info!("[ClineAgent] Initialize successful, attempting session/load for external session: {}", ext_id);
-                                is_resuming = true;
-                                resuming_external_id = Some(ext_id.clone());
-                                let load_req = serde_json::json!({
-                                    "jsonrpc": "2.0",
-                                    "id": 2,
-                                    "method": "session/load",
-                                    "params": {
-                                        "sessionId": ext_id,
-                                        "cwd": &project_dir,
-                                        "mcpServers": []
-                                    }
-                                });
-                                let _ = stdin_tx.send(load_req.to_string());
-                            } else {
-                                log::debug!("[ClineAgent] Initialize successful, creating fresh session via session/new...");
-                                is_resuming = false;
-                                let sess_req = serde_json::json!({
-                                    "jsonrpc": "2.0",
-                                    "id": 2,
-                                    "method": "session/new",
-                                    "params": {
-                                        "cwd": &project_dir,
-                                        "mcpServers": []
-                                    }
-                                });
-                                let _ = stdin_tx.send(sess_req.to_string());
-                            }
+                            log::debug!("[ClineAgent] Initialize successful, creating fresh session via session/new...");
+                            let sess_req = serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": 2,
+                                "method": "session/new",
+                                "params": {
+                                    "cwd": &project_dir,
+                                    "mcpServers": []
+                                }
+                            });
+                            let _ = stdin_tx.send(sess_req.to_string());
                         }
                         2 => {
-                            let external_id = if is_resuming {
-                                resuming_external_id.take().unwrap_or_default()
-                            } else {
-                                val.get("result")
-                                    .and_then(|r| r.get("sessionId"))
-                                    .and_then(|s| s.as_str())
-                                    .unwrap_or("")
-                                    .to_string()
-                            };
+                            let external_id = val.get("result")
+                                .and_then(|r| r.get("sessionId"))
+                                .and_then(|s| s.as_str())
+                                .unwrap_or("")
+                                .to_string();
 
                             if external_id.is_empty() {
                                 log::error!("[ClineAgent] Failed to obtain valid sessionId from session response: {:?}", val);
@@ -1869,6 +1843,7 @@ async fn run_cline_agent_loop<R: tauri::Runtime>(
                                 }
                             });
                             let _ = stdin_tx.send(prompt_req.to_string());
+                            prompt_sent = true;
                         }
                         3 => {
                             log::debug!("[ClineAgent] Model configuration updated successfully");
@@ -1881,6 +1856,14 @@ async fn run_cline_agent_loop<R: tauri::Runtime>(
 
                             let success = stop_reason == "end_turn";
                             let err = if success { None } else { Some(format!("Turn ended with status: {stop_reason}")) };
+
+                            if !has_emitted_text && success {
+                                let warning = format!(
+                                    "המודל {} סיים ללא פלט (0 טוקנים). ייתכן ששרת המודל חווה עומס או אינו זמין כרגע אצל הספק החינמי של Cline. מומלץ לנסות שוב או לבחור מודל פעיל כגון GLM 5.3 Flash, DeepSeek V4 Flash, או Laguna S 2.1.",
+                                    bound_model
+                                );
+                                let _ = app.emit("agent-text-delta", serde_json::json!({ "text": warning, "kind": "text" }));
+                            }
 
                             log::info!("[ClineAgent] Prompt completed: stopReason={}, success={}", stop_reason, success);
 
@@ -2039,6 +2022,408 @@ pub fn probe_cline_install_sync() -> ClineInstallStatus {
         path,
         version,
     }
+}
+
+/// A model item discovered dynamically from the Cline CLI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClineCliModelItem {
+    pub id: String,
+    pub name: String,
+    pub provider: String,
+    pub description: String,
+    pub context_window: Option<String>,
+    pub tag: Option<String>,
+    pub tier: String,
+}
+
+/// Response returned by fetch_cline_cli_models.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClineCliModelsResponse {
+    pub models: Vec<ClineCliModelItem>,
+    pub source: String,
+}
+
+static CLINE_MODELS_CACHE: std::sync::Mutex<Option<(std::time::Instant, ClineCliModelsResponse)>> =
+    std::sync::Mutex::new(None);
+const CLINE_MODELS_CACHE_TTL_SECS: u64 = 300;
+
+/// Tauri command to fetch available models directly from the installed Cline CLI.
+///
+/// Guaranteed not to use static hardcoded lists as authoritative source; queries
+/// live @cline/core or official Cline API endpoint dynamically.
+#[tauri::command]
+pub async fn fetch_cline_cli_models() -> Result<ClineCliModelsResponse, String> {
+    if let Ok(guard) = CLINE_MODELS_CACHE.lock() {
+        if let Some((timestamp, ref cached)) = *guard {
+            if timestamp.elapsed().as_secs() < CLINE_MODELS_CACHE_TTL_SECS {
+                return Ok(cached.clone());
+            }
+        }
+    }
+
+    let response = fetch_cline_cli_models_internal().await;
+    if let Ok(mut guard) = CLINE_MODELS_CACHE.lock() {
+        *guard = Some((std::time::Instant::now(), response.clone()));
+    }
+    Ok(response)
+}
+
+pub async fn fetch_cline_cli_models_internal() -> ClineCliModelsResponse {
+    let install = tokio::task::spawn_blocking(probe_cline_install_sync)
+        .await
+        .unwrap_or(ClineInstallStatus {
+            installed: false,
+            path: None,
+            version: None,
+        });
+
+    if !install.installed {
+        return ClineCliModelsResponse {
+            models: get_fallback_cline_free_models(),
+            source: "offline_fallback".to_string(),
+        };
+    }
+
+    // 1. Try Node probe from installed @cline/core using detected CLI path
+    if let Some(ref cline_path) = install.path {
+        let path_clone = cline_path.clone();
+        let node_result = tokio::task::spawn_blocking(move || probe_models_via_node(&path_clone))
+            .await
+            .unwrap_or(None);
+
+        if let Some(models) = node_result {
+            if !models.is_empty() {
+                return ClineCliModelsResponse {
+                    models,
+                    source: "cli_node_probe".to_string(),
+                };
+            }
+        }
+    }
+
+    // 2. Try official Cline API endpoint used internally by @cline/core
+    if let Some(models) = fetch_models_via_http().await {
+        if !models.is_empty() {
+            return ClineCliModelsResponse {
+                models,
+                source: "cli_api_endpoint".to_string(),
+            };
+        }
+    }
+
+    // 3. Fallback to CLI built-in models
+    ClineCliModelsResponse {
+        models: get_fallback_cline_free_models(),
+        source: "fallback".to_string(),
+    }
+}
+
+fn probe_models_via_node(cline_path: &str) -> Option<Vec<ClineCliModelItem>> {
+    let cline_dir = std::path::Path::new(cline_path).parent()?;
+    let script = r#"
+try {
+  const fs = require('fs');
+  const path = require('path');
+  const base = process.argv[1];
+  const candidates = [
+    path.join(base, 'node_modules', 'cline', 'node_modules', '@cline', 'core'),
+    path.join(base, 'node_modules', '@cline', 'core')
+  ];
+  let core = null;
+  for (const c of candidates) {
+    if (fs.existsSync(c)) {
+      core = require(c);
+      break;
+    }
+  }
+  if (!core) {
+    try { core = require('@cline/core'); } catch(e) {}
+  }
+  if (core && typeof core.fetchClineRecommendedModels === 'function') {
+    core.fetchClineRecommendedModels().then(res => {
+      console.log(JSON.stringify(res));
+    }).catch(() => process.exit(1));
+  } else {
+    process.exit(1);
+  }
+} catch(e) {
+  process.exit(1);
+}
+"#;
+
+    let mut cmd = std::process::Command::new("node");
+    cmd.arg("-e").arg(script).arg(cline_dir);
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+
+    let output = cmd.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout);
+    parse_cline_recommended_models_json(&raw)
+}
+
+async fn fetch_models_via_http() -> Option<Vec<ClineCliModelItem>> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(4))
+        .build()
+        .ok()?;
+    let res = client
+        .get("https://api.cline.bot/api/v1/ai/cline/recommended-models")
+        .send()
+        .await
+        .ok()?;
+    if !res.status().is_success() {
+        return None;
+    }
+    let body = res.text().await.ok()?;
+    parse_cline_recommended_models_json(&body)
+}
+
+fn parse_cline_recommended_models_json(raw: &str) -> Option<Vec<ClineCliModelItem>> {
+    let v: serde_json::Value = serde_json::from_str(raw.trim()).ok()?;
+    let free_arr = v.get("free")?.as_array()?;
+    let mut items = Vec::new();
+
+    for entry in free_arr {
+        let id = entry.get("id").and_then(|x| x.as_str())?.to_string();
+        let raw_name = entry.get("name").and_then(|x| x.as_str()).unwrap_or(&id);
+        let desc = entry
+            .get("description")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+
+        let name = format_model_display_name(raw_name, &id);
+        let provider = infer_model_provider(&id, &name);
+        let context_window = if desc.contains("1M") || id.contains("1m") {
+            Some("1M".to_string())
+        } else {
+            None
+        };
+        let tag = if id.contains("glm-5.3-flash") {
+            Some("Default".to_string())
+        } else if context_window.as_deref() == Some("1M") {
+            Some("1M Context".to_string())
+        } else if id.contains("laguna") {
+            Some("Agent".to_string())
+        } else {
+            None
+        };
+
+        items.push(ClineCliModelItem {
+            id,
+            name,
+            provider,
+            description: desc,
+            context_window,
+            tag,
+            tier: "free".to_string(),
+        });
+    }
+
+    if items.is_empty() {
+        None
+    } else {
+        Some(items)
+    }
+}
+
+fn infer_model_provider(id: &str, name: &str) -> String {
+    let lower_id = id.to_lowercase();
+    let lower_name = name.to_lowercase();
+    if lower_id.contains("glm")
+        || lower_id.contains("z-ai")
+        || lower_id.contains("zai")
+        || lower_name.contains("glm")
+    {
+        "Zhipu AI".to_string()
+    } else if lower_id.contains("deepseek") || lower_name.contains("deepseek") {
+        "DeepSeek".to_string()
+    } else if lower_id.contains("poolside")
+        || lower_id.contains("laguna")
+        || lower_name.contains("laguna")
+    {
+        "Poolside".to_string()
+    } else if lower_id.contains("muse")
+        || lower_id.contains("meta")
+        || lower_name.contains("muse")
+    {
+        "Meta".to_string()
+    } else if lower_id.contains("solar")
+        || lower_id.contains("upstage")
+        || lower_name.contains("solar")
+    {
+        "Upstage".to_string()
+    } else if lower_id.contains("longcat")
+        || lower_id.contains("meituan")
+        || lower_name.contains("longcat")
+    {
+        "Meituan".to_string()
+    } else if lower_id.contains("claude")
+        || lower_id.contains("anthropic")
+        || lower_name.contains("claude")
+    {
+        "Anthropic".to_string()
+    } else if lower_id.contains("gpt") || lower_id.contains("openai") {
+        "OpenAI".to_string()
+    } else if lower_id.contains("gemini")
+        || lower_id.contains("google")
+        || lower_id.contains("gemma")
+    {
+        "Google".to_string()
+    } else if lower_id.contains("kimi") || lower_id.contains("moonshot") {
+        "Moonshot AI".to_string()
+    } else if lower_id.contains("qwen") {
+        "Qwen".to_string()
+    } else if lower_id.contains("grok")
+        || lower_id.contains("x-ai")
+        || lower_id.contains("xai")
+    {
+        "xAI".to_string()
+    } else if let Some((prefix, _)) = id.split_once('/') {
+        let clean = prefix
+            .trim_start_matches("cline-free-")
+            .trim_start_matches("cline-pass-")
+            .trim_start_matches("cline-")
+            .trim_start_matches("cline/");
+        if clean.is_empty() {
+            "Cline".to_string()
+        } else {
+            let mut chars = clean.chars();
+            match chars.next() {
+                None => "Cline".to_string(),
+                Some(f) => f.to_uppercase().collect::<String>() + chars.as_str(),
+            }
+        }
+    } else {
+        "Cline".to_string()
+    }
+}
+
+fn format_model_display_name(raw_name: &str, raw_id: &str) -> String {
+    let candidate = if !raw_name.trim().is_empty() && raw_name != raw_id {
+        raw_name.trim()
+    } else if let Some((_, suffix)) = raw_id.split_once('/') {
+        suffix.trim()
+    } else {
+        raw_id.trim()
+    };
+
+    let cleaned = candidate
+        .trim_end_matches(":free")
+        .trim_end_matches("(free)")
+        .trim();
+
+    if cleaned.contains('-') && !cleaned.contains(' ') {
+        let parts: Vec<&str> = cleaned.split('-').collect();
+        let formatted: Vec<String> = parts
+            .into_iter()
+            .map(|p| {
+                if p.eq_ignore_ascii_case("glm") {
+                    "GLM".to_string()
+                } else if p.eq_ignore_ascii_case("deepseek") {
+                    "DeepSeek".to_string()
+                } else if p.eq_ignore_ascii_case("v4") {
+                    "V4".to_string()
+                } else if p.eq_ignore_ascii_case("v3") {
+                    "V3".to_string()
+                } else if p.eq_ignore_ascii_case("flash") {
+                    "Flash".to_string()
+                } else if p.eq_ignore_ascii_case("pro") {
+                    "Pro".to_string()
+                } else if p.eq_ignore_ascii_case("preview") {
+                    "Preview".to_string()
+                } else if p.eq_ignore_ascii_case("contributor") {
+                    "Contributor".to_string()
+                } else if p.eq_ignore_ascii_case("spark") {
+                    "Spark".to_string()
+                } else if p.eq_ignore_ascii_case("solar") {
+                    "Solar".to_string()
+                } else if p.eq_ignore_ascii_case("longcat") {
+                    "LongCat".to_string()
+                } else if p.eq_ignore_ascii_case("laguna") {
+                    "Laguna".to_string()
+                } else {
+                    let mut c = p.chars();
+                    match c.next() {
+                        None => String::new(),
+                        Some(first) => first.to_uppercase().collect::<String>() + c.as_str(),
+                    }
+                }
+            })
+            .collect();
+        formatted.join(" ")
+    } else {
+        cleaned.to_string()
+    }
+}
+
+fn get_fallback_cline_free_models() -> Vec<ClineCliModelItem> {
+    vec![
+        ClineCliModelItem {
+            id: "z-ai/glm-5.3-flash".to_string(),
+            name: "GLM 5.3 Flash".to_string(),
+            provider: "Zhipu AI".to_string(),
+            description: "Latest natively multimodal model in the GLM-5 series (Default)".to_string(),
+            context_window: Some("1M".to_string()),
+            tag: Some("Default".to_string()),
+            tier: "free".to_string(),
+        },
+        ClineCliModelItem {
+            id: "deepseek/deepseek-v4-flash".to_string(),
+            name: "DeepSeek V4 Flash".to_string(),
+            provider: "DeepSeek".to_string(),
+            description: "Fast and efficient reasoning & code model with 1M context window".to_string(),
+            context_window: Some("1M".to_string()),
+            tag: Some("1M Context".to_string()),
+            tier: "free".to_string(),
+        },
+        ClineCliModelItem {
+            id: "poolside/laguna-s-2.1:free".to_string(),
+            name: "Laguna S 2.1".to_string(),
+            provider: "Poolside".to_string(),
+            description: "Free coding agent model from Poolside".to_string(),
+            context_window: None,
+            tag: Some("Agent".to_string()),
+            tier: "free".to_string(),
+        },
+        ClineCliModelItem {
+            id: "cline-free/solar-pro4".to_string(),
+            name: "Solar Pro 4".to_string(),
+            provider: "Upstage".to_string(),
+            description: "Strong model for office productivity, document-intensive work, and coding".to_string(),
+            context_window: None,
+            tag: None,
+            tier: "free".to_string(),
+        },
+        ClineCliModelItem {
+            id: "cline-free/longcat-2.0".to_string(),
+            name: "LongCat 2.0".to_string(),
+            provider: "Meituan".to_string(),
+            description: "A next-generation trillion-parameter model built for agentic coding".to_string(),
+            context_window: Some("1M".to_string()),
+            tag: None,
+            tier: "free".to_string(),
+        },
+        ClineCliModelItem {
+            id: "cline-free/muse-spark-1.3-contributor".to_string(),
+            name: "Muse Spark 1.3 Contributor".to_string(),
+            provider: "Meta".to_string(),
+            description: "Meta multimodal reasoning model for experimentation and coding".to_string(),
+            context_window: None,
+            tag: None,
+            tier: "free".to_string(),
+        },
+    ]
 }
 
 #[cfg(test)]

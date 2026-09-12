@@ -1,16 +1,15 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { createFileRoute, useSearch } from '@tanstack/react-router'
-import ChatInput from '@/containers/ChatInput'
+import { createFileRoute } from '@tanstack/react-router'
 import HeaderPage from '@/containers/HeaderPage'
-import { useTranslation } from '@/i18n/react-i18next-compat'
 import { useTools } from '@/hooks/useTools'
-import { cn } from '@/lib/utils'
-
 import { useModelProvider } from '@/hooks/useModelProvider'
 import SetupScreen from '@/containers/SetupScreen'
 import { route } from '@/constants/routes'
 import { predefinedProviders } from '@/constants/providers'
 import { localStorageKey } from '@/constants/localStorage'
+import { useEffect, useState } from 'react'
+import { useThreads } from '@/hooks/useThreads'
+import { CodingAgentPanel } from '@/containers/CodingAgentPanel'
 
 type ThreadModel = {
   id: string
@@ -21,13 +20,6 @@ type SearchParams = {
   threadModel?: ThreadModel
   newChatId?: string
 }
-import { useEffect, useState } from 'react'
-import { useThreads } from '@/hooks/useThreads'
-import DropdownModelProvider from '@/containers/DropdownModelProvider'
-import { useCodeModeStore, type AppMode } from '@/stores/code-mode-store'
-import { CodeModePanel } from '@/containers/CodeModePanel'
-import { CodingAgentPanel } from '@/containers/CodingAgentPanel'
-import { invoke } from '@tauri-apps/api/core'
 
 export const Route = createFileRoute(route.home as any)({
   component: Index,
@@ -41,62 +33,9 @@ export const Route = createFileRoute(route.home as any)({
   },
 })
 
-function ModeToggle() {
-  const { t } = useTranslation()
-  const modes: { key: AppMode; label: string }[] = [
-    { key: 'chat', label: t('code-mode:chatMode') },
-    { key: 'plan', label: t('code-mode:planMode') },
-    { key: 'coding', label: 'Code Agent' },
-  ]
-
-  const mode = useCodeModeStore((s) => s.mode)
-  const setMode = useCodeModeStore((s) => s.setMode)
-  const setAgentRunning = useCodeModeStore((s) => s.setAgentRunning)
-  const clearOutput = useCodeModeStore((s) => s.clearOutput)
-
-  const handleModeChange = async (newMode: AppMode) => {
-    // If switching away from agent modes, stop the agent
-    if ((mode === 'plan' || mode === 'coding') && newMode === 'chat') {
-      try {
-        await invoke('stop_code_agent')
-      } catch (err) {
-        console.log('No agent to stop or error stopping:', err)
-      }
-      setAgentRunning(false)
-      clearOutput()
-    }
-    setMode(newMode)
-  }
-
-  return (
-    <div className="relative z-50 flex items-center gap-0.5 rounded-full bg-muted p-0.5 shrink-0">
-      {modes.map(({ key, label }) => (
-        <button
-          type="button"
-          key={key}
-          className={cn(
-            'rounded-full px-3.5 py-1 text-xs font-medium transition-colors cursor-pointer',
-            mode === key
-              ? 'bg-background text-foreground shadow-sm'
-              : 'text-muted-foreground hover:text-foreground'
-          )}
-          onClick={() => handleModeChange(key)}
-        >
-          {label}
-        </button>
-      ))}
-    </div>
-  )
-}
-
 function Index() {
-  const { t } = useTranslation()
   const { providers } = useModelProvider()
-  const search = useSearch({ from: route.home as any })
-  const threadModel = search.threadModel
-  const newChatId = search.newChatId
   const { setCurrentThreadId } = useThreads()
-  const mode = useCodeModeStore((s) => s.mode)
   useTools()
 
   //* После Skip без перемонтирования роутера — поднимаем флаг, иначе ре-рендер не гарантирован
@@ -141,48 +80,13 @@ function Index() {
   }
 
   return (
-    <div className={cn('flex h-full flex-col', mode === 'chat' && 'justify-center', mode === 'coding' && 'overflow-hidden')}>
+    <div className="flex h-full flex-col overflow-hidden">
       <HeaderPage>
         <div className="flex items-center gap-2">
-          {mode === 'chat' && <DropdownModelProvider model={threadModel} />}
-          <ModeToggle />
+          <span className="font-semibold text-sm">Code Agent</span>
         </div>
       </HeaderPage>
-      {mode === 'chat' ? (
-        <div
-          className={cn(
-            'h-full overflow-y-auto inline-flex flex-col gap-2 justify-center px-3'
-          )}
-        >
-          <div
-            className={cn(
-              'mx-auto w-full md:w-4/5 xl:w-4/6 -mt-20',
-            )}
-          >
-            <div className={cn('text-center mb-4')}>
-              <h1
-                className={cn(
-                  'text-2xl mt-2 font-studio font-medium',
-                )}
-              >
-                {t('chat:description')}
-              </h1>
-            </div>
-            <div className="flex-1 shrink-0">
-              <ChatInput
-                key={newChatId ?? 'new-chat'}
-                showSpeedToken={false}
-                model={threadModel}
-                initialMessage={true}
-              />
-            </div>
-          </div>
-        </div>
-      ) : mode === 'coding' ? (
-        <CodingAgentPanel />
-      ) : (
-        <CodeModePanel />
-      )}
+      <CodingAgentPanel />
     </div>
   )
 }
