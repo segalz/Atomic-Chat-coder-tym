@@ -129,6 +129,21 @@
   white-space: nowrap;
 }
 
+.provider-model-picker__select {
+  width: 100%;
+  color: var(--foreground);
+}
+
+.provider-model-picker__select:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+
+.provider-model-picker__select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .provider-model-picker__model-desc {
   font-size: 10px;
   color: var(--muted-foreground);

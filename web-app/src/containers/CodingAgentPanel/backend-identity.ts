@@ -116,6 +116,100 @@ export function persistCodingAgentBackend(backend: CodingAgentBackend): void {
   }
 }
 
+/**
+ * Free models available through the Cline Free catalog.
+ * Rendered as a selectable dropdown in the Cline ACP backend section
+ * of the ProviderModelPicker.
+ */
+export interface ClineFreeModel {
+  id: string
+  name: string
+  provider: string
+  description: string
+  contextWindow?: string
+  tag?: string
+}
+
+export const CLINE_FREE_MODELS: ClineFreeModel[] = [
+  {
+    id: 'z-ai/glm-5.3-flash',
+    name: 'GLM 5.3 Flash',
+    provider: 'Zhipu AI',
+    description: 'Latest natively multimodal model in the GLM-5 series (Default)',
+    tag: 'Default',
+  },
+  {
+    id: 'deepseek/deepseek-v4-flash',
+    name: 'DeepSeek V4 Flash',
+    provider: 'DeepSeek',
+    description: 'Fast and efficient reasoning & code model with 1M context window',
+    contextWindow: '1M',
+    tag: '1M Context',
+  },
+  {
+    id: 'cline-free/longcat-2.0',
+    name: 'LongCat 2.0',
+    provider: 'Cline Free',
+    description: 'Trillion-parameter model built for agentic coding with 1M context window',
+    contextWindow: '1M',
+    tag: '1M Context',
+  },
+  {
+    id: 'cline-free/solar-pro4',
+    name: 'Solar Pro 4',
+    provider: 'Cline Free',
+    description: 'Strong model for office productivity, documents, and coding',
+    tag: 'Coding',
+  },
+  {
+    id: 'cline-free/muse-spark-1.3-contributor',
+    name: 'Muse Spark 1.3',
+    provider: 'Meta / Contributor',
+    description: 'Multimodal reasoning model for agentic workflows & experimentation',
+    tag: 'Multimodal',
+  },
+  {
+    id: 'poolside/laguna-s-2.1:free',
+    name: 'Laguna S 2.1',
+    provider: 'Poolside',
+    description: 'Latest coding agent model from Poolside',
+    tag: 'Agent',
+  },
+]
+
+export const CODING_AGENT_CLINE_MODEL_STORAGE_KEY = 'coding-agent-cline-model'
+
+/**
+ * Persists the selected Cline free model to localStorage so it survives page reloads.
+ * Safe to call in non-browser environments; storage errors are ignored.
+ */
+export function persistSelectedClineModel(model: string): void {
+  if (typeof window === 'undefined') return
+
+  try {
+    window.localStorage.setItem(CODING_AGENT_CLINE_MODEL_STORAGE_KEY, model)
+  } catch {
+    // Ignore storage failures (quota, private mode, etc.).
+  }
+}
+
+/**
+ * Resolves the selected Cline free model from localStorage, falling back to
+ * the provided fallback (or the Cline default model id) when nothing valid
+ * is stored.
+ */
+export function resolveSelectedClineModel(fallback?: string): string {
+  if (typeof window !== 'undefined') {
+    try {
+      const stored = window.localStorage.getItem(CODING_AGENT_CLINE_MODEL_STORAGE_KEY)
+      if (stored && stored.trim().length > 0) return stored
+    } catch {
+      // Ignore storage failures and keep the fallback.
+    }
+  }
+
+  return fallback || CLINE_DEFAULT_MODEL_ID
+}
 
 export function getBackendCapabilities(backend: CodingAgentBackend): BackendCapabilities {
   return BACKEND_CAPABILITIES[backend] ?? BACKEND_CAPABILITIES[DEFAULT_CODING_AGENT_BACKEND]

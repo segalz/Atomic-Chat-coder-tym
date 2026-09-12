@@ -78,6 +78,7 @@ import {
   routeStopAgent,
   type ActiveRun,
 } from './backend-router'
+import { persistSelectedClineModel, resolveSelectedClineModel } from './backend-identity'
 import { CodeModelSelector } from './CodeModelSelector'
 import { ProviderModelPicker } from './ProviderModelPicker'
 import { PermissionRequest } from './PermissionRequest'
@@ -499,6 +500,7 @@ export function CodingAgentPanel() {
   const [selectedCodeModel, setSelectedCodeModel] = useState(() => getStoredCodeModel() ?? '')
   const [modelCapabilities, setModelCapabilities] = useState<ModelCapabilitiesByName>({})
   const [agentBackend, setAgentBackend] = useState<CodingAgentBackend>(() => getInitialCodingAgentBackend())
+  const [selectedClineModel, setSelectedClineModel] = useState(() => resolveSelectedClineModel())
   const [pendingPermission, setPendingPermission] = useState<AcpPermissionRequestPayload | null>(null)
   const pendingPermissionRef = useRef<AcpPermissionRequestPayload | null>(null)
   pendingPermissionRef.current = pendingPermission
@@ -537,6 +539,11 @@ export function CodingAgentPanel() {
       setSelectedCodeModel(CLINE_DEFAULT_MODEL_ID)
       persistSelectedCodeModel(CLINE_DEFAULT_MODEL_ID)
     }
+  }, [])
+
+  const handleClineModelChange = useCallback((model: string) => {
+    setSelectedClineModel(model)
+    persistSelectedClineModel(model)
   }, [])
 
   // ── Pre-flight Ollama check ───────────────────────────────
@@ -1030,7 +1037,7 @@ export function CodingAgentPanel() {
         console.warn('Failed to refresh Ollama models before Code Agent run:', err)
       }
     } else if (agentBackend === 'cline-acp') {
-      model = selectedCodeModel || 'zai/glm-5.3-flash'
+      model = selectedClineModel || CLINE_DEFAULT_MODEL_ID
     }
     const promptForAgent = buildCodingAgentPrompt({
       prompt,
@@ -1175,7 +1182,7 @@ export function CodingAgentPanel() {
       setAgentStatus('idle')
       return false
     }
-  }, [projectDir, selectedCodeModel, agentConfig, agentBackend, activeRun, autoApproveTools, setRunning, appendLog, startNewSession, continueSession, clearPendingDiffs, loopEnabled, clearLoopSchedule])
+  }, [projectDir, selectedCodeModel, selectedClineModel, agentConfig, agentBackend, activeRun, autoApproveTools, setRunning, appendLog, startNewSession, continueSession, clearPendingDiffs, loopEnabled, clearLoopSchedule])
 
   const sendPromptRef = useRef(sendPrompt)
 
@@ -1412,8 +1419,14 @@ export function CodingAgentPanel() {
         <ProviderModelPicker
           backend={agentBackend}
           onBackendChange={handleBackendChange}
-          selectedModel={selectedCodeModel}
-          onModelChange={handleCodeModelChange}
+          selectedModel={agentBackend === 'cline-acp' ? selectedClineModel : selectedCodeModel}
+          onModelChange={(model) => {
+            if (agentBackend === 'cline-acp') {
+              handleClineModelChange(model)
+            } else {
+              handleCodeModelChange(model)
+            }
+          }}
           disabled={isRunning}
         >
           {isOllamaHealthCheckRequired(agentBackend) && (

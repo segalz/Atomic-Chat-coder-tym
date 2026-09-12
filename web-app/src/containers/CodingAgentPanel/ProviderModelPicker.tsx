@@ -1,11 +1,12 @@
 import { useState, useEffect, useCallback } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import { IconRefresh, IconCheck, IconCpu, IconSparkles } from '@tabler/icons-react'
+import { IconRefresh, IconCpu, IconSparkles } from '@tabler/icons-react'
 import {
   CodingAgentBackend,
   CLINE_ACP_BACKEND,
   CLINE_DEFAULT_MODEL_ID,
-  CLINE_DEFAULT_MODEL_DISPLAY_NAME,
+  CLINE_FREE_MODELS,
+  type ClineFreeModel,
   getBackendCapabilities,
   persistCodingAgentBackend,
 } from './backend-identity'
@@ -64,6 +65,11 @@ export function ProviderModelPicker({
 
   const capabilities = getBackendCapabilities(CLINE_ACP_BACKEND)
 
+  // Resolve the active free model; fall back to the first catalog entry when
+  // the currently selected model id is not part of the free catalog.
+  const activeModel: ClineFreeModel =
+    CLINE_FREE_MODELS.find((m) => m.id === selectedModel) ?? CLINE_FREE_MODELS[0]
+
   return (
     <div className="provider-model-picker">
       <div className="provider-model-picker__title">Backend Provider</div>
@@ -119,13 +125,20 @@ export function ProviderModelPicker({
             </div>
 
             <div className="provider-model-picker__model-box">
-              <div className="provider-model-picker__model-name">
-                {CLINE_DEFAULT_MODEL_DISPLAY_NAME} ({CLINE_DEFAULT_MODEL_ID})
-                {selectedModel === CLINE_DEFAULT_MODEL_ID ? (
-                  <IconCheck size={12} stroke={2} style={{ marginLeft: 4, verticalAlign: '-2px' }} />
-                ) : null}
-              </div>
-              <div className="provider-model-picker__model-desc">Zhipu AI via local Cline ACP</div>
+              <select
+                className="provider-model-picker__select w-full rounded-md border border-input bg-background px-2.5 py-1.5 text-xs font-medium shadow-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                value={activeModel.id}
+                aria-label="Cline free model"
+                disabled={disabled}
+                onChange={(e) => onModelChange(e.target.value)}
+              >
+                {CLINE_FREE_MODELS.map((m: ClineFreeModel) => (
+                  <option key={m.id} value={m.id}>
+                    {`${m.name} (${m.provider})${m.tag ? ' • ' + m.tag : ''}`}
+                  </option>
+                ))}
+              </select>
+              <div className="provider-model-picker__model-desc">{activeModel.description}</div>
               <div className="provider-model-picker__capabilities">
                 {capabilities.tools ? (
                   <span className="provider-model-picker__capability">

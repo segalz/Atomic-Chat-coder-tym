@@ -8,6 +8,7 @@ import {
 import {
   CODING_AGENT_BACKEND_STORAGE_KEY,
   CLINE_DEFAULT_MODEL_ID,
+  CLINE_FREE_MODELS,
 } from './backend-identity'
 
 vi.mock('@tauri-apps/api/core', () => ({
@@ -148,21 +149,27 @@ describe('ProviderModelPicker (Stage 10)', () => {
     })
   })
 
-  it('displays model info and capability badges without fake pricing or fake downloads', async () => {
+  it('renders the cline free models dropdown and active model description without fake pricing or fake downloads', async () => {
     await act(async () => {
       render(
         <ProviderModelPicker
           backend="cline-acp"
           onBackendChange={vi.fn()}
-          selectedModel={CLINE_DEFAULT_MODEL_ID}
+          selectedModel={CLINE_FREE_MODELS[0].id}
           onModelChange={vi.fn()}
         />
       )
     })
 
-    expect(screen.getByText(/GLM 5\.3 Flash/)).toBeInTheDocument()
-    expect(screen.getByText(/zai\/glm-5\.3-flash/)).toBeInTheDocument()
-    expect(screen.getByText('Zhipu AI via local Cline ACP')).toBeInTheDocument()
+    const select = screen.getByRole('combobox', { name: 'Cline free model' })
+    expect(select).toBeInTheDocument()
+
+    for (const model of CLINE_FREE_MODELS) {
+      const label = `${model.name} (${model.provider})${model.tag ? ' • ' + model.tag : ''}`
+      expect(screen.getByRole('option', { name: label })).toBeInTheDocument()
+    }
+
+    expect(screen.getByText(CLINE_FREE_MODELS[0].description)).toBeInTheDocument()
 
     // Capability badges
     expect(screen.getByText('Tools')).toBeInTheDocument()
@@ -174,6 +181,28 @@ describe('ProviderModelPicker (Stage 10)', () => {
     expect(screen.queryByText(/token/i)).not.toBeInTheDocument()
     expect(screen.queryByText(/price|pricing|\$/i)).not.toBeInTheDocument()
     expect(screen.queryByText(/pull model|download model/i)).not.toBeInTheDocument()
+  })
+
+  it('emits the selected model id when a free model is picked from the dropdown', async () => {
+    const onModelChange = vi.fn()
+
+    await act(async () => {
+      render(
+        <ProviderModelPicker
+          backend="cline-acp"
+          onBackendChange={vi.fn()}
+          selectedModel={CLINE_FREE_MODELS[0].id}
+          onModelChange={onModelChange}
+        />
+      )
+    })
+
+    const select = screen.getByRole('combobox', { name: 'Cline free model' })
+    await act(async () => {
+      fireEvent.change(select, { target: { value: CLINE_FREE_MODELS[1].id } })
+    })
+
+    expect(onModelChange).toHaveBeenCalledWith(CLINE_FREE_MODELS[1].id)
   })
 
   it('re-probes host status when refresh button is clicked', async () => {
@@ -216,5 +245,6 @@ describe('ProviderModelPicker (Stage 10)', () => {
     expect(screen.getByRole('tab', { name: 'Ollama' })).toBeDisabled()
     expect(screen.getByRole('tab', { name: 'Cline ACP' })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Refresh Cline CLI status' })).toBeDisabled()
+    expect(screen.getByRole('combobox', { name: 'Cline free model' })).toBeDisabled()
   })
 })
