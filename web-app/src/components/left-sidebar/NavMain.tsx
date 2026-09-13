@@ -39,7 +39,7 @@ export function NavMain() {
       >
         <div className="flex items-center gap-2">
           <Plus className="w-3.5 h-3.5" />
-          <span>New Chat</span>
+          <span>New Work Thread</span>
         </div>
         <kbd className="text-[10px] bg-black/25 px-1.5 py-0.5 rounded font-mono text-sky-100 group-hover:bg-black/40">
           Ctrl N

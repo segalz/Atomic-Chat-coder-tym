@@ -37,6 +37,22 @@ export type SessionIdentityPatch = Partial<
   Pick<CodingSession, 'backend' | 'providerId' | 'modelId' | 'externalSessionId' | 'status' | 'interruptedReason'>
 >
 
+export interface WorkState {
+  goal?: string
+  status?: string
+  keyContext?: string
+  openQuestions?: string
+  nextStep?: string
+}
+
+export interface AIPathStep {
+  modelId: string
+  displayName: string
+  provider?: string
+  backend?: CodingAgentBackend
+  timestamp: number
+}
+
 export interface CodingSession {
   id: string
   threadId?: string
@@ -55,6 +71,8 @@ export interface CodingSession {
   externalSessionId?: string
   status?: SessionStatus
   interruptedReason?: string
+  workState?: WorkState
+  aiPath?: AIPathStep[]
 }
 
 interface CodingAgentState {
@@ -124,6 +142,8 @@ interface CodingAgentState {
   /** Delete all sessions from history */
   deleteAllSessions: () => void
   clearSession: () => void
+  updateWorkState: (sessionId: string, patch: Partial<WorkState>) => void
+  addAIPathStep: (sessionId: string, step: AIPathStep) => void
 }
 
 function normalizeExecLog(value: unknown): ExecLogLine[] {
@@ -420,6 +440,21 @@ export const useCodingAgentStore = create<CodingAgentState>()(
           planText: '',
           execLog: [],
           pendingDiffs: [],
+          workState: {
+            goal: prompt.trim() || undefined,
+            status: 'In Progress',
+          },
+          aiPath: identity.modelId
+            ? [
+                {
+                  modelId: identity.modelId,
+                  displayName: identity.modelId.split('/').pop() || identity.modelId,
+                  backend: identity.backend,
+                  provider: identity.providerId,
+                  timestamp: Date.now(),
+                },
+              ]
+            : [],
           timestamp: Date.now(),
         })
 
@@ -594,6 +629,24 @@ export const useCodingAgentStore = create<CodingAgentState>()(
           activeSessionId: null,
           draftPrompt: '',
         }),
+
+      updateWorkState: (sessionId, patch) =>
+        set((s) => ({
+          sessions: s.sessions.map((sess) =>
+            sess.id === sessionId
+              ? { ...sess, workState: { ...sess.workState, ...patch } }
+              : sess
+          ),
+        })),
+
+      addAIPathStep: (sessionId, step) =>
+        set((s) => ({
+          sessions: s.sessions.map((sess) =>
+            sess.id === sessionId
+              ? { ...sess, aiPath: [...(sess.aiPath ?? []), step] }
+              : sess
+          ),
+        })),
     }),
     {
       name: 'coding-agent-store',

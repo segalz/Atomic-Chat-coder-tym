@@ -63,8 +63,8 @@ export function ContextBudgetIndicator({
         />
       </div>
       <div className="context-budget-indicator__text flex items-center gap-2">
-        <span className="context-budget-indicator__value text-slate-300 font-semibold text-xs">
-          Context <span className="text-sky-400">{budget.percent}%</span>
+        <span className="context-budget-indicator__value text-slate-300 font-semibold text-xs" title="Current AI token budget (Work State continuity is preserved separately across AI switches)">
+          Model Context <span className="text-sky-400">{budget.percent}%</span>
         </span>
         <span className="text-slate-500 font-mono text-[11px]">
           ~{budget.estimatedTokens.toLocaleString()} tokens

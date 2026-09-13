@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
-import { useCodingAgentStore, type CodingSessionSource, type ExecLogLine } from '@/stores/coding-agent-store'
+import { useCodingAgentStore, type CodingSessionSource, type ExecLogLine, type WorkState } from '@/stores/coding-agent-store'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import {
@@ -16,19 +16,17 @@ import {
   IconFolderOpen,
   IconPlayerStop,
   IconArrowUp,
-  IconTrash,
   IconLoader2,
   IconAlertCircle,
   IconRefresh,
-  IconTerminal2,
   IconFileCode,
   IconCpu,
   IconCloudDownload,
   IconCircleCheck,
   IconClock,
   IconPencil,
-  IconCopy,
   IconPaperclip,
+  IconArrowsExchange,
 } from '@tabler/icons-react'
 
 import { StickToBottom } from 'use-stick-to-bottom'
@@ -91,10 +89,12 @@ import {
   fetchClineCliModels,
   type ClineFreeModel,
 } from './backend-identity'
-import { PanelLeft, PanelRight } from 'lucide-react'
 import { useSidebarSafe } from '@/components/ui/sidebar'
 import { CodeModelSelector } from './CodeModelSelector'
 import { ProviderModelPicker } from './ProviderModelPicker'
+import { WorkStateCard } from './WorkStateCard'
+import { WorkThreadHeader } from './WorkThreadHeader'
+import { SwitchAiDialog } from './SwitchAiDialog'
 
 import { PermissionRequest } from './PermissionRequest'
 import './ConversationSummary.css'
@@ -435,6 +435,16 @@ export function CodingAgentPanel() {
   const autoApproveTools = useCodingAgentStore((s) => s.autoApproveTools)
   const setAutoApproveTools = useCodingAgentStore((s) => s.setAutoApproveTools)
 
+  const currentSession = sessions.find((s) => s.id === activeSessionId)
+  const currentWorkState = currentSession?.workState
+  const handleUpdateWorkState = useCallback(
+    (patch: Partial<WorkState>) => {
+      if (!activeSessionId) return
+      useCodingAgentStore.getState().updateWorkState(activeSessionId, patch)
+    },
+    [activeSessionId]
+  )
+
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const completionHandledRef = useRef(false)
   const [ollamaError, setOllamaError] = useState<string | null>(null)
@@ -525,6 +535,46 @@ export function CodingAgentPanel() {
   const toggleRightPanel = useCodingAgentStore((s) => s.toggleRightPanel)
   const [clineModels, setClineModels] = useState<ClineFreeModel[]>(() => getCachedClineModels())
   const [ollamaInstalledModels, setOllamaInstalledModels] = useState<string[]>([])
+
+  const [switchAiDialogOpen, setSwitchAiDialogOpen] = useState(false)
+
+  const handleSelectSwitchAi = useCallback(
+    (modelId: string, backend: CodingAgentBackend, displayName: string, provider?: string) => {
+      if (backend !== agentBackend) {
+        setAgentBackend(backend)
+        persistCodingAgentBackend(backend)
+      }
+      if (backend === 'cline-acp') {
+        setSelectedClineModel(modelId)
+        persistSelectedClineModel(modelId)
+      } else {
+        setSelectedCodeModel(modelId)
+        persistSelectedCodeModel(modelId)
+      }
+
+      if (activeSessionId) {
+        useCodingAgentStore.getState().setSessionIdentity(activeSessionId, {
+          backend,
+          modelId,
+          providerId: provider,
+        })
+        useCodingAgentStore.getState().addAIPathStep(activeSessionId, {
+          modelId,
+          displayName,
+          provider,
+          backend,
+          timestamp: Date.now(),
+        })
+      }
+
+      appendLog({
+        type: 'text_delta',
+        content: `Switched active AI to ${displayName} (${backend === 'cline-acp' ? 'Cline ACP' : 'Ollama'}). Continuity preserved in this Work Thread.`,
+        timestamp: Date.now(),
+      })
+    },
+    [activeSessionId, agentBackend, appendLog]
+  )
 
   useEffect(() => {
     if (agentBackend === 'cline-acp') {
@@ -1564,117 +1614,45 @@ export function CodingAgentPanel() {
           </div>
         )}
 
-        {/* Top Interactive Bar: LOG status, Memory Free, Clear, LSP Tools */}
-        <div className="h-10 border-b border-[#1b212f] bg-[#0c1017]/90 px-4 flex items-center justify-between shrink-0">
-          <div className="flex items-center gap-3">
-            {sidebar && !sidebar.open && (
-              <button
-                type="button"
-                onClick={() => sidebar.toggleSidebar()}
-                className="flex items-center gap-1.5 text-[11px] text-slate-400 hover:text-sky-300 hover:bg-[#161c27] px-2 py-1 rounded border border-[#232a39] transition-colors cursor-pointer mr-0.5"
-                title="Expand Left Sidebar (Ctrl+B)"
-              >
-                <PanelLeft className="w-3.5 h-3.5 text-sky-400" />
-                <span className="font-sans">Sidebar</span>
-              </button>
-            )}
-            <div className="flex items-center gap-1.5 font-mono text-xs font-semibold text-slate-200">
-              <IconTerminal2 className="w-3.5 h-3.5 text-sky-400" />
-              LOG
-            </div>
-            <span className="text-slate-600">•</span>
-            <div className="flex items-center gap-1.5 text-xs font-mono">
-              <span className={`w-2 h-2 rounded-full ${isRunning ? 'bg-emerald-400 animate-pulse' : agentStatus === 'free' ? 'bg-emerald-400' : 'bg-rose-500'}`} />
-              <span className={agentStatus === 'free' || isRunning ? 'text-emerald-400' : 'text-slate-400'}>
-                {agentStatus === 'running' ? 'running' : agentStatus === 'restarting' ? 'restarting' : 'memory free'}
-              </span>
-            </div>
-            {loopEnabled && (
-              <span className="flex items-center gap-1 ml-2 text-xs font-mono text-sky-400">
-                <span>
-                  {loopCount}/{loopTimes}
-                  {loopCountdown !== null && ` · ${Math.floor(loopCountdown / 60)}:${String(loopCountdown % 60).padStart(2, '0')}`}
-                </span>
-                <button
-                  type="button"
-                  className="text-destructive hover:text-destructive/80 ml-1 cursor-pointer"
-                  title="Stop loop"
-                  onClick={() => {
-                    clearTimeout(loopTimerRef.current!)
-                    clearInterval(loopTickRef.current!)
-                    setLoopEnabled(false)
-                    setLoopCount(0)
-                    setLoopPrompt('')
-                    setLoopCountdown(null)
-                    setLoopTimes(3)
-                    setLoopInterval(5)
-                    stopSelectedBackend().catch(() => {})
-                    setRunning(false)
-                    setActiveRun(null)
-                    setAgentStatus('free')
-                    setPendingPermission(null)
-                    setLastFailureMessage(null)
-                  }}
-                >
-                  <IconPlayerStop size={11} />
-                </button>
-              </span>
-            )}
-          </div>
-
-          <div className="flex items-center gap-3">
-            {!isRunning && isOllamaHealthCheckRequired(agentBackend) && (
-              <Button
-                size="sm" variant="ghost"
-                className="h-6 text-xs gap-1 text-slate-400 hover:text-slate-200"
-                onClick={restartOllama}
-                disabled={isRestartingOllama}
-                title="Restart Ollama to free memory"
-              >
-                <IconRefresh size={12} className={isRestartingOllama ? 'animate-spin' : ''} />
-                {isRestartingOllama ? 'Restarting…' : 'Restart'}
-              </Button>
-            )}
-            {execLog.length > 0 && (
-              <button
-                type="button"
-                onClick={() => {
-                  useCodingAgentStore.getState().clearSession()
-                  setActiveRun(null)
-                  setRunning(false)
-                  setAgentStatus('free')
-                  setPendingPermission(null)
-                }}
-                className="flex items-center gap-1 text-xs text-slate-400 hover:text-slate-200 px-2 py-1 hover:bg-[#161c27] rounded transition-colors cursor-pointer"
-              >
-                <IconTrash className="w-3.5 h-3.5" />
-                Clear
-              </button>
-            )}
-            {execLog.length > 0 && (
-              <button
-                type="button"
-                onClick={handleCopyLog}
-                className="p-1 text-slate-400 hover:text-slate-200 hover:bg-[#161c27] rounded cursor-pointer"
-                title="Copy Log"
-              >
-                <IconCopy className="w-3.5 h-3.5" />
-              </button>
-            )}
-            <button
-              type="button"
-              onClick={toggleRightPanel}
-              className={`p-1 rounded transition-colors cursor-pointer ml-1 ${
-                isRightPanelOpen
-                  ? 'text-sky-400 hover:bg-sky-950/40'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-[#161c27]'
-              }`}
-              title={isRightPanelOpen ? 'Hide Right Inspector Panel' : 'Show Right Inspector Panel'}
-            >
-              <PanelRight className="w-3.5 h-3.5" />
-            </button>
-          </div>
-        </div>
+        {/* Work Thread Header: Title, Status, AI Path, Switch AI & Progressive Diagnostics */}
+        <WorkThreadHeader
+          title={currentSession?.prompt?.trim() || currentWorkState?.goal || 'New Work Thread'}
+          status={agentStatus}
+          activeAiName={
+            agentBackend === 'cline-acp'
+              ? (clineModels.find((m) => m.id === selectedClineModel)?.name || selectedClineModel)
+              : selectedCodeModel
+          }
+          connectionMethod={agentBackend === 'cline-acp' ? 'Cline ACP' : 'Direct Ollama'}
+          aiPath={currentSession?.aiPath}
+          isRunning={isRunning}
+          loopInfo={
+            loopEnabled
+              ? `${loopCount}/${loopTimes}${
+                  loopCountdown !== null
+                    ? ` · ${Math.floor(loopCountdown / 60)}:${String(loopCountdown % 60).padStart(2, '0')}`
+                    : ''
+                }`
+              : undefined
+          }
+          isSidebarOpen={sidebar?.open ?? true}
+          onToggleSidebar={sidebar ? () => sidebar.toggleSidebar() : undefined}
+          isRightPanelOpen={isRightPanelOpen}
+          onToggleRightPanel={toggleRightPanel}
+          onOpenSwitchAi={() => setSwitchAiDialogOpen(true)}
+          onClearSession={() => {
+            useCodingAgentStore.getState().clearSession()
+            setActiveRun(null)
+            setRunning(false)
+            setAgentStatus('free')
+            setPendingPermission(null)
+          }}
+          onCopyLog={handleCopyLog}
+          hasLogs={execLog.length > 0}
+          showOllamaRestart={!isRunning && isOllamaHealthCheckRequired(agentBackend)}
+          isRestartingOllama={isRestartingOllama}
+          onRestartOllama={restartOllama}
+        />
 
         {lastFailureMessage && !isRunning && (
           <div className="bg-destructive/10 border-b border-destructive/20 px-4 py-2 flex items-center gap-2 shrink-0">
@@ -1906,6 +1884,37 @@ export function CodingAgentPanel() {
       {isRightPanelOpen && (
         <aside className="w-72 shrink-0 border-l border-[#1a202c] bg-[#10141d] flex flex-col justify-between p-3 select-none text-xs overflow-y-auto">
           <div className="space-y-4">
+            <WorkStateCard
+              workState={currentWorkState}
+              onUpdateWorkState={handleUpdateWorkState}
+              disabled={isRunning}
+            />
+
+            {/* Active AI & Switch AI Card */}
+            <div className="rounded-xl border border-sky-500/20 bg-[#141a27] p-3 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-bold tracking-wider uppercase text-sky-400">Active AI</span>
+                <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-sky-950/80 border border-sky-800/40 text-sky-300">
+                  {agentBackend === 'cline-acp' ? 'Cline ACP' : 'Direct Ollama'}
+                </span>
+              </div>
+              <div className="font-mono text-xs font-semibold text-slate-100 truncate">
+                {agentBackend === 'cline-acp'
+                  ? (clineModels.find((m) => m.id === selectedClineModel)?.name || selectedClineModel)
+                  : selectedCodeModel}
+              </div>
+              <Button
+                type="button"
+                size="sm"
+                onClick={() => setSwitchAiDialogOpen(true)}
+                disabled={isRunning}
+                className="w-full h-7 text-xs bg-sky-500 hover:bg-sky-400 text-white gap-1.5 font-medium shadow-xs mt-1"
+              >
+                <IconArrowsExchange size={14} />
+                <span>Switch AI / Continue Task</span>
+              </Button>
+            </div>
+
             {/* Workspace Directory */}
             <div>
               <label className="block text-[10px] font-semibold uppercase tracking-wider text-slate-500 mb-1.5">
@@ -2045,6 +2054,17 @@ export function CodingAgentPanel() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <SwitchAiDialog
+        open={switchAiDialogOpen}
+        onOpenChange={setSwitchAiDialogOpen}
+        currentModelId={agentBackend === 'cline-acp' ? selectedClineModel : selectedCodeModel}
+        currentBackend={agentBackend}
+        clineModels={clineModels}
+        ollamaModels={ollamaInstalledModels}
+        onSelectAi={handleSelectSwitchAi}
+        disabled={isRunning}
+      />
 
     </div>
   )
