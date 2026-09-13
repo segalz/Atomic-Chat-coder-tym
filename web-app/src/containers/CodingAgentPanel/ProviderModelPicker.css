@@ -1,9 +1,9 @@
 .provider-model-picker {
   display: grid;
   gap: 8px;
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--border);
-  background: var(--background);
+  padding: 0;
+  border: none;
+  background: transparent;
   color: var(--foreground);
 }
 

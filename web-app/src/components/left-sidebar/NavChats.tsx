@@ -23,6 +23,7 @@ import { route } from '@/constants/routes'
 import { useCodingAgentStore, type CodingSession } from '@/stores/coding-agent-store'
 import { useCodeModeStore } from '@/stores/code-mode-store'
 import { useThreads } from '@/hooks/useThreads'
+import { cn } from '@/lib/utils'
 import { RenameSessionDialog } from '@/containers/dialogs/RenameSessionDialog'
 import { DeleteSessionDialog } from '@/containers/dialogs/DeleteSessionDialog'
 import { DeleteAllSessionsDialog } from '@/containers/dialogs/DeleteAllSessionsDialog'
@@ -64,8 +65,13 @@ const SessionItem = memo(function SessionItem({
         isActive={isActive}
         onClick={handleSelect}
         title={session.prompt}
+        className={cn(
+          'transition-colors',
+          isActive && 'bg-[#18202d] text-white border-l-2 border-sky-400 font-medium'
+        )}
       >
-        <span className="truncate">{title}</span>
+        <bdi dir="auto" className="truncate flex-1 min-w-0">{title}</bdi>
+        {isActive && <span className="w-1.5 h-1.5 rounded-full bg-sky-400 shrink-0 ml-1.5" />}
       </SidebarMenuButton>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>

@@ -275,3 +275,14 @@
     text-align: left !important;
   }
 }
+
+.glow-cyan {
+  box-shadow: 0 0 16px -2px rgba(14, 165, 233, 0.35);
+}
+.glow-dot {
+  box-shadow: 0 0 8px 1px rgba(52, 211, 153, 0.6);
+}
+.mesh-gradient {
+  background: radial-gradient(circle at 10% 20%, rgba(14, 165, 233, 0.04) 0%, transparent 40%),
+              radial-gradient(circle at 90% 80%, rgba(56, 189, 248, 0.03) 0%, transparent 40%);
+}

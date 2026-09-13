@@ -1,6 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { createFileRoute } from '@tanstack/react-router'
-import HeaderPage from '@/containers/HeaderPage'
 import { useTools } from '@/hooks/useTools'
 import { useModelProvider } from '@/hooks/useModelProvider'
 import SetupScreen from '@/containers/SetupScreen'
@@ -81,11 +80,6 @@ function Index() {
 
   return (
     <div className="flex h-full flex-col overflow-hidden">
-      <HeaderPage>
-        <div className="flex items-center gap-2">
-          <span className="font-semibold text-sm">Code Agent</span>
-        </div>
-      </HeaderPage>
       <CodingAgentPanel />
     </div>
   )

@@ -27,7 +27,7 @@ import { GlobalEventHandler } from '@/providers/GlobalEventHandler'
 import { ServiceHubProvider } from '@/providers/ServiceHubProvider'
 import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar'
 import { LeftSidebar } from '@/components/left-sidebar'
-import { WindowControls } from '@/components/WindowControls'
+import { AppTitleBar } from '@/components/AppTitleBar'
 
 export const Route = createRootRoute({
   component: RootLayout,
@@ -44,31 +44,30 @@ const AppLayout = () => {
   } = useLeftPanel()
 
   return (
-    <div className="bg-neutral-50 dark:bg-background size-full relative">
-      <SidebarProvider
-        open={isLeftPanelOpen}
-        onOpenChange={setLeftPanel}
-        defaultWidth={sidebarWidth}
-        onWidthChange={setLeftPanelWidth}
-      >
-        <AnalyticProvider />
-        <KeyboardShortcutsProvider />
-        {/* Fake absolute panel top to enable window drag */}
-        {IS_WINDOWS && <WindowControls />}
-        {!IS_LINUX && <div className="fixed left-0 right-36 h-12 z-20 top-0" data-tauri-drag-region />}
-        <DialogAppUpdater />
-        <BackendUpdater />
-        <LeftSidebar />
-        <SidebarInset>
-          <div className="bg-neutral-50 dark:bg-background size-full">
-            <Outlet />
-          </div>
-        </SidebarInset>
+    <div className="bg-[#090b0e] text-[#cbd5e1] size-full h-screen w-screen overflow-hidden flex flex-col antialiased select-none">
+      <AppTitleBar />
+      <div className="flex-1 min-h-0 flex overflow-hidden relative">
+        <SidebarProvider
+          open={isLeftPanelOpen}
+          onOpenChange={setLeftPanel}
+          defaultWidth={sidebarWidth}
+          onWidthChange={setLeftPanelWidth}
+          className="min-h-0 h-full flex-1"
+        >
+          <AnalyticProvider />
+          <KeyboardShortcutsProvider />
+          <DialogAppUpdater />
+          <BackendUpdater />
+          <LeftSidebar />
+          <SidebarInset className="min-h-0 h-full overflow-hidden">
+            <div className="bg-neutral-50 dark:bg-background size-full overflow-hidden">
+              <Outlet />
+            </div>
+          </SidebarInset>
 
-        {/* Попап согласия на аналитику отключён; настройки → Privacy по-прежнему доступны */}
-        {/* {productAnalyticPrompt && <PromptAnalytic />} */}
-        {showJanModelPrompt && <PromptJanModel />}
-      </SidebarProvider>
+          {showJanModelPrompt && <PromptJanModel />}
+        </SidebarProvider>
+      </div>
     </div>
   )
 }

@@ -27,6 +27,8 @@ import {
   IconCircleCheck,
   IconClock,
   IconPencil,
+  IconCopy,
+  IconPaperclip,
 } from '@tabler/icons-react'
 
 import { StickToBottom } from 'use-stick-to-bottom'
@@ -1477,7 +1479,6 @@ export function CodingAgentPanel() {
     [handleSend]
   )
 
-  const folderName = projectDir ? projectDir.split('/').pop() : null
   const displayLog = useMemo(() => mergeStreamingLog(execLog), [execLog])
   const activeManualSession = useMemo(() => {
     const session = sessions.find((item) => item.id === activeSessionId)
@@ -1509,73 +1510,15 @@ export function CodingAgentPanel() {
     return draftPrompt.length + sessionChars
   }, [activeLoopSession, activeManualSession, draftPrompt, loopEnabled, loopPrompt])
 
-  return (
-    <div className="flex flex-1 min-h-0 h-full overflow-hidden">
-      {/* ── Left: Project picker ──────────────────────────── */}
-      <aside className="w-56 shrink-0 border-r flex flex-col bg-muted/20">
-        <div className="px-3 py-3 border-b">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleSelectFolder}
-            className="w-full justify-start gap-2 text-muted-foreground hover:text-foreground"
-          >
-            <IconFolderOpen size={15} />
-            <span className="truncate">{folderName ?? 'Select project'}</span>
-          </Button>
-          {projectDir && (
-            <p className="mt-1 text-[10px] text-muted-foreground/60 truncate px-0.5" title={projectDir}>
-              {projectDir}
-            </p>
-          )}
-        </div>
-        <ProviderModelPicker
-          backend={agentBackend}
-          onBackendChange={handleBackendChange}
-          selectedModel={agentBackend === 'cline-acp' ? selectedClineModel : selectedCodeModel}
-          onModelChange={(model) => {
-            if (agentBackend === 'cline-acp') {
-              handleClineModelChange(model)
-            } else {
-              handleCodeModelChange(model)
-            }
-          }}
-          disabled={isRunning}
-        >
-          {isOllamaHealthCheckRequired(agentBackend) && (
-            <HardwareSetup
-              ollamaUrl={agentConfig?.ollama_url ?? 'http://localhost:11434'}
-              selectedCodeModel={selectedCodeModel}
-              disabled={isRunning}
-              onCodeModelChange={handleCodeModelChange}
-            />
-          )}
-        </ProviderModelPicker>
-        {agentBackend === 'cline-acp' && (
-          <div className="flex items-center justify-between px-1 py-1 text-xs text-muted-foreground border-t border-border/40 mt-2 pt-2">
-            <span title="Automatically approve all tool permissions without asking">Auto-Approve Tools</span>
-            <Switch
-              checked={autoApproveTools}
-              onCheckedChange={setAutoApproveTools}
-              disabled={isRunning}
-            />
-          </div>
-        )}
-        <div className="flex-1 overflow-auto flex flex-col min-h-0">
-          <div className="flex-1 overflow-auto px-3 py-2">
-            {projectDir ? (
-              <ProjectFileTree projectDir={projectDir} />
-            ) : (
-              <p className="text-xs text-muted-foreground/50 text-center mt-8">
-                Select a project folder to begin
-              </p>
-            )}
-          </div>
-        </div>
-      </aside>
+  const handleCopyLog = useCallback(() => {
+    const text = execLog.map((l) => l.content).join('\n')
+    void navigator.clipboard.writeText(text)
+  }, [execLog])
 
-      {/* ── Main: Log + input ────────────────────────────── */}
-      <div className="flex-1 flex flex-col min-w-0">
+  return (
+    <div className="flex flex-1 min-h-0 h-full overflow-hidden bg-[#0a0d13]">
+      {/* ── Center Main Workbench ────────────────────────────── */}
+      <div className="flex-1 flex flex-col min-w-0 bg-[#0a0d13] overflow-hidden relative">
         {/* Ollama error banner */}
         {isSendBlockedByOllamaError(agentBackend, ollamaError) && ollamaError && (
           <div className="bg-destructive/10 border-b border-destructive/20 px-4 py-2 flex items-center gap-3 shrink-0">
@@ -1592,59 +1535,58 @@ export function CodingAgentPanel() {
           </div>
         )}
 
-        {/* Execution log — takes all available height */}
-        <div className="flex items-center gap-2 px-4 py-2 border-b shrink-0 bg-muted/10">
-          <IconTerminal2 size={14} className="text-muted-foreground" />
-          <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Log</span>
-          <span className={`w-2 h-2 rounded-full shrink-0 ${isRunning ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`} />
-          {agentStatus === 'running' && (
-            <span className="text-xs text-green-500 font-mono">running</span>
-          )}
-          {agentStatus === 'restarting' && (
-            <span className="text-xs text-yellow-500 font-mono animate-pulse">ollama restart</span>
-          )}
-          {agentStatus === 'free' && !isRunning && (
-            <span className="text-xs text-green-500 font-mono">memory free</span>
-          )}
-          {agentStatus === 'failed' && !isRunning && (
-            <span className="text-xs text-destructive font-mono">failed</span>
-          )}
-          {loopEnabled && (
-            <span className="flex items-center gap-1 ml-1">
-              <span className="text-xs text-blue-500 font-mono">
-                {loopCount}/{loopTimes}
-                {loopCountdown !== null && ` · ${Math.floor(loopCountdown / 60)}:${String(loopCountdown % 60).padStart(2, '0')}`}
+        {/* Top Interactive Bar: LOG status, Memory Free, Clear, LSP Tools */}
+        <div className="h-10 border-b border-[#1b212f] bg-[#0c1017]/90 px-4 flex items-center justify-between shrink-0">
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-1.5 font-mono text-xs font-semibold text-slate-200">
+              <IconTerminal2 className="w-3.5 h-3.5 text-sky-400" />
+              LOG
+            </div>
+            <span className="text-slate-600">•</span>
+            <div className="flex items-center gap-1.5 text-xs font-mono">
+              <span className={`w-2 h-2 rounded-full ${isRunning ? 'bg-emerald-400 animate-pulse' : agentStatus === 'free' ? 'bg-emerald-400' : 'bg-rose-500'}`} />
+              <span className={agentStatus === 'free' || isRunning ? 'text-emerald-400' : 'text-slate-400'}>
+                {agentStatus === 'running' ? 'running' : agentStatus === 'restarting' ? 'restarting' : 'memory free'}
               </span>
-              <button
-                type="button"
-                className="text-destructive hover:text-destructive/80 shrink-0"
-                title="Stop loop"
-                onClick={() => {
-                  clearTimeout(loopTimerRef.current!)
-                  clearInterval(loopTickRef.current!)
-                  setLoopEnabled(false)
-                  setLoopCount(0)
-                  setLoopPrompt('')
-                  setLoopCountdown(null)
-                  setLoopTimes(3)
-                  setLoopInterval(5)
-                  stopSelectedBackend().catch(() => {})
-                  setRunning(false)
-                  setActiveRun(null)
-                  setAgentStatus('free')
-                  setPendingPermission(null)
-                  setLastFailureMessage(null)
-                }}
-              >
-                <IconPlayerStop size={11} />
-              </button>
-            </span>
-          )}
-          <div className="ml-auto flex items-center gap-1">
+            </div>
+            {loopEnabled && (
+              <span className="flex items-center gap-1 ml-2 text-xs font-mono text-sky-400">
+                <span>
+                  {loopCount}/{loopTimes}
+                  {loopCountdown !== null && ` · ${Math.floor(loopCountdown / 60)}:${String(loopCountdown % 60).padStart(2, '0')}`}
+                </span>
+                <button
+                  type="button"
+                  className="text-destructive hover:text-destructive/80 ml-1 cursor-pointer"
+                  title="Stop loop"
+                  onClick={() => {
+                    clearTimeout(loopTimerRef.current!)
+                    clearInterval(loopTickRef.current!)
+                    setLoopEnabled(false)
+                    setLoopCount(0)
+                    setLoopPrompt('')
+                    setLoopCountdown(null)
+                    setLoopTimes(3)
+                    setLoopInterval(5)
+                    stopSelectedBackend().catch(() => {})
+                    setRunning(false)
+                    setActiveRun(null)
+                    setAgentStatus('free')
+                    setPendingPermission(null)
+                    setLastFailureMessage(null)
+                  }}
+                >
+                  <IconPlayerStop size={11} />
+                </button>
+              </span>
+            )}
+          </div>
+
+          <div className="flex items-center gap-3">
             {!isRunning && isOllamaHealthCheckRequired(agentBackend) && (
               <Button
                 size="sm" variant="ghost"
-                className="h-6 text-xs gap-1 text-muted-foreground"
+                className="h-6 text-xs gap-1 text-slate-400 hover:text-slate-200"
                 onClick={restartOllama}
                 disabled={isRestartingOllama}
                 title="Restart Ollama to free memory"
@@ -1654,18 +1596,34 @@ export function CodingAgentPanel() {
               </Button>
             )}
             {execLog.length > 0 && (
-              <Button size="sm" variant="ghost" className="h-6 text-xs gap-1 text-muted-foreground" onClick={() => {
-                useCodingAgentStore.getState().clearSession()
-                setActiveRun(null)
-                setRunning(false)
-                setAgentStatus('free')
-                setPendingPermission(null)
-              }}>
-                <IconTrash size={12} /> Clear
-              </Button>
+              <button
+                type="button"
+                onClick={() => {
+                  useCodingAgentStore.getState().clearSession()
+                  setActiveRun(null)
+                  setRunning(false)
+                  setAgentStatus('free')
+                  setPendingPermission(null)
+                }}
+                className="flex items-center gap-1 text-xs text-slate-400 hover:text-slate-200 px-2 py-1 hover:bg-[#161c27] rounded transition-colors cursor-pointer"
+              >
+                <IconTrash className="w-3.5 h-3.5" />
+                Clear
+              </button>
+            )}
+            {execLog.length > 0 && (
+              <button
+                type="button"
+                onClick={handleCopyLog}
+                className="p-1 text-slate-400 hover:text-slate-200 hover:bg-[#161c27] rounded cursor-pointer"
+                title="Copy Log"
+              >
+                <IconCopy className="w-3.5 h-3.5" />
+              </button>
             )}
           </div>
         </div>
+
         {lastFailureMessage && !isRunning && (
           <div className="bg-destructive/10 border-b border-destructive/20 px-4 py-2 flex items-center gap-2 shrink-0">
             <IconAlertCircle size={15} className="text-destructive shrink-0" />
@@ -1674,13 +1632,15 @@ export function CodingAgentPanel() {
             </p>
           </div>
         )}
+
+        {/* Execution log & conversation area */}
         <div className="relative flex-1 min-h-0">
           <StickToBottom className="absolute inset-0 overflow-y-hidden" initial="smooth" resize="smooth">
-            <StickToBottom.Content className="px-5 py-4 space-y-1.5">
+            <StickToBottom.Content className="px-5 py-4 space-y-3">
               {execLog.length === 0 && !isRunning && (
-                <p className="text-sm text-muted-foreground/50 text-center mt-16">
-                  {projectDir ? 'Describe what to build or fix below.' : 'Select a project folder to begin.'}
-                </p>
+                <div className="text-center mt-16 text-slate-500 text-sm">
+                  {projectDir ? 'Describe what to build or fix below.' : 'Select a project directory on the right to begin.'}
+                </div>
               )}
               {displayLog.map((line, i) => (
                 <LogLine
@@ -1693,7 +1653,7 @@ export function CodingAgentPanel() {
                 />
               ))}
               {isRunning && (
-                <div className="text-xs text-muted-foreground py-1">
+                <div className="text-xs text-slate-400 py-1">
                   <Shimmer duration={1.2}>Running…</Shimmer>
                 </div>
               )}
@@ -1713,22 +1673,22 @@ export function CodingAgentPanel() {
           </div>
         )}
 
-        {/* Input */}
-        <div className="shrink-0 px-4 pb-4 pt-3 border-t">
-          <div className="mb-2 flex items-center gap-2">
+        {/* Bottom Prompt Composer & Context Metrics */}
+        <div className="shrink-0 p-4 border-t border-[#1a212f] bg-[#0c1017]/95">
+          <div className="flex items-center justify-between text-[11px] mb-2 px-1 text-slate-400">
             <ContextBudgetIndicator
               characterCount={contextCharacterCount}
               contextEnabled={true}
             />
-            <div className="ml-auto flex items-center gap-2">
+            <div className="flex items-center gap-2">
               {conversationSummary && !loopEnabled && (
-                <span className="code-mode-summary-status">Summary saved</span>
+                <span className="text-[10px] font-mono text-emerald-400">Summary saved</span>
               )}
               <Button
                 type="button"
                 size="sm"
                 variant="ghost"
-                className="code-mode-summary-action h-7 gap-1 text-xs text-muted-foreground"
+                className="h-6 gap-1 text-xs text-sky-400 hover:text-sky-300 hover:bg-sky-950/30 transition-colors cursor-pointer"
                 onClick={handleSummarizeConversation}
                 disabled={isRunning || loopEnabled || !activeManualSession}
                 title="Summarize & continue"
@@ -1738,7 +1698,8 @@ export function CodingAgentPanel() {
               </Button>
             </div>
           </div>
-          <div className="relative flex items-end rounded-xl border bg-background shadow-sm">
+
+          <div className="relative bg-[#131722] border border-[#222b3d] focus-within:border-sky-500 rounded-xl shadow-lg transition-all">
             <textarea
               ref={textareaRef}
               value={draftPrompt}
@@ -1746,134 +1707,233 @@ export function CodingAgentPanel() {
               onKeyDown={handleKeyDown}
               placeholder={
                 isSendBlockedByOllamaError(agentBackend, ollamaError) ? 'Ollama required' :
-                projectDir ? 'Describe what to build or fix…' :
+                projectDir ? 'Describe what to build or fix...' :
                 'Select a project folder first'
               }
               disabled={!projectDir || isRunning || isSendBlockedByOllamaError(agentBackend, ollamaError)}
               dir={getTextDirection(draftPrompt)}
-              className="flex-1 resize-none bg-transparent px-4 py-3 text-sm outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50 min-h-[72px]"
-              rows={3}
-              style={{ minHeight: '72px', maxHeight: '200px', fieldSizing: 'content' } as React.CSSProperties}
+              className="w-full bg-transparent border-0 focus:ring-0 text-xs sm:text-sm text-slate-100 placeholder-slate-500 p-3 resize-none leading-relaxed outline-none"
+              rows={2}
+              style={{ minHeight: '60px', maxHeight: '180px', fieldSizing: 'content' } as React.CSSProperties}
             />
-            <div className="flex items-center gap-1 px-3 py-3">
-              {/* Loop scheduler button */}
-              {!isRunning && (
-                <div className="relative">
-                  <Button
-                    size="icon-sm" variant={loopEnabled ? 'default' : 'ghost'}
-                    className="rounded-full"
-                    onClick={() => setLoopPopoverOpen((v) => !v)}
-                    title="Schedule loop"
-                  >
-                    <IconClock size={14} />
-                  </Button>
-                  {loopPopoverOpen && (
-                    <div className="absolute bottom-full right-0 mb-2 w-52 rounded-xl border bg-background shadow-lg p-3 z-50 flex flex-col gap-2">
-                      <p className="text-xs font-semibold text-foreground">Loop scheduler</p>
-                      <label className="flex flex-col gap-0.5">
-                        <span className="text-xs text-muted-foreground">Times (total runs)</span>
-                        <input
-                          type="number" min={1} max={100}
-                          value={loopTimes}
-                          onChange={(e) => setLoopTimes(Math.max(1, Number(e.target.value)))}
-                          className="rounded-md border bg-muted px-2 py-1 text-sm outline-none w-full"
-                        />
-                      </label>
-                      <label className="flex flex-col gap-0.5">
-                        <span className="text-xs text-muted-foreground">Loop time (minutes)</span>
-                        <input
-                          type="number" min={1} max={1440}
-                          value={loopInterval}
-                          onChange={(e) => setLoopInterval(Math.max(1, Number(e.target.value)))}
-                          className="rounded-md border bg-muted px-2 py-1 text-sm outline-none w-full"
-                        />
-                      </label>
-                      <Button
-                        size="sm" className="w-full mt-1"
-                        onClick={() => { setLoopEnabled(true); setLoopCount(0); setLoopPopoverOpen(false) }}
-                      >
-                        Do it
-                      </Button>
-                      {loopEnabled && (
-                        <Button size="sm" variant="outline" className="w-full text-destructive border-destructive/30"
-                          onClick={() => { setLoopEnabled(false); setLoopCount(0); setLoopCountdown(null); clearTimeout(loopTimerRef.current!); clearInterval(loopTickRef.current!); setLoopPopoverOpen(false) }}>
-                          Cancel loop
-                        </Button>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
-              <button
-                type="button"
-                onClick={() => setLspEnabled((v) => !v)}
-                title={lspEnabled ? 'LSP Tools ON — click to disable' : 'LSP Tools OFF — click to enable'}
-                className={`h-7 px-2 text-[10px] rounded-md border cursor-pointer select-none font-medium ${lspEnabled ? 'bg-foreground text-background border-foreground hover:bg-foreground/80' : 'bg-background text-foreground border-border hover:bg-muted/40'}`}
-              >
-                {lspEnabled ? '✓ LSP' : '✗ LSP'}
-              </button>
-              {isRunning ? (
-                <Button size="icon-sm" variant="destructive" className="rounded-full" onClick={handleStop} title="Stop agent">
-                  <IconPlayerStop size={15} />
-                </Button>
-              ) : (
-                <Button
-                  size="icon-sm" className="rounded-full" onClick={handleSend}
-                  disabled={!projectDir || !draftPrompt.trim() || isSendBlockedByOllamaError(agentBackend, ollamaError)}
-                  title="Send"
+
+            <div className="flex items-center justify-between px-3 py-2 border-t border-[#1c2332] bg-[#111520] rounded-b-xl">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  className="p-1.5 text-slate-400 hover:text-slate-200 hover:bg-[#1a2130] rounded transition-colors cursor-pointer"
+                  title="Attach file"
+                  onClick={handleSelectFolder}
                 >
-                  <IconArrowUp size={15} />
-                </Button>
-              )}
+                  <IconPaperclip className="w-4 h-4" />
+                </button>
+                <span className="text-xs font-mono font-bold text-slate-400 p-1.5 cursor-pointer hover:text-slate-200">@</span>
+                <span className="h-3.5 w-px bg-slate-700 mx-0.5"></span>
+                <button
+                  type="button"
+                  onClick={() => setLspEnabled((v) => !v)}
+                  title={lspEnabled ? 'LSP Tools ON — click to disable' : 'LSP Tools OFF — click to enable'}
+                  className={cn(
+                    'px-2 py-0.5 text-[10px] font-mono rounded border flex items-center gap-1 transition-colors cursor-pointer',
+                    lspEnabled
+                      ? 'bg-sky-950/70 text-sky-300 border-sky-800/60'
+                      : 'bg-muted/40 text-slate-400 border-slate-700/60'
+                  )}
+                >
+                  <IconCircleCheck size={11} className={lspEnabled ? 'text-sky-400' : 'text-slate-500'} />
+                  LSP
+                </button>
+              </div>
+
+              <div className="flex items-center gap-2">
+                {!isRunning && (
+                  <div className="relative">
+                    <button
+                      type="button"
+                      className="p-1 text-slate-400 hover:text-slate-200 transition-colors cursor-pointer"
+                      onClick={() => setLoopPopoverOpen((v) => !v)}
+                      title="Execution Timeout / Loop Limit"
+                    >
+                      <IconClock className="w-4 h-4" />
+                    </button>
+                    {loopPopoverOpen && (
+                      <div className="absolute bottom-full right-0 mb-2 w-52 rounded-xl border border-[#273244] bg-[#10141d] shadow-lg p-3 z-50 flex flex-col gap-2">
+                        <p className="text-xs font-semibold text-slate-200">Loop scheduler</p>
+                        <label className="flex flex-col gap-0.5">
+                          <span className="text-xs text-slate-400">Times (total runs)</span>
+                          <input
+                            type="number" min={1} max={100}
+                            value={loopTimes}
+                            onChange={(e) => setLoopTimes(Math.max(1, Number(e.target.value)))}
+                            className="rounded-md border border-[#273244] bg-[#161c26] text-slate-200 px-2 py-1 text-sm outline-none w-full"
+                          />
+                        </label>
+                        <label className="flex flex-col gap-0.5">
+                          <span className="text-xs text-slate-400">Loop time (minutes)</span>
+                          <input
+                            type="number" min={1} max={1440}
+                            value={loopInterval}
+                            onChange={(e) => setLoopInterval(Math.max(1, Number(e.target.value)))}
+                            className="rounded-md border border-[#273244] bg-[#161c26] text-slate-200 px-2 py-1 text-sm outline-none w-full"
+                          />
+                        </label>
+                        <Button
+                          size="sm" className="w-full mt-1 bg-sky-500 hover:bg-sky-400 text-white"
+                          onClick={() => { setLoopEnabled(true); setLoopCount(0); setLoopPopoverOpen(false) }}
+                        >
+                          Do it
+                        </Button>
+                        {loopEnabled && (
+                          <Button size="sm" variant="outline" className="w-full text-destructive border-destructive/30"
+                            onClick={() => { setLoopEnabled(false); setLoopCount(0); setLoopCountdown(null); clearTimeout(loopTimerRef.current!); clearInterval(loopTickRef.current!); setLoopPopoverOpen(false) }}>
+                            Cancel loop
+                          </Button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {isRunning ? (
+                  <button
+                    type="button"
+                    onClick={handleStop}
+                    className="w-7 h-7 rounded-lg bg-rose-600 hover:bg-rose-500 text-white flex items-center justify-center shadow-md transition-transform hover:scale-105 active:scale-95 cursor-pointer"
+                    title="Stop agent"
+                  >
+                    <IconPlayerStop size={14} />
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={handleSend}
+                    disabled={!projectDir || !draftPrompt.trim() || isSendBlockedByOllamaError(agentBackend, ollamaError)}
+                    className="w-7 h-7 rounded-lg bg-sky-500 hover:bg-sky-400 disabled:opacity-40 disabled:cursor-not-allowed text-white flex items-center justify-center shadow-md transition-transform hover:scale-105 active:scale-95 glow-cyan cursor-pointer"
+                    title="Run Agent (Enter)"
+                  >
+                    <IconArrowUp size={15} />
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         </div>
       </div>
 
-      {/* ── Right: Pending diffs ─────────────────────────── */}
-      {pendingDiffs.filter((d) => d.status === 'pending').length > 0 && (
-        <aside className="w-96 shrink-0 border-l flex flex-col bg-muted/10">
-          <div className="px-3 py-2 border-b flex items-center gap-2">
-            <IconFileCode size={13} className="text-muted-foreground" />
-            <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-              Diffs ({pendingDiffs.filter((d) => d.status === 'pending').length} pending)
-            </span>
+      {/* ── Right Panel: Workspace, Backend, Model & Permissions ── */}
+      <aside className="w-72 shrink-0 border-l border-[#1a202c] bg-[#10141d] flex flex-col justify-between p-3 select-none text-xs overflow-y-auto">
+        <div className="space-y-4">
+          {/* Workspace Directory */}
+          <div>
+            <label className="block text-[10px] font-semibold uppercase tracking-wider text-slate-500 mb-1.5">
+              Workspace Directory
+            </label>
+            <button
+              type="button"
+              onClick={handleSelectFolder}
+              disabled={isRunning}
+              className="w-full flex items-center gap-2 px-2.5 py-2 bg-[#171c26] hover:bg-[#1c2330] border border-[#232a39] rounded-lg text-slate-300 transition-colors text-left cursor-pointer group"
+              title={projectDir ?? 'Select project'}
+            >
+              <IconFolderOpen className="w-4 h-4 text-sky-400 shrink-0 group-hover:scale-105 transition-transform" />
+              <span className="font-mono text-[11px] truncate text-slate-200 flex-1">
+                {projectDir || 'Select project...'}
+              </span>
+            </button>
           </div>
-          <div className="flex-1 overflow-y-auto p-2 space-y-2">
-            {pendingDiffs.filter((d) => d.status === 'pending').map((diff) => (
-              <div key={diff.id} className="rounded-lg border bg-background/60 p-2 text-xs">
-                <p className="font-mono text-[10px] text-muted-foreground truncate mb-1" title={diff.filePath}>
-                  {diff.filePath.split('/').slice(-2).join('/')}
-                </p>
-                {diff.search && (
-                  <div className="rounded bg-red-500/10 border border-red-500/20 px-1.5 py-1 mb-1 font-mono text-[10px] text-red-400 max-h-32 overflow-auto whitespace-pre-wrap">
-                    -{diff.search.split('\n').slice(0, 8).join('\n')}
-                  </div>
-                )}
-                <div className="rounded bg-green-500/10 border border-green-500/20 px-1.5 py-1 mb-2 font-mono text-[10px] text-green-400 max-h-32 overflow-auto whitespace-pre-wrap">
-                  +{diff.replace.split('\n').slice(0, 8).join('\n')}
-                </div>
-                <div className="flex gap-1">
-                  <Button
-                    size="sm" variant="outline"
-                    className="flex-1 h-6 text-[10px] text-green-600 border-green-500/30 hover:bg-green-500/10"
-                    onClick={() => handleApproveDiff(diff.id)}
-                  >
-                    Approve
-                  </Button>
-                  <Button
-                    size="sm" variant="outline"
-                    className="flex-1 h-6 text-[10px] text-destructive border-destructive/30 hover:bg-destructive/10"
-                    onClick={() => handleRejectDiff(diff.id)}
-                  >
-                    Reject
-                  </Button>
-                </div>
+
+          {/* Backend Provider Selector & Model Config */}
+          <ProviderModelPicker
+            backend={agentBackend}
+            onBackendChange={handleBackendChange}
+            selectedModel={agentBackend === 'cline-acp' ? selectedClineModel : selectedCodeModel}
+            onModelChange={(model) => {
+              if (agentBackend === 'cline-acp') {
+                handleClineModelChange(model)
+              } else {
+                handleCodeModelChange(model)
+              }
+            }}
+            disabled={isRunning}
+          >
+            {isOllamaHealthCheckRequired(agentBackend) && (
+              <HardwareSetup
+                ollamaUrl={agentConfig?.ollama_url ?? 'http://localhost:11434'}
+                selectedCodeModel={selectedCodeModel}
+                disabled={isRunning}
+                onCodeModelChange={handleCodeModelChange}
+              />
+            )}
+          </ProviderModelPicker>
+
+          {/* Auto-Approve Tools */}
+          {agentBackend === 'cline-acp' && (
+            <div className="flex items-center justify-between px-1 py-1">
+              <span className="text-xs text-slate-300 font-medium">Auto-Approve Tools</span>
+              <Switch
+                checked={autoApproveTools}
+                onCheckedChange={setAutoApproveTools}
+                disabled={isRunning}
+              />
+            </div>
+          )}
+
+          {/* Pending Diffs (if any) */}
+          {pendingDiffs.filter((d) => d.status === 'pending').length > 0 && (
+            <div className="pt-2 border-t border-[#1a202c]">
+              <div className="flex items-center gap-2 mb-2 text-slate-400 font-semibold text-[10px] uppercase tracking-wider">
+                <IconFileCode size={13} className="text-sky-400" />
+                <span>Diffs ({pendingDiffs.filter((d) => d.status === 'pending').length} pending)</span>
               </div>
-            ))}
-          </div>
-        </aside>
-      )}
+              <div className="space-y-2 max-h-48 overflow-y-auto">
+                {pendingDiffs.filter((d) => d.status === 'pending').map((diff) => (
+                  <div key={diff.id} className="rounded-lg border border-[#232c3d] bg-[#141822] p-2 text-xs">
+                    <p className="font-mono text-[10px] text-slate-400 truncate mb-1" title={diff.filePath}>
+                      {diff.filePath.split('/').slice(-2).join('/')}
+                    </p>
+                    {diff.search && (
+                      <div className="rounded bg-red-500/10 border border-red-500/20 px-1.5 py-1 mb-1 font-mono text-[10px] text-red-400 max-h-24 overflow-auto whitespace-pre-wrap">
+                        -{diff.search.split('\n').slice(0, 6).join('\n')}
+                      </div>
+                    )}
+                    <div className="rounded bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-1 mb-2 font-mono text-[10px] text-emerald-400 max-h-24 overflow-auto whitespace-pre-wrap">
+                      +{diff.replace.split('\n').slice(0, 6).join('\n')}
+                    </div>
+                    <div className="flex gap-1">
+                      <Button
+                        size="sm" variant="outline"
+                        className="flex-1 h-6 text-[10px] text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/10"
+                        onClick={() => handleApproveDiff(diff.id)}
+                      >
+                        Approve
+                      </Button>
+                      <Button
+                        size="sm" variant="outline"
+                        className="flex-1 h-6 text-[10px] text-destructive border-destructive/30 hover:bg-destructive/10"
+                        onClick={() => handleRejectDiff(diff.id)}
+                      >
+                        Reject
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Project File Tree (if project open) */}
+          {projectDir && (
+            <div className="pt-2 border-t border-[#1a202c]">
+              <label className="block text-[10px] font-semibold uppercase tracking-wider text-slate-500 mb-1.5">
+                Files
+              </label>
+              <div className="max-h-52 overflow-y-auto">
+                <ProjectFileTree projectDir={projectDir} />
+              </div>
+            </div>
+          )}
+        </div>
+      </aside>
 
       <Dialog open={Boolean(pendingEditIntent)} onOpenChange={(open) => {
         if (!open && pendingEditIntent) void handleEditIntentDecision(false)
@@ -2066,21 +2126,21 @@ export function LogLine({
       )
     case 'done':
       return (
-        <div className="flex items-center justify-center gap-2 my-4 text-muted-foreground/60 text-[11px] uppercase tracking-wider font-medium select-none">
-          <div className="h-px bg-border/40 flex-1" />
-          <span className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-muted/20 border border-border/30">
-            <IconCircleCheck size={13} className="text-green-500/80" />
-            {line.content}
-          </span>
-          <div className="h-px bg-border/40 flex-1" />
+        <div className="flex items-center justify-center my-4 select-none">
+          <div className="h-px bg-gradient-to-r from-transparent via-[#232c3d] to-transparent flex-1" />
+          <div className="px-3 py-1 bg-[#101a1c] border border-emerald-500/30 rounded-full flex items-center gap-1.5 text-[10px] font-mono text-emerald-400 shrink-0 mx-4 shadow-sm">
+            <IconCircleCheck size={12} className="text-emerald-400" />
+            AGENT FINISHED
+          </div>
+          <div className="h-px bg-gradient-to-r from-transparent via-[#232c3d] to-transparent flex-1" />
         </div>
       )
     case 'thinking':
       return (
-        <Reasoning className="my-2" defaultOpen={true}>
-          <ReasoningTrigger className="text-xs" />
+        <Reasoning className="my-2 bg-[#10151f] rounded-xl border border-[#1f283a] p-3 text-xs shadow-sm" defaultOpen={true}>
+          <ReasoningTrigger className="text-xs text-slate-300 font-medium hover:text-white transition-colors" />
           <ReasoningContent
-            className={`mt-2 text-xs${isRtlText(line.content) ? ' text-right' : ''}`}
+            className={`mt-2.5 pt-2.5 border-t border-[#18202d] text-slate-400 text-[11px] leading-relaxed pl-6 border-l-2 border-slate-700 ml-1 font-mono${isRtlText(line.content) ? ' text-right' : ''}`}
             dir={isRtlText(line.content) ? 'rtl' : undefined}
           >
             {line.content}
@@ -2095,39 +2155,41 @@ export function LogLine({
         const promptText = line.content.replace(/^>\s*/, '')
         const isRtl = isRtlText(promptText)
         return (
-          <div className="flex flex-col items-end w-full my-3">
-            <div className="bg-secondary relative text-foreground px-4 py-2.5 rounded-2xl max-w-[85%] shadow-sm text-sm break-words whitespace-pre-wrap select-text inline-block">
-              <div
+          <div className="flex flex-col items-end w-full my-3 group">
+            <div className="bg-secondary bg-[#1e2638] text-white px-4 py-2.5 rounded-2xl rounded-tr-none max-w-sm text-right text-sm shadow-md font-sans select-text inline-block">
+              <bdi
                 dir={getTextDirection(promptText)}
-                className={cn('select-text whitespace-pre-wrap', isRtl && 'text-right')}
+                className={cn('block select-text whitespace-pre-wrap', isRtl && 'text-right')}
+                style={{ unicodeBidi: 'isolate' }}
               >
                 {promptText}
+              </bdi>
+              <div className="flex items-center justify-start gap-2 mt-1.5 pt-1 text-[10px] text-slate-400 border-t border-slate-700/50">
+                <CopyButton text={promptText} />
+                {!isRunning && onEditPrompt && (
+                  <EditMessageDialog
+                    message={promptText}
+                    onSave={(newText) => onEditPrompt(line.timestamp, newText)}
+                    triggerElement={
+                      <Button
+                        variant="ghost"
+                        size="icon-xs"
+                        role="button"
+                        tabIndex={0}
+                        title="Edit prompt"
+                        className="hover:text-white"
+                      >
+                        <IconPencil size={13} />
+                      </Button>
+                    }
+                  />
+                )}
+                {!isRunning && onDeleteTurn && (
+                  <DeleteMessageDialog
+                    onDelete={() => onDeleteTurn(line.timestamp)}
+                  />
+                )}
               </div>
-            </div>
-            <div className="flex items-center justify-end gap-1 text-muted-foreground text-xs mt-1.5">
-              <CopyButton text={promptText} />
-              {!isRunning && onEditPrompt && (
-                <EditMessageDialog
-                  message={promptText}
-                  onSave={(newText) => onEditPrompt(line.timestamp, newText)}
-                  triggerElement={
-                    <Button
-                      variant="ghost"
-                      size="icon-xs"
-                      role="button"
-                      tabIndex={0}
-                      title="Edit prompt"
-                    >
-                      <IconPencil size={16} />
-                    </Button>
-                  }
-                />
-              )}
-              {!isRunning && onDeleteTurn && (
-                <DeleteMessageDialog
-                  onDelete={() => onDeleteTurn(line.timestamp)}
-                />
-              )}
             </div>
           </div>
         )
@@ -2143,9 +2205,17 @@ export function LogLine({
         trimmed.startsWith('Diff proposed for') ||
         trimmed.startsWith('Permission')
       ) {
+        const isModel = trimmed.startsWith('Model:')
+        const isLsp = trimmed.startsWith('LSP Tools:')
         return (
-          <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground/70 font-mono my-0.5 select-text">
-            <span className="px-2 py-0.5 rounded bg-muted/40 border border-border/30">
+          <div className="flex items-center gap-1.5 text-[11px] font-mono my-0.5 select-text">
+            <span
+              className={cn(
+                'px-2.5 py-1 rounded-lg bg-[#0e1219] border border-[#1b2230] inline-flex items-center gap-2',
+                isModel ? 'text-sky-400' : isLsp ? 'text-emerald-400 font-semibold' : 'text-slate-300'
+              )}
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" />
               {line.content}
             </span>
           </div>
@@ -2154,17 +2224,25 @@ export function LogLine({
 
       if (trimmed.startsWith('Starting agent')) {
         return (
-          <div className="flex items-center gap-2 text-xs text-muted-foreground/80 py-1 font-medium select-none">
-            <IconLoader2 size={13} className="animate-spin text-muted-foreground shrink-0" />
+          <div className="flex items-center gap-2 font-mono text-xs text-slate-300 py-1 select-none pl-1">
+            <IconLoader2 size={13} className="animate-spin text-sky-400 shrink-0" />
             <span>{line.content}</span>
           </div>
         )
       }
 
-      // Assistant Markdown response
+      // Assistant Markdown response with BiDi isolation
       return (
-        <div className="w-full my-2 text-foreground text-sm leading-relaxed select-text">
-          <RenderMarkdown content={line.content} isStreaming={isStreaming} />
+        <div
+          className={cn(
+            'w-full my-2 text-slate-100 text-sm leading-relaxed select-text',
+            isRtlText(line.content) && 'text-right pr-2'
+          )}
+          dir={isRtlText(line.content) ? 'rtl' : 'ltr'}
+        >
+          <bdi dir="auto" style={{ unicodeBidi: 'isolate', display: 'block' }}>
+            <RenderMarkdown content={line.content} isStreaming={isStreaming} />
+          </bdi>
         </div>
       )
     }

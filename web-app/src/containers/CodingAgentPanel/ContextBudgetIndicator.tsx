@@ -62,12 +62,16 @@ export function ContextBudgetIndicator({
           style={{ width: `${budget.percent}%` }}
         />
       </div>
-      <div className="context-budget-indicator__text">
-        <span className="context-budget-indicator__value">
-          Context {budget.percent}%
+      <div className="context-budget-indicator__text flex items-center gap-2">
+        <span className="context-budget-indicator__value text-slate-300 font-semibold text-xs">
+          Context <span className="text-sky-400">{budget.percent}%</span>
         </span>
-        <span className="context-budget-indicator__detail">
-          ~{budget.estimatedTokens.toLocaleString()} tokens - {getContextBudgetMessage(budget.level, contextEnabled)}
+        <span className="text-slate-500 font-mono text-[11px]">
+          ~{budget.estimatedTokens.toLocaleString()} tokens
+        </span>
+        <span className="text-slate-600">-</span>
+        <span className="context-budget-indicator__detail text-slate-400 text-[11px]">
+          {getContextBudgetMessage(budget.level, contextEnabled)}
         </span>
       </div>
     </div>

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import { IconRefresh, IconCpu, IconSparkles } from '@tabler/icons-react'
+import { IconRefresh, IconCpu, IconSparkles, IconBulb } from '@tabler/icons-react'
 import {
   CodingAgentBackend,
   CLINE_ACP_BACKEND,
@@ -147,37 +147,49 @@ export function ProviderModelPicker({
               </button>
             </div>
 
-            <div className="provider-model-picker__model-box">
+            <div className="provider-model-picker__model-box bg-[#151a24] border border-[#232c3d] rounded-xl p-3 space-y-2.5">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-bold tracking-wider uppercase text-slate-400">Target Model</span>
+                <span className="text-[9px] font-mono px-1.5 py-0.5 bg-emerald-950/80 text-emerald-400 border border-emerald-800/40 rounded">
+                  Connected
+                </span>
+              </div>
               <select
-                className="provider-model-picker__select w-full rounded-md border border-input bg-background px-2.5 py-1.5 text-xs font-medium shadow-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                className="provider-model-picker__select w-full rounded-lg border border-[#273244] bg-[#0e121a] px-3 py-2 text-xs font-medium text-slate-100 shadow-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-500 disabled:cursor-not-allowed disabled:opacity-50"
                 value={activeModel.id}
                 aria-label="Cline free model"
                 disabled={disabled}
                 onChange={(e) => onModelChange(e.target.value)}
               >
                 {models.map((m: ClineFreeModel) => (
-                  <option key={m.id} value={m.id}>
+                  <option key={m.id} value={m.id} className="bg-[#0e121a] text-slate-100">
                     {`${m.name} (${m.provider})${m.tag ? ' • ' + m.tag : ''}`}
                   </option>
                 ))}
               </select>
-              <div className="provider-model-picker__model-desc">{activeModel.description}</div>
-              <div className="provider-model-picker__capabilities">
+              <div className="provider-model-picker__model-desc text-[11px] text-slate-400 leading-relaxed">
+                {activeModel.description}
+              </div>
+              <div className="provider-model-picker__capabilities flex flex-wrap gap-1.5 pt-1">
                 {capabilities.tools ? (
-                  <span className="provider-model-picker__capability">
-                    <IconCpu size={9} stroke={1.5} /> Tools
+                  <span className="provider-model-picker__capability inline-flex items-center gap-1 text-[10px] font-mono bg-[#1d2535] text-slate-300 px-2 py-0.5 rounded border border-[#2e3b52]">
+                    <IconCpu size={10} className="text-sky-400" /> Tools
                   </span>
                 ) : null}
                 {capabilities.streaming ? (
-                  <span className="provider-model-picker__capability">
-                    <IconSparkles size={9} stroke={1.5} /> Streaming
+                  <span className="provider-model-picker__capability inline-flex items-center gap-1 text-[10px] font-mono bg-[#1d2535] text-slate-300 px-2 py-0.5 rounded border border-[#2e3b52]">
+                    <IconSparkles size={10} className="text-purple-400" /> Streaming
                   </span>
                 ) : null}
                 {capabilities.thinking ? (
-                  <span className="provider-model-picker__capability">Thinking</span>
+                  <span className="provider-model-picker__capability inline-flex items-center gap-1 text-[10px] font-mono bg-[#1d2535] text-slate-300 px-2 py-0.5 rounded border border-[#2e3b52]">
+                    <IconBulb size={10} className="text-amber-400" /> Thinking
+                  </span>
                 ) : null}
                 {capabilities.requestPermissions ? (
-                  <span className="provider-model-picker__capability">Permissions</span>
+                  <span className="provider-model-picker__capability inline-flex items-center gap-1 text-[10px] font-mono bg-[#1d2535] text-slate-300 px-2 py-0.5 rounded border border-[#2e3b52]">
+                    Permissions
+                  </span>
                 ) : null}
               </div>
             </div>
