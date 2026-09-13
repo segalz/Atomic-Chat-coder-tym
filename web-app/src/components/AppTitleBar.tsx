@@ -1,9 +1,13 @@
-import { Folder, Minus, Square, X } from 'lucide-react'
+import { Folder, Minus, PanelLeft, PanelRight, Square, X } from 'lucide-react'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { useCodingAgentStore } from '@/stores/coding-agent-store'
+import { useSidebarSafe } from '@/components/ui/sidebar'
 
 export const AppTitleBar = () => {
   const projectDir = useCodingAgentStore((s) => s.projectDir)
+  const isRightPanelOpen = useCodingAgentStore((s) => s.isRightPanelOpen)
+  const toggleRightPanel = useCodingAgentStore((s) => s.toggleRightPanel)
+  const sidebar = useSidebarSafe()
   const appWindow = getCurrentWebviewWindow()
 
   const handleMinimize = async () => {
@@ -36,6 +40,20 @@ export const AppTitleBar = () => {
       data-tauri-drag-region
     >
       <div className="flex items-center gap-2" data-tauri-drag-region="false">
+        {sidebar && (
+          <button
+            type="button"
+            onClick={() => sidebar.toggleSidebar()}
+            className={`p-1 rounded transition-colors cursor-pointer mr-0.5 ${
+              sidebar.open
+                ? 'text-sky-400 bg-sky-950/40 hover:bg-sky-900/50'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-[#161c27]'
+            }`}
+            title={sidebar.open ? 'Collapse Left Sidebar (Ctrl+B)' : 'Expand Left Sidebar (Ctrl+B)'}
+          >
+            <PanelLeft className="w-3.5 h-3.5" />
+          </button>
+        )}
         <img
           alt="JoinAIForce Logo"
           className="w-4 h-4 object-contain"
@@ -56,31 +74,46 @@ export const AppTitleBar = () => {
 
       <div className="flex-1 h-full" data-tauri-drag-region />
 
-      {IS_WINDOWS && (
-        <div className="flex items-center space-x-1 text-slate-400" data-tauri-drag-region="false">
-          <button
-            onClick={handleMinimize}
-            className="hover:text-slate-200 hover:bg-[#161c27] transition-colors p-1.5 rounded"
-            title="Minimize"
-          >
-            <Minus className="w-3 h-3" />
-          </button>
-          <button
-            onClick={handleMaximize}
-            className="hover:text-slate-200 hover:bg-[#161c27] transition-colors p-1.5 rounded"
-            title="Maximize"
-          >
-            <Square className="w-3 h-3" />
-          </button>
-          <button
-            onClick={handleClose}
-            className="hover:text-rose-400 hover:bg-rose-950/30 transition-colors p-1.5 rounded"
-            title="Close"
-          >
-            <X className="w-3 h-3" />
-          </button>
-        </div>
-      )}
+      <div className="flex items-center gap-1" data-tauri-drag-region="false">
+        <button
+          type="button"
+          onClick={toggleRightPanel}
+          className={`p-1.5 rounded transition-colors cursor-pointer mr-1 ${
+            isRightPanelOpen
+              ? 'text-sky-400 bg-sky-950/40 hover:bg-sky-900/50'
+              : 'text-slate-400 hover:text-slate-200 hover:bg-[#161c27]'
+          }`}
+          title={isRightPanelOpen ? 'Hide Inspector Panel' : 'Show Inspector Panel'}
+        >
+          <PanelRight className="w-3.5 h-3.5" />
+        </button>
+
+        {IS_WINDOWS && (
+          <div className="flex items-center space-x-1 text-slate-400">
+            <button
+              onClick={handleMinimize}
+              className="hover:text-slate-200 hover:bg-[#161c27] transition-colors p-1.5 rounded"
+              title="Minimize"
+            >
+              <Minus className="w-3 h-3" />
+            </button>
+            <button
+              onClick={handleMaximize}
+              className="hover:text-slate-200 hover:bg-[#161c27] transition-colors p-1.5 rounded"
+              title="Maximize"
+            >
+              <Square className="w-3 h-3" />
+            </button>
+            <button
+              onClick={handleClose}
+              className="hover:text-rose-400 hover:bg-rose-950/30 transition-colors p-1.5 rounded"
+              title="Close"
+            >
+              <X className="w-3 h-3" />
+            </button>
+          </div>
+        )}
+      </div>
     </header>
   )
 }

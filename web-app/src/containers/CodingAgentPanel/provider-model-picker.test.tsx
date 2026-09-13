@@ -306,4 +306,45 @@ describe('ProviderModelPicker (Stage 10)', () => {
     expect(screen.getByRole('button', { name: 'Refresh Cline CLI status' })).toBeDisabled()
     expect(screen.getByRole('combobox', { name: 'Cline free model' })).toBeDisabled()
   })
+
+  it('renders static display card when showSelector is false and updates on selectedModel change', async () => {
+    let renderResult: any
+    await act(async () => {
+      renderResult = render(
+        <ProviderModelPicker
+          backend="cline-acp"
+          onBackendChange={vi.fn()}
+          selectedModel={CLINE_FREE_MODELS[0].id}
+          onModelChange={vi.fn()}
+          showSelector={false}
+        />
+      )
+    })
+
+    // Verify combobox is not rendered
+    expect(screen.queryByRole('combobox', { name: 'Cline free model' })).not.toBeInTheDocument()
+
+    // Verify static display card is rendered with model name
+    const display = screen.getByTestId('target-model-display')
+    expect(display).toBeInTheDocument()
+    expect(display).toHaveTextContent(CLINE_FREE_MODELS[0].name)
+    expect(screen.getByText(CLINE_FREE_MODELS[0].description)).toBeInTheDocument()
+
+    // Rerender with different model
+    await act(async () => {
+      renderResult.rerender(
+        <ProviderModelPicker
+          backend="cline-acp"
+          onBackendChange={vi.fn()}
+          selectedModel={CLINE_FREE_MODELS[1].id}
+          onModelChange={vi.fn()}
+          showSelector={false}
+        />
+      )
+    })
+
+    expect(screen.getByTestId('target-model-display')).toHaveTextContent(CLINE_FREE_MODELS[1].name)
+    expect(screen.getByText(CLINE_FREE_MODELS[1].description)).toBeInTheDocument()
+  })
 })
+

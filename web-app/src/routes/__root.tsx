@@ -44,31 +44,29 @@ const AppLayout = () => {
   } = useLeftPanel()
 
   return (
-    <div className="bg-[#090b0e] text-[#cbd5e1] size-full h-screen w-screen overflow-hidden flex flex-col antialiased select-none">
+    <SidebarProvider
+      open={isLeftPanelOpen}
+      onOpenChange={setLeftPanel}
+      defaultWidth={sidebarWidth}
+      onWidthChange={setLeftPanelWidth}
+      className="bg-[#090b0e] text-[#cbd5e1] size-full h-screen w-screen overflow-hidden flex flex-col antialiased select-none"
+    >
       <AppTitleBar />
-      <div className="flex-1 min-h-0 flex overflow-hidden relative">
-        <SidebarProvider
-          open={isLeftPanelOpen}
-          onOpenChange={setLeftPanel}
-          defaultWidth={sidebarWidth}
-          onWidthChange={setLeftPanelWidth}
-          className="min-h-0 h-full flex-1"
-        >
-          <AnalyticProvider />
-          <KeyboardShortcutsProvider />
-          <DialogAppUpdater />
-          <BackendUpdater />
-          <LeftSidebar />
-          <SidebarInset className="min-h-0 h-full overflow-hidden">
-            <div className="bg-neutral-50 dark:bg-background size-full overflow-hidden">
-              <Outlet />
-            </div>
-          </SidebarInset>
+      <div className="flex-1 min-h-0 flex overflow-hidden relative w-full">
+        <AnalyticProvider />
+        <KeyboardShortcutsProvider />
+        <DialogAppUpdater />
+        <BackendUpdater />
+        <LeftSidebar />
+        <SidebarInset className="min-h-0 h-full overflow-hidden">
+          <div className="bg-neutral-50 dark:bg-background size-full overflow-hidden">
+            <Outlet />
+          </div>
+        </SidebarInset>
 
-          {showJanModelPrompt && <PromptJanModel />}
-        </SidebarProvider>
+        {showJanModelPrompt && <PromptJanModel />}
       </div>
-    </div>
+    </SidebarProvider>
   )
 }
 

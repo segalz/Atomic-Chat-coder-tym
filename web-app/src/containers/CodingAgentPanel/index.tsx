@@ -84,9 +84,18 @@ import {
   routeStopAgent,
   type ActiveRun,
 } from './backend-router'
-import { persistSelectedClineModel, resolveSelectedClineModel } from './backend-identity'
+import {
+  persistSelectedClineModel,
+  resolveSelectedClineModel,
+  getCachedClineModels,
+  fetchClineCliModels,
+  type ClineFreeModel,
+} from './backend-identity'
+import { PanelLeft, PanelRight } from 'lucide-react'
+import { useSidebarSafe } from '@/components/ui/sidebar'
 import { CodeModelSelector } from './CodeModelSelector'
 import { ProviderModelPicker } from './ProviderModelPicker'
+
 import { PermissionRequest } from './PermissionRequest'
 import './ConversationSummary.css'
 import { ContextBudgetIndicator } from './ContextBudgetIndicator'
@@ -510,6 +519,26 @@ export function CodingAgentPanel() {
   const [pendingPermission, setPendingPermission] = useState<AcpPermissionRequestPayload | null>(null)
   const pendingPermissionRef = useRef<AcpPermissionRequestPayload | null>(null)
   pendingPermissionRef.current = pendingPermission
+
+  const sidebar = useSidebarSafe()
+  const isRightPanelOpen = useCodingAgentStore((s) => s.isRightPanelOpen)
+  const toggleRightPanel = useCodingAgentStore((s) => s.toggleRightPanel)
+  const [clineModels, setClineModels] = useState<ClineFreeModel[]>(() => getCachedClineModels())
+  const [ollamaInstalledModels, setOllamaInstalledModels] = useState<string[]>([])
+
+  useEffect(() => {
+    if (agentBackend === 'cline-acp') {
+      void fetchClineCliModels().then((live) => {
+        if (live && live.length > 0) {
+          setClineModels(live)
+        }
+      })
+    } else if (agentBackend === 'direct-ollama') {
+      invoke<string[]>('list_ollama_models')
+        .then((m) => setOllamaInstalledModels(m || []))
+        .catch(() => {})
+    }
+  }, [agentBackend])
 
   useEffect(() => {
     invoke<CodingAgentConfig>('get_coding_agent_config')
@@ -1538,6 +1567,17 @@ export function CodingAgentPanel() {
         {/* Top Interactive Bar: LOG status, Memory Free, Clear, LSP Tools */}
         <div className="h-10 border-b border-[#1b212f] bg-[#0c1017]/90 px-4 flex items-center justify-between shrink-0">
           <div className="flex items-center gap-3">
+            {sidebar && !sidebar.open && (
+              <button
+                type="button"
+                onClick={() => sidebar.toggleSidebar()}
+                className="flex items-center gap-1.5 text-[11px] text-slate-400 hover:text-sky-300 hover:bg-[#161c27] px-2 py-1 rounded border border-[#232a39] transition-colors cursor-pointer mr-0.5"
+                title="Expand Left Sidebar (Ctrl+B)"
+              >
+                <PanelLeft className="w-3.5 h-3.5 text-sky-400" />
+                <span className="font-sans">Sidebar</span>
+              </button>
+            )}
             <div className="flex items-center gap-1.5 font-mono text-xs font-semibold text-slate-200">
               <IconTerminal2 className="w-3.5 h-3.5 text-sky-400" />
               LOG
@@ -1621,6 +1661,18 @@ export function CodingAgentPanel() {
                 <IconCopy className="w-3.5 h-3.5" />
               </button>
             )}
+            <button
+              type="button"
+              onClick={toggleRightPanel}
+              className={`p-1 rounded transition-colors cursor-pointer ml-1 ${
+                isRightPanelOpen
+                  ? 'text-sky-400 hover:bg-sky-950/40'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-[#161c27]'
+              }`}
+              title={isRightPanelOpen ? 'Hide Right Inspector Panel' : 'Show Right Inspector Panel'}
+            >
+              <PanelRight className="w-3.5 h-3.5" />
+            </button>
           </div>
         </div>
 
@@ -1743,6 +1795,36 @@ export function CodingAgentPanel() {
                   <IconCircleCheck size={11} className={lspEnabled ? 'text-sky-400' : 'text-slate-500'} />
                   LSP
                 </button>
+                <span className="h-3.5 w-px bg-slate-700 mx-0.5" />
+                {agentBackend === 'cline-acp' ? (
+                  <select
+                    aria-label="Select Model"
+                    disabled={isRunning}
+                    value={selectedClineModel}
+                    onChange={(e) => handleClineModelChange(e.target.value)}
+                    className="h-6 text-[11px] bg-[#10141d] hover:bg-[#161c28] text-slate-200 border border-[#273244] focus:border-sky-500 rounded-md px-2 py-0 outline-none font-medium cursor-pointer max-w-[210px] truncate"
+                  >
+                    {clineModels.map((m) => (
+                      <option key={m.id} value={m.id} className="bg-[#10141d] text-slate-100">
+                        {`${m.name} (${m.provider})${m.tag ? ' • ' + m.tag : ''}`}
+                      </option>
+                    ))}
+                  </select>
+                ) : ollamaInstalledModels.length > 0 ? (
+                  <select
+                    aria-label="Select Model"
+                    disabled={isRunning}
+                    value={selectedCodeModel}
+                    onChange={(e) => handleCodeModelChange(e.target.value)}
+                    className="h-6 text-[11px] bg-[#10141d] hover:bg-[#161c28] text-slate-200 border border-[#273244] focus:border-sky-500 rounded-md px-2 py-0 outline-none font-medium cursor-pointer max-w-[210px] truncate"
+                  >
+                    {ollamaInstalledModels.map((m) => (
+                      <option key={m} value={m} className="bg-[#10141d] text-slate-100">
+                        {m}
+                      </option>
+                    ))}
+                  </select>
+                ) : null}
               </div>
 
               <div className="flex items-center gap-2">
@@ -1821,31 +1903,33 @@ export function CodingAgentPanel() {
       </div>
 
       {/* ── Right Panel: Workspace, Backend, Model & Permissions ── */}
-      <aside className="w-72 shrink-0 border-l border-[#1a202c] bg-[#10141d] flex flex-col justify-between p-3 select-none text-xs overflow-y-auto">
-        <div className="space-y-4">
-          {/* Workspace Directory */}
-          <div>
-            <label className="block text-[10px] font-semibold uppercase tracking-wider text-slate-500 mb-1.5">
-              Workspace Directory
-            </label>
-            <button
-              type="button"
-              onClick={handleSelectFolder}
-              disabled={isRunning}
-              className="w-full flex items-center gap-2 px-2.5 py-2 bg-[#171c26] hover:bg-[#1c2330] border border-[#232a39] rounded-lg text-slate-300 transition-colors text-left cursor-pointer group"
-              title={projectDir ?? 'Select project'}
-            >
-              <IconFolderOpen className="w-4 h-4 text-sky-400 shrink-0 group-hover:scale-105 transition-transform" />
-              <span className="font-mono text-[11px] truncate text-slate-200 flex-1">
-                {projectDir || 'Select project...'}
-              </span>
-            </button>
-          </div>
+      {isRightPanelOpen && (
+        <aside className="w-72 shrink-0 border-l border-[#1a202c] bg-[#10141d] flex flex-col justify-between p-3 select-none text-xs overflow-y-auto">
+          <div className="space-y-4">
+            {/* Workspace Directory */}
+            <div>
+              <label className="block text-[10px] font-semibold uppercase tracking-wider text-slate-500 mb-1.5">
+                Workspace Directory
+              </label>
+              <button
+                type="button"
+                onClick={handleSelectFolder}
+                disabled={isRunning}
+                className="w-full flex items-center gap-2 px-2.5 py-2 bg-[#171c26] hover:bg-[#1c2330] border border-[#232a39] rounded-lg text-slate-300 transition-colors text-left cursor-pointer group"
+                title={projectDir ?? 'Select project'}
+              >
+                <IconFolderOpen className="w-4 h-4 text-sky-400 shrink-0 group-hover:scale-105 transition-transform" />
+                <span className="font-mono text-[11px] truncate text-slate-200 flex-1">
+                  {projectDir || 'Select project...'}
+                </span>
+              </button>
+            </div>
 
-          {/* Backend Provider Selector & Model Config */}
-          <ProviderModelPicker
-            backend={agentBackend}
-            onBackendChange={handleBackendChange}
+            {/* Backend Provider Selector & Model Config */}
+            <ProviderModelPicker
+              showSelector={false}
+              backend={agentBackend}
+              onBackendChange={handleBackendChange}
             selectedModel={agentBackend === 'cline-acp' ? selectedClineModel : selectedCodeModel}
             onModelChange={(model) => {
               if (agentBackend === 'cline-acp') {
@@ -1934,6 +2018,7 @@ export function CodingAgentPanel() {
           )}
         </div>
       </aside>
+      )}
 
       <Dialog open={Boolean(pendingEditIntent)} onOpenChange={(open) => {
         if (!open && pendingEditIntent) void handleEditIntentDecision(false)

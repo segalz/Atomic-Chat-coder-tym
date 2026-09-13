@@ -1,8 +1,6 @@
-import { DownloadManagement } from '@/containers/DownloadManegement'
 import { NavChats } from './NavChats'
 import { NavMain } from './NavMain'
 import { NavProjects } from './NavProjects'
-import { useLeftPanel } from '@/hooks/useLeftPanel'
 import { Link } from '@tanstack/react-router'
 import { route } from '@/constants/routes'
 import { Settings } from 'lucide-react'
@@ -17,12 +15,11 @@ import {
 } from '@/components/ui/sidebar'
 
 export function LeftSidebar() {
-  const { open: isLeftPanelOpen } = useLeftPanel()
   return (
     <Sidebar
       variant="sidebar"
       collapsible="offcanvas"
-      className="w-64 bg-[#0d1017] border-r border-[#1a202c] select-none"
+      className="bg-[#0d1017] border-r border-[#1a202c] select-none"
     >
       <SidebarHeader className="p-3 border-b border-[#171d27]">
         <div className="flex items-center justify-between mb-3 px-1">
@@ -44,7 +41,6 @@ export function LeftSidebar() {
             </div>
           </div>
           <div className="flex items-center gap-1 text-slate-500">
-            {isLeftPanelOpen && <DownloadManagement />}
             <SidebarTrigger className="text-slate-400 hover:text-slate-200 hover:bg-[#161c27] rounded transition-colors size-7" />
           </div>
         </div>

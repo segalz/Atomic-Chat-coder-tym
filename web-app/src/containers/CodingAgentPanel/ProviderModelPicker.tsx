@@ -26,6 +26,7 @@ export interface ProviderModelPickerProps {
   selectedModel: string
   onModelChange: (model: string) => void
   disabled?: boolean
+  showSelector?: boolean
   children?: React.ReactNode
 }
 
@@ -35,6 +36,7 @@ export function ProviderModelPicker({
   selectedModel,
   onModelChange,
   disabled = false,
+  showSelector = true,
   children,
 }: ProviderModelPickerProps) {
   const [status, setStatus] = useState<ClineInstallStatus | null>(null)
@@ -154,19 +156,31 @@ export function ProviderModelPicker({
                   Connected
                 </span>
               </div>
-              <select
-                className="provider-model-picker__select w-full rounded-lg border border-[#273244] bg-[#0e121a] px-3 py-2 text-xs font-medium text-slate-100 shadow-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-500 disabled:cursor-not-allowed disabled:opacity-50"
-                value={activeModel.id}
-                aria-label="Cline free model"
-                disabled={disabled}
-                onChange={(e) => onModelChange(e.target.value)}
-              >
-                {models.map((m: ClineFreeModel) => (
-                  <option key={m.id} value={m.id} className="bg-[#0e121a] text-slate-100">
-                    {`${m.name} (${m.provider})${m.tag ? ' • ' + m.tag : ''}`}
-                  </option>
-                ))}
-              </select>
+              {showSelector ? (
+                <select
+                  className="provider-model-picker__select w-full rounded-lg border border-[#273244] bg-[#0e121a] px-3 py-2 text-xs font-medium text-slate-100 shadow-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-500 disabled:cursor-not-allowed disabled:opacity-50"
+                  value={activeModel.id}
+                  aria-label="Cline free model"
+                  disabled={disabled}
+                  onChange={(e) => onModelChange(e.target.value)}
+                >
+                  {models.map((m: ClineFreeModel) => (
+                    <option key={m.id} value={m.id} className="bg-[#0e121a] text-slate-100">
+                      {`${m.name} (${m.provider})${m.tag ? ' • ' + m.tag : ''}`}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <div
+                  className="w-full rounded-lg border border-[#273244] bg-[#0e121a] px-3 py-2 text-xs font-medium text-slate-100 shadow-xs flex items-center justify-between"
+                  data-testid="target-model-display"
+                >
+                  <div className="flex items-center gap-2 truncate">
+                    <span className="w-2 h-2 rounded-full bg-sky-400 shrink-0" />
+                    <span className="truncate">{`${activeModel.name} (${activeModel.provider})${activeModel.tag ? ' • ' + activeModel.tag : ''}`}</span>
+                  </div>
+                </div>
+              )}
               <div className="provider-model-picker__model-desc text-[11px] text-slate-400 leading-relaxed">
                 {activeModel.description}
               </div>

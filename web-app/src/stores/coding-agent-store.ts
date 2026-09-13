@@ -64,6 +64,7 @@ interface CodingAgentState {
   sessions: CodingSession[]
   activeSessionId: string | null
   autoApproveTools: boolean
+  isRightPanelOpen: boolean
 
   // Runtime
   isRunning: boolean
@@ -81,6 +82,8 @@ interface CodingAgentState {
   setRunning: (v: boolean) => void
   setShowFree: (v: boolean) => void
   setAutoApproveTools: (enabled: boolean) => void
+  setRightPanelOpen: (open: boolean) => void
+  toggleRightPanel: () => void
   appendPlanText: (text: string) => void
   appendLog: (line: ExecLogLine) => void
   addDiff: (diff: PendingDiff) => void
@@ -301,6 +304,7 @@ export const useCodingAgentStore = create<CodingAgentState>()(
       sessions: [],
       activeSessionId: null,
       autoApproveTools: false,
+      isRightPanelOpen: true,
       isRunning: false,
       planText: '',
       execLog: [],
@@ -315,6 +319,8 @@ export const useCodingAgentStore = create<CodingAgentState>()(
       setRunning: (v) => set(v ? { isRunning: true, showFree: false } : { isRunning: false }),
       setShowFree: (v) => set({ showFree: v }),
       setAutoApproveTools: (enabled) => set({ autoApproveTools: enabled }),
+      setRightPanelOpen: (open) => set({ isRightPanelOpen: open }),
+      toggleRightPanel: () => set((s) => ({ isRightPanelOpen: !s.isRightPanelOpen })),
       appendPlanText: (text) =>
         set((s) => {
           const planText = s.planText + text
@@ -620,6 +626,7 @@ export const useCodingAgentStore = create<CodingAgentState>()(
         pendingDiffs: s.pendingDiffs,
         diagnostics: s.diagnostics,
         autoApproveTools: s.autoApproveTools,
+        isRightPanelOpen: s.isRightPanelOpen,
       }),
       onRehydrateStorage: () => (state) => {
         if (state) {
